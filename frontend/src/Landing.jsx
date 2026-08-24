@@ -1,105 +1,57 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Menu, X } from "lucide-react";
-import { MODULES, TOTALS } from "./moduleManifest";
 import { BrandMark, ThemeToggle } from "./theme";
 
-// ── Design tokens ────────────────────────────────────────────────────
-// Continuous with the product shell so the CTA does not feel like a
-// different company. Display face is a condensed grotesque, data face is
-// a terminal mono, which is what the product actually looks like inside.
+/* ── Sales Nebula marketing surface ───────────────────────────────────
+   Product-first CRM. Poppins throughout. Hero leads with a short phrase,
+   not the full product name. */
+
 const C = {
   void: "var(--sn-void)",
   panel: "var(--sn-panel)",
   raised: "var(--sn-raised)",
   rule: "var(--sn-rule)",
-  ruleSoft: "var(--sn-rule-soft)",
   amber: "var(--sn-amber)",
   cream: "var(--sn-cream)",
   slate: "var(--sn-slate)",
   dim: "var(--sn-dim)",
   green: "var(--sn-green)",
-  blue: "var(--sn-blue)",
-  purple: "var(--sn-purple)",
-  red: "var(--sn-red)",
+  body: "var(--sn-body)",
+  cta: "var(--sn-cta-text)",
 };
 
-const display = '"IBM Plex Sans Condensed", "Arial Narrow", sans-serif';
-const mono = '"IBM Plex Mono", ui-monospace, monospace';
+const display = '"Poppins", system-ui, sans-serif';
+const body = '"Poppins", system-ui, sans-serif';
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
-  window.matchMedia &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
-// Reveal on scroll, once, and skip entirely when motion is reduced
-function useReveal() {
+function useReveal(offset = "-12%") {
   const ref = useRef(null);
   const [shown, setShown] = useState(prefersReducedMotion());
   useEffect(() => {
     if (shown || !ref.current) return;
     const io = new IntersectionObserver(
-      ([e]) => { if (e.isIntersecting) { setShown(true); io.disconnect(); } },
-      { rootMargin: "-40px" }
+      ([e]) => {
+        if (e.isIntersecting) {
+          setShown(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: offset }
     );
     io.observe(ref.current);
     return () => io.disconnect();
-  }, [shown]);
+  }, [shown, offset]);
   return [ref, shown];
 }
 
-// ── Primitives ───────────────────────────────────────────────────────
-
-function Eyebrow({ children, color = C.amber }) {
-  return (
-    <div style={{
-      fontFamily: mono, fontSize: 11, letterSpacing: "0.18em",
-      textTransform: "uppercase", color, marginBottom: 14,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function Cta({ children, onClick, href, variant = "primary", full }) {
-  const base = {
-    display: "inline-flex", alignItems: "center", justifyContent: "center",
-    gap: 8, padding: "13px 24px", borderRadius: 8,
-    fontSize: 14, fontWeight: 600, fontFamily: "Inter, sans-serif",
-    cursor: "pointer", transition: "all 140ms ease", textDecoration: "none",
-    border: "1px solid transparent", width: full ? "100%" : "auto",
-  };
-  const styles = variant === "primary"
-    ? { ...base, background: C.amber, color: "var(--sn-cta-text)" }
-    : { ...base, background: "transparent", color: C.cream, borderColor: C.rule };
-
-  const Tag = href ? "a" : "button";
-  return (
-    <Tag
-      href={href} onClick={onClick} style={styles}
-      onMouseEnter={e => {
-        e.currentTarget.style.transform = "translateY(-1px)";
-        if (variant !== "primary") e.currentTarget.style.borderColor = C.amber;
-      }}
-      onMouseLeave={e => {
-        e.currentTarget.style.transform = "translateY(0)";
-        if (variant !== "primary") e.currentTarget.style.borderColor = C.rule;
-      }}
-    >
-      {children}
-    </Tag>
-  );
-}
-
-function Section({ children, id, style }) {
-  return (
-    <section id={id} style={{
-      maxWidth: 1180, margin: "0 auto",
-      padding: "clamp(64px, 9vw, 120px) clamp(20px, 5vw, 48px)",
-      ...style,
-    }}>
-      {children}
-    </section>
-  );
+function scrollTo(id) {
+  document.getElementById(id)?.scrollIntoView({
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
+    block: "start",
+  });
 }
 
 // ── Header ───────────────────────────────────────────────────────────
@@ -109,7 +61,7 @@ function Header({ go }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setSolid(window.scrollY > 24);
+    const onScroll = () => setSolid(window.scrollY > 16);
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -117,47 +69,109 @@ function Header({ go }) {
 
   useEffect(() => {
     document.body.style.overflow = menuOpen ? "hidden" : "";
-    return () => { document.body.style.overflow = ""; };
+    return () => {
+      document.body.style.overflow = "";
+    };
   }, [menuOpen]);
 
-  const links = [["Modules", "#modules"], ["How it runs", "#deploy"], ["Access", "#access"]];
-  const closeMenu = () => setMenuOpen(false);
+  const links = [
+    ["Product", "#product"],
+    ["Workflow", "#workflow"],
+    ["Access", "#access"],
+  ];
 
   return (
-    <header style={{
-      position: "sticky", top: 0, zIndex: 50,
-      background: solid || menuOpen ? "var(--sn-header-bg)" : "transparent",
-      backdropFilter: solid || menuOpen ? "blur(12px)" : "none",
-      borderBottom: `1px solid ${solid || menuOpen ? C.rule : "transparent"}`,
-      transition: "background 200ms ease, border-color 200ms ease",
-    }}>
-      <div style={{
-        maxWidth: 1180, margin: "0 auto",
-        padding: "12px clamp(16px, 4vw, 48px)",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 12,
-      }}>
-        <a href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", minWidth: 0 }}>
-          <BrandMark size={32} />
-          <span style={{
-            fontFamily: display, fontSize: "clamp(15px, 3vw, 19px)", fontWeight: 700,
-            letterSpacing: "0.01em", color: C.cream, whiteSpace: "nowrap",
-          }}>SALES NEBULA</span>
+    <header
+      style={{
+        position: "sticky",
+        top: 0,
+        zIndex: 50,
+        background: solid || menuOpen ? "var(--sn-header-bg)" : "transparent",
+        backdropFilter: solid || menuOpen ? "blur(12px)" : "none",
+        borderBottom: `1px solid ${solid || menuOpen ? "var(--sn-rule)" : "transparent"}`,
+        transition: "background 200ms ease, border-color 200ms ease",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1180,
+          margin: "0 auto",
+          padding: "14px clamp(18px, 4vw, 40px)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+        }}
+      >
+        <a href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
+          <BrandMark size={34} />
+          <span
+            style={{
+              fontFamily: display,
+              fontSize: 18,
+              fontWeight: 700,
+              letterSpacing: "-0.02em",
+              color: C.cream,
+            }}
+          >
+            Sales Nebula
+          </span>
         </a>
 
-        <nav className="sn-desktop-only" style={{ display: "flex", alignItems: "center", gap: 22 }}>
+        <nav className="sn-desktop-only" style={{ display: "flex", alignItems: "center", gap: 28 }}>
           {links.map(([label, href]) => (
-            <a key={href} href={href} className="nav-link" style={{
-              fontSize: 13, color: C.slate, textDecoration: "none",
-              fontFamily: "Inter, sans-serif", transition: "color 140ms",
-            }}>{label}</a>
+            <a
+              key={href}
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                scrollTo(href.slice(1));
+              }}
+              style={{
+                fontFamily: body,
+                fontSize: 14,
+                fontWeight: 500,
+                color: C.slate,
+                textDecoration: "none",
+              }}
+            >
+              {label}
+            </a>
           ))}
           <ThemeToggle compact />
-          <button onClick={() => go("/login")} style={{
-            fontSize: 13, fontWeight: 600, color: C.cream, background: "transparent",
-            border: `1px solid ${C.rule}`, borderRadius: 7, padding: "8px 16px",
-            cursor: "pointer", fontFamily: "Inter, sans-serif",
-          }}>Sign in</button>
+          <button
+            type="button"
+            onClick={() => go("/login")}
+            style={{
+              fontFamily: body,
+              fontSize: 14,
+              fontWeight: 600,
+              color: C.cream,
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              padding: "8px 4px",
+            }}
+          >
+            Log in
+          </button>
+          <button
+            type="button"
+            onClick={() => scrollTo("access")}
+            style={{
+              fontFamily: body,
+              fontSize: 14,
+              fontWeight: 700,
+              color: C.cta,
+              background: C.amber,
+              border: "none",
+              borderRadius: 8,
+              padding: "10px 16px",
+              cursor: "pointer",
+            }}
+          >
+            Request access
+          </button>
         </nav>
 
         <div className="sn-mobile-only" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -165,12 +179,18 @@ function Header({ go }) {
           <button
             type="button"
             aria-label={menuOpen ? "Close menu" : "Open menu"}
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen(open => !open)}
+            onClick={() => setMenuOpen((o) => !o)}
             style={{
-              width: 40, height: 40, borderRadius: 8, border: `1px solid ${C.rule}`,
-              background: C.raised, color: C.cream, display: "inline-flex",
-              alignItems: "center", justifyContent: "center", cursor: "pointer",
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              border: `1px solid ${C.rule}`,
+              background: C.raised,
+              color: C.cream,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
             }}
           >
             {menuOpen ? <X size={18} /> : <Menu size={18} />}
@@ -179,411 +199,506 @@ function Header({ go }) {
       </div>
 
       {menuOpen && (
-        <div className="sn-mobile-only" style={{
-          borderTop: `1px solid ${C.rule}`,
-          padding: "12px clamp(16px, 4vw, 48px) 20px",
-          background: "var(--sn-header-bg)",
-        }}>
-          <nav style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {links.map(([label, href]) => (
-              <a key={href} href={href} onClick={closeMenu} style={{
-                fontSize: 16, color: C.cream, textDecoration: "none",
-                fontFamily: "Inter, sans-serif", padding: "12px 4px",
-              }}>{label}</a>
-            ))}
-            <button onClick={() => { closeMenu(); go("/login"); }} style={{
-              marginTop: 8, fontSize: 15, fontWeight: 600, color: "var(--sn-cta-text)",
-              background: C.amber, border: "none", borderRadius: 8, padding: "12px 16px",
-              cursor: "pointer", fontFamily: "Inter, sans-serif",
-            }}>Sign in</button>
-          </nav>
+        <div
+          className="sn-mobile-only"
+          style={{
+            borderTop: `1px solid ${C.rule}`,
+            padding: "12px 20px 20px",
+            background: "var(--sn-header-bg)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {links.map(([label, href]) => (
+            <a
+              key={href}
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                setMenuOpen(false);
+                scrollTo(href.slice(1));
+              }}
+              style={{
+                fontFamily: body,
+                fontSize: 16,
+                color: C.cream,
+                textDecoration: "none",
+                padding: "12px 4px",
+              }}
+            >
+              {label}
+            </a>
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              go("/login");
+            }}
+            style={{
+              marginTop: 8,
+              fontFamily: body,
+              fontSize: 15,
+              fontWeight: 600,
+              color: C.cta,
+              background: C.amber,
+              border: "none",
+              borderRadius: 8,
+              padding: "12px 16px",
+              cursor: "pointer",
+            }}
+          >
+            Log in
+          </button>
         </div>
       )}
     </header>
   );
 }
 
-// ── Hero ─────────────────────────────────────────────────────────────
+// ── Sales Nebula portal snapshot ─────────────────────────────────────
 
-function Hero({ go }) {
-  return (
-    <Section style={{ paddingTop: "clamp(48px, 7vw, 88px)", paddingBottom: "clamp(40px, 5vw, 64px)" }}>
-      {/* Ticker strip: the product's actual dimensions, stated up front */}
-      <div style={{
-        display: "flex", flexWrap: "wrap", gap: 0,
-        border: `1px solid ${C.rule}`, borderRadius: 8,
-        overflow: "hidden", marginBottom: 44,
-      }}>
-        {[
-          [TOTALS.endpoints.toLocaleString(), "API endpoints"],
-          [TOTALS.modules, "modules"],
-          [TOTALS.models, "data models"],
-          ["0", "per-seat fees"],
-        ].map(([value, label], i) => (
-          <div key={label} style={{
-            flex: "1 1 140px", padding: "14px 18px",
-            borderLeft: i === 0 ? "none" : `1px solid ${C.rule}`,
-            background: C.panel,
-          }}>
-            <div style={{
-              fontFamily: mono, fontSize: 21, fontWeight: 600,
-              color: i === 3 ? C.green : C.amber, lineHeight: 1.1,
-            }}>{value}</div>
-            <div style={{
-              fontFamily: mono, fontSize: 10, letterSpacing: "0.14em",
-              textTransform: "uppercase", color: C.dim, marginTop: 4,
-            }}>{label}</div>
-          </div>
-        ))}
-      </div>
-
-      <h1 style={{
-        fontFamily: display, fontWeight: 700,
-        fontSize: "clamp(34px, 8vw, 104px)", lineHeight: 0.94,
-        letterSpacing: "-0.02em", color: C.cream, margin: 0,
-        textTransform: "uppercase",
-      }}>
-        Manage every<br />customer.<br />
-        <span style={{ color: C.amber }}>Close more deals.</span>
-      </h1>
-
-      <div style={{
-        display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
-        gap: 40, marginTop: 40, alignItems: "start",
-      }}>
-        <div>
-          <p style={{
-            fontSize: 17, lineHeight: 1.65, color: C.slate,
-            fontFamily: "Inter, sans-serif", margin: "0 0 28px",
-          }}>
-            Bring leads, contacts, accounts, deals, quotes, service, and
-            reporting into one CRM. Give your team a clear view of every
-            customer and every opportunity from first contact to closed deal.
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-            <Cta onClick={() => document.getElementById("access")?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" })}>
-              Request access
-            </Cta>
-            <Cta variant="ghost" onClick={() => document.getElementById("modules")?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" })}>
-              See every module
-            </Cta>
-          </div>
-        </div>
-
-        {/* A real request against the real API, not a stock screenshot */}
-        <div style={{
-          border: `1px solid ${C.rule}`, borderRadius: 10,
-          background: C.panel, overflow: "hidden",
-        }}>
-          <div style={{
-            display: "flex", alignItems: "center", gap: 7,
-            padding: "9px 14px", borderBottom: `1px solid ${C.rule}`,
-          }}>
-            {[C.red, C.amber, C.green].map(c => (
-              <span key={c} style={{ width: 9, height: 9, borderRadius: "50%", background: c, opacity: 0.65 }} />
-            ))}
-            <span style={{ fontFamily: mono, fontSize: 10, color: C.dim, marginLeft: 6 }}>
-              GET /api/projects/:id/gantt
-            </span>
-          </div>
-          <pre style={{
-            margin: 0, padding: "14px 16px", fontFamily: mono,
-            fontSize: 11.5, lineHeight: 1.75, color: C.slate,
-            overflowX: "auto",
-          }}>
-{`{
-  `}<span style={{ color: C.blue }}>"criticalPath"</span>{`: [`}<span style={{ color: C.green }}>"discovery"</span>{`, `}<span style={{ color: C.green }}>"build"</span>{`],
-  `}<span style={{ color: C.blue }}>"projectDuration"</span>{`: `}<span style={{ color: C.amber }}>9</span>{`,
-  `}<span style={{ color: C.blue }}>"rows"</span>{`: [
+function PortalSnapshot() {
+  const stages = [
     {
-      `}<span style={{ color: C.blue }}>"wbs"</span>{`: `}<span style={{ color: C.green }}>"1.2"</span>{`,
-      `}<span style={{ color: C.blue }}>"totalFloat"</span>{`: `}<span style={{ color: C.amber }}>0</span>{`,
-      `}<span style={{ color: C.blue }}>"isCritical"</span>{`: `}<span style={{ color: C.purple }}>true</span>{`
-    }
-  ]
-}`}
-          </pre>
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-// ── Signature: the module matrix ─────────────────────────────────────
-
-const MODULE_NOTES = {
-  calendar: "RFC 5545 recurrence, resource booking, iCal feeds",
-  projects: "Critical path method, WBS, Gantt, time tracking",
-  securityGroups: "Row-level access under the RBAC layer",
-  studio: "Add fields at runtime without a migration",
-  sla: "Business-hours clocks that skip nights and holidays",
-  maps: "Territory polygons, proximity search, route ordering",
-  searchIndex: "Inverted index with BM25, not a table scan",
-  inboundEmail: "IMAP ingest, reply threading, auto-reply filtering",
-  pdfTemplates: "Merge fields, loops, conditionals",
-  prospects: "Pre-lead records, scoring, target lists",
-  cpq: "Configure, price, quote",
-  advancedCpq: "Tiered pricing, bundles, approval thresholds",
-  forecasts: "Pipeline roll-up by period and owner",
-  territories: "Assignment rules and hierarchy",
-  workflows: "Trigger, condition, action",
-  flowBuilder: "Visual automation without code",
-  omnichannel: "Routing across chat, email, and voice",
-  fieldService: "Work orders and dispatch",
-  knowledge: "Article authoring and versioning",
-  bugs: "Defect tracking with release notes",
-  subscriptions: "Recurring billing schedules",
-  revenueRecognition: "Schedules and deferred revenue",
-  entitlements: "Support contracts and coverage",
-  partners: "Channel accounts and deal registration",
-  cdp: "Unified customer profiles",
-  aiAgents: "Task-scoped assistants over your own data",
-};
-
-function ModuleMatrix() {
-  const [ref, shown] = useReveal();
-  const [active, setActive] = useState(null);
-  const max = MODULES[0][1];
-
-  return (
-    <Section id="modules" style={{ paddingTop: 40 }}>
-      <div style={{ marginBottom: 32 }}>
-        <Eyebrow>The whole surface</Eyebrow>
-        <h2 style={{
-          fontFamily: display, fontWeight: 700, textTransform: "uppercase",
-          fontSize: "clamp(30px, 5vw, 54px)", lineHeight: 1, letterSpacing: "-0.015em",
-          color: C.cream, margin: "0 0 16px", maxWidth: 760,
-        }}>
-          Every module, with its real endpoint count
-        </h2>
-        <p style={{
-          fontSize: 15.5, lineHeight: 1.65, color: C.slate,
-          fontFamily: "Inter, sans-serif", maxWidth: 640, margin: 0,
-        }}>
-          Not a roadmap. This grid is generated from the route table at build
-          time, so what you see is what ships. Hover a cell to read what it does.
-        </p>
-      </div>
-
-      <div ref={ref} style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 110px), 1fr))",
-        gap: 1, background: C.ruleSoft,
-        border: `1px solid ${C.rule}`, borderRadius: 10, overflow: "hidden",
-      }}>
-        {MODULES.map(([name, count], i) => {
-          const weight = count / max;
-          return (
-            <div
-              key={name}
-              onMouseEnter={() => setActive(name)}
-              onMouseLeave={() => setActive(null)}
-              style={{
-                background: C.panel, padding: "11px 12px 10px",
-                position: "relative", cursor: "default",
-                opacity: shown ? 1 : 0,
-                transform: shown ? "none" : "translateY(6px)",
-                transition: prefersReducedMotion()
-                  ? "none"
-                  : `opacity 320ms ease ${Math.min(i * 7, 700)}ms, transform 320ms ease ${Math.min(i * 7, 700)}ms, background 120ms`,
-              }}
-              onFocus={() => setActive(name)}
-              tabIndex={0}
-            >
-              {/* Weight bar encodes endpoint count, so the grid reads as data */}
-              <div style={{
-                position: "absolute", left: 0, top: 0, bottom: 0,
-                width: 2, background: C.amber, opacity: 0.18 + weight * 0.82,
-              }} />
-              <div style={{
-                fontFamily: mono, fontSize: 11, color: C.cream,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              }}>{name}</div>
-              <div style={{
-                fontFamily: mono, fontSize: 10, color: C.dim, marginTop: 3,
-              }}>{count} ep</div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{
-        marginTop: 14, minHeight: 22,
-        fontFamily: mono, fontSize: 12, color: active ? C.amber : C.dim,
-        transition: "color 140ms",
-      }}>
-        {active
-          ? `${active} — ${MODULE_NOTES[active] || "Full CRUD, search, and reporting"}`
-          : `${TOTALS.modules} modules · ${TOTALS.endpoints.toLocaleString()} endpoints · counted at build time`}
-      </div>
-    </Section>
-  );
-}
-
-// ── Claims a skeptic would test ──────────────────────────────────────
-
-const CLAIMS = [
-  {
-    label: "Ownership",
-    head: "The database is yours",
-    body: "Postgres, a readable Prisma schema, and a documented REST API. Point any BI tool at it. Fork it. There is no proprietary storage layer and no export queue to wait in.",
-    proof: "286 models · Swagger at /api/docs",
-  },
-  {
-    label: "Scope",
-    head: "The awkward parts are already built",
-    body: "Business-hours SLA clocks, critical-path scheduling, row-level security groups, recurrence that survives daylight saving. These are the pieces that turn a CRM pilot into a two-year project.",
-    proof: "Verified by 231 tests",
-  },
-  {
-    label: "Cost",
-    head: "Adding a person costs nothing",
-    body: "Seat pricing charges you for growth and quietly punishes you for giving read access to the people who need it. Self-host and the marginal user is free. Give the whole company a login.",
-    proof: "Self-host: no licence fee",
-  },
-];
-
-function Claims() {
-  return (
-    <Section>
-      <Eyebrow color={C.blue}>Why teams move</Eyebrow>
-      <div style={{
-        display: "grid", gap: 1, background: C.ruleSoft,
-        border: `1px solid ${C.rule}`, borderRadius: 10, overflow: "hidden",
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))",
-      }}>
-        {CLAIMS.map(c => (
-          <div key={c.label} style={{ background: C.panel, padding: "28px 26px 26px" }}>
-            <div style={{
-              fontFamily: mono, fontSize: 10, letterSpacing: "0.16em",
-              textTransform: "uppercase", color: C.dim, marginBottom: 14,
-            }}>{c.label}</div>
-            <h3 style={{
-              fontFamily: display, fontWeight: 700, fontSize: 26, lineHeight: 1.1,
-              color: C.cream, margin: "0 0 12px", letterSpacing: "-0.01em",
-            }}>{c.head}</h3>
-            <p style={{
-              fontSize: 14.5, lineHeight: 1.65, color: C.slate,
-              fontFamily: "Inter, sans-serif", margin: "0 0 18px",
-            }}>{c.body}</p>
-            <div style={{
-              fontFamily: mono, fontSize: 11, color: C.amber,
-              paddingTop: 14, borderTop: `1px solid ${C.rule}`,
-            }}>{c.proof}</div>
-          </div>
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-// ── Deployment ───────────────────────────────────────────────────────
-
-function Deploy() {
-  const options = [
-    {
-      name: "Self-hosted",
-      price: "No licence fee",
-      sub: "You run it",
-      points: [
-        "Docker Compose, Postgres, and Redis",
-        "Unlimited users and records",
-        "Full source, modify anything",
-        "Your backups, your retention policy",
+      name: "Qualify",
+      cards: [
+        { title: "Acme CRM rollout", meta: "Acme Corp", val: "$48k" },
+        { title: "Helix expansion", meta: "Helix Retail", val: "$22k" },
       ],
-      cta: "Request the repo",
-      featured: true,
     },
     {
-      name: "Managed",
-      price: "Talk to us",
-      sub: "We run it",
-      points: [
-        "Hosting, backups, and upgrades handled",
-        "Priority support with an SLA",
-        "Migration from your current CRM",
-        "Same codebase, same data access",
+      name: "Discovery",
+      cards: [
+        { title: "Orbit fleet ops", meta: "Orbit Logistics", val: "$120k", hot: true },
+        { title: "Cedar clinics", meta: "Cedar Health", val: "$67k" },
       ],
-      cta: "Request access",
-      featured: false,
+    },
+    {
+      name: "Proposal",
+      cards: [{ title: "Summit banking", meta: "Summit Bank", val: "$210k", hot: true }],
+    },
+    {
+      name: "Negotiate",
+      cards: [{ title: "Atlas renewal", meta: "Atlas Energy", val: "$385k", hot: true }],
     },
   ];
 
   return (
-    <Section id="deploy">
-      <Eyebrow color={C.purple}>How it runs</Eyebrow>
-      <h2 style={{
-        fontFamily: display, fontWeight: 700, textTransform: "uppercase",
-        fontSize: "clamp(30px, 5vw, 54px)", lineHeight: 1,
-        letterSpacing: "-0.015em", color: C.cream, margin: "0 0 32px",
-      }}>
-        Two ways in
-      </h2>
-
-      <div style={{
-        display: "grid", gap: 16,
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
-      }}>
-        {options.map(o => (
-          <div key={o.name} style={{
-            background: C.panel,
-            border: `1px solid ${o.featured ? "rgba(245,166,35,0.35)" : C.rule}`,
-            borderRadius: 10, padding: "28px 26px",
-            display: "flex", flexDirection: "column",
-          }}>
-            <div style={{
-              fontFamily: mono, fontSize: 10, letterSpacing: "0.16em",
-              textTransform: "uppercase", color: o.featured ? C.amber : C.dim,
-              marginBottom: 12,
-            }}>{o.sub}</div>
-            <h3 style={{
-              fontFamily: display, fontWeight: 700, fontSize: 30,
-              color: C.cream, margin: "0 0 6px", textTransform: "uppercase",
-            }}>{o.name}</h3>
-            <div style={{
-              fontFamily: mono, fontSize: 15, color: o.featured ? C.green : C.slate,
-              marginBottom: 22,
-            }}>{o.price}</div>
-
-            <ul style={{ listStyle: "none", padding: 0, margin: "0 0 26px", flex: 1 }}>
-              {o.points.map(p => (
-                <li key={p} style={{
-                  display: "flex", gap: 10, alignItems: "flex-start",
-                  fontSize: 14, lineHeight: 1.55, color: C.slate,
-                  fontFamily: "Inter, sans-serif", marginBottom: 10,
-                }}>
-                  <span style={{ color: C.amber, fontFamily: mono, fontSize: 12, marginTop: 2 }}>/</span>
-                  {p}
-                </li>
-              ))}
-            </ul>
-
-            <Cta
-              full
-              variant={o.featured ? "primary" : "ghost"}
-              onClick={() => document.getElementById("access")?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" })}
-            >{o.cta}</Cta>
-          </div>
-        ))}
+    <div className="sn-hero-shot" aria-hidden="true">
+      <div className="sn-float sn-float-report">
+        <div className="sn-float-label">Sales Nebula · Win rate</div>
+        <div className="sn-bars">
+          {[42, 58, 51, 74, 63, 86].map((h, i) => (
+            <span key={i} style={{ height: `${h}%` }} />
+          ))}
+        </div>
       </div>
-    </Section>
+
+      <div className="sn-laptop">
+        <div className="sn-laptop-bezel">
+          <div className="sn-portal">
+            <aside className="sn-portal-side">
+              <div className="sn-side-brand">SN</div>
+              {["Home", "CRM", "Deals", "Mail", "AI", "More"].map((label, i) => (
+                <span key={label} className={i === 2 ? "active" : ""} title={label}>
+                  {["⌂", "◎", "◈", "✉", "✦", "⋯"][i]}
+                </span>
+              ))}
+            </aside>
+            <div className="sn-portal-main">
+              <div className="sn-portal-top">
+                <strong>Deals</strong>
+                <span className="sn-pill">Sales Nebula</span>
+              </div>
+              <div className="sn-kanban">
+                {stages.map((s) => (
+                  <div key={s.name} className="sn-col">
+                    <div className="sn-col-h">{s.name}</div>
+                    {s.cards.map((c) => (
+                      <div key={c.title} className={`sn-card${c.hot ? " hot" : ""}`}>
+                        <div className="sn-card-t">{c.title}</div>
+                        <div className="sn-card-m">
+                          <span>{c.meta}</span>
+                          <b>{c.val}</b>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="sn-laptop-base" />
+      </div>
+
+      <div className="sn-phone">
+        <div className="sn-phone-notch" />
+        <div className="sn-phone-body">
+          <div className="sn-phone-h">Sales Nebula</div>
+          <div className="sn-phone-title">Atlas renewal</div>
+          <div className="sn-phone-val">$385,000</div>
+          <div className="sn-phone-row">Stage · Negotiate</div>
+          <div className="sn-phone-row">Owner · Demo Visitor</div>
+          <div className="sn-phone-btn">Log activity</div>
+        </div>
+      </div>
+
+      <div className="sn-float sn-float-ai">
+        <div className="sn-float-label">AI Copilot</div>
+        <div className="sn-ai-line">Draft follow-up for Atlas</div>
+        <div className="sn-ai-bar"><i /></div>
+      </div>
+    </div>
   );
 }
 
-// ── Access request ───────────────────────────────────────────────────
+// ── Hero ─────────────────────────────────────────────────────────────
+
+function Hero({ go }) {
+  const points = [
+    "Leads, accounts, and deals in one Sales Nebula workspace",
+    "Quotes, forecasts, and service without leaving the deal",
+    "Self-host on your servers — or start with a managed invite",
+    "Open the live demo anytime — no card required",
+  ];
+
+  return (
+    <section className="sn-hero-plain">
+      <div className="sn-hero-grid">
+        <div className="sn-hero-copy">
+          <h1>Deals that move. Customers that stay.</h1>
+          <p>
+            Sales Nebula is the CRM built for revenue teams — capture the lead,
+            drive the opportunity, and keep the account after you win.
+          </p>
+          <ul>
+            {points.map((t) => (
+              <li key={t}>
+                <span className="sn-check" aria-hidden="true">✓</span>
+                {t}
+              </li>
+            ))}
+          </ul>
+          <div className="sn-hero-ctas">
+            <button type="button" className="sn-btn-primary" onClick={() => scrollTo("access")}>
+              Request access
+            </button>
+            <button type="button" className="sn-btn-secondary" onClick={() => go("/login")}>
+              Try the demo
+            </button>
+          </div>
+          <p className="sn-hero-micro">
+            Full Sales Nebula demo. Your data stays yours when you go live.
+          </p>
+        </div>
+        <div className="sn-hero-visual">
+          <PortalSnapshot />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── Product ──────────────────────────────────────────────────────────
+
+function Product() {
+  const [ref, shown] = useReveal();
+  const pillars = [
+    {
+      title: "Know every account",
+      copy: "Contacts, companies, and history stay linked so your team never starts a call cold.",
+    },
+    {
+      title: "Drive the pipeline",
+      copy: "Stages, forecasts, and next actions make it obvious what closes this week — and what is stuck.",
+    },
+    {
+      title: "Quote and deliver",
+      copy: "Move from opportunity to quote to invoice without bouncing between five tools.",
+    },
+  ];
+
+  return (
+    <section
+      id="product"
+      ref={ref}
+      style={{
+        maxWidth: 1120,
+        margin: "0 auto",
+        padding: "clamp(72px, 10vw, 120px) clamp(18px, 4vw, 40px)",
+        opacity: shown ? 1 : 0,
+        transform: shown ? "none" : "translateY(18px)",
+        transition: "opacity 600ms ease, transform 600ms ease",
+      }}
+    >
+      <h2
+        style={{
+          fontFamily: display,
+          fontSize: "clamp(28px, 4vw, 42px)",
+          fontWeight: 700,
+          letterSpacing: "-0.03em",
+          color: C.cream,
+          margin: "0 0 14px",
+          maxWidth: 560,
+        }}
+      >
+        Built for revenue teams, not dashboards nobody opens.
+      </h2>
+      <p
+        style={{
+          fontFamily: body,
+          fontSize: 17,
+          lineHeight: 1.6,
+          color: C.slate,
+          margin: "0 0 48px",
+          maxWidth: 520,
+        }}
+      >
+        Sales Nebula is a full CRM workspace: lead capture through closed-won, then service that protects the renewal.
+      </p>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))",
+          gap: "clamp(28px, 4vw, 48px)",
+          borderTop: `1px solid ${C.rule}`,
+          paddingTop: 36,
+        }}
+      >
+        {pillars.map((p, i) => (
+          <div key={p.title}>
+            <div
+              style={{
+                fontFamily: display,
+                fontSize: 13,
+                fontWeight: 700,
+                color: C.amber,
+                letterSpacing: "0.08em",
+                marginBottom: 10,
+              }}
+            >
+              {String(i + 1).padStart(2, "0")}
+            </div>
+            <h3
+              style={{
+                fontFamily: display,
+                fontSize: 22,
+                fontWeight: 700,
+                letterSpacing: "-0.02em",
+                color: C.cream,
+                margin: "0 0 10px",
+              }}
+            >
+              {p.title}
+            </h3>
+            <p style={{ fontFamily: body, fontSize: 15, lineHeight: 1.6, color: C.slate, margin: 0 }}>
+              {p.copy}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ── Workflow ─────────────────────────────────────────────────────────
+
+function Workflow() {
+  const [ref, shown] = useReveal();
+  const steps = [
+    { label: "Capture", detail: "Inbound leads land with source, score, and owner." },
+    { label: "Qualify", detail: "Reps work a clear path — not a spreadsheet of hope." },
+    { label: "Close", detail: "Quotes, approvals, and forecasts stay on the same deal." },
+    { label: "Retain", detail: "Cases and entitlements keep customers after the sale." },
+  ];
+
+  return (
+    <section
+      id="workflow"
+      ref={ref}
+      style={{
+        borderTop: `1px solid ${C.rule}`,
+        borderBottom: `1px solid ${C.rule}`,
+        background: `linear-gradient(90deg, color-mix(in srgb, var(--sn-raised) 80%, transparent), transparent 40%, color-mix(in srgb, var(--sn-raised) 80%, transparent))`,
+        opacity: shown ? 1 : 0,
+        transform: shown ? "none" : "translateY(18px)",
+        transition: "opacity 600ms ease, transform 600ms ease",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1120,
+          margin: "0 auto",
+          padding: "clamp(72px, 10vw, 112px) clamp(18px, 4vw, 40px)",
+        }}
+      >
+        <h2
+          style={{
+            fontFamily: display,
+            fontSize: "clamp(28px, 4vw, 42px)",
+            fontWeight: 700,
+            letterSpacing: "-0.03em",
+            color: C.cream,
+            margin: "0 0 12px",
+          }}
+        >
+          One motion from first touch to renewal.
+        </h2>
+        <p
+          style={{
+            fontFamily: body,
+            fontSize: 17,
+            lineHeight: 1.55,
+            color: C.slate,
+            margin: "0 0 40px",
+            maxWidth: 480,
+          }}
+        >
+          Stop stitching together point tools. Sales Nebula carries the account across the full revenue cycle.
+        </p>
+
+        <ol
+          style={{
+            listStyle: "none",
+            margin: 0,
+            padding: 0,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))",
+            gap: 0,
+          }}
+        >
+          {steps.map((s, i) => (
+            <li
+              key={s.label}
+              style={{
+                padding: "24px 20px 24px 0",
+                borderTop: `1px solid ${C.rule}`,
+                position: "relative",
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: display,
+                  fontSize: 28,
+                  fontWeight: 800,
+                  color: C.amber,
+                  letterSpacing: "-0.03em",
+                  marginBottom: 8,
+                }}
+              >
+                {s.label}
+              </div>
+              <p style={{ fontFamily: body, fontSize: 14.5, lineHeight: 1.55, color: C.slate, margin: 0 }}>
+                {s.detail}
+              </p>
+              {i < steps.length - 1 && (
+                <span
+                  className="sn-desktop-only"
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: 28,
+                    color: C.dim,
+                    fontFamily: display,
+                    fontSize: 20,
+                  }}
+                >
+                  →
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+  );
+}
+
+// ── Ownership (self-host — no API inventory) ─────────────────────────
+
+function Ownership() {
+  const [ref, shown] = useReveal();
+  return (
+    <section
+      ref={ref}
+      style={{
+        maxWidth: 1120,
+        margin: "0 auto",
+        padding: "clamp(72px, 10vw, 120px) clamp(18px, 4vw, 40px)",
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
+        gap: 40,
+        alignItems: "end",
+        opacity: shown ? 1 : 0,
+        transform: shown ? "none" : "translateY(18px)",
+        transition: "opacity 600ms ease, transform 600ms ease",
+      }}
+    >
+      <div>
+        <h2
+          style={{
+            fontFamily: display,
+            fontSize: "clamp(28px, 4vw, 40px)",
+            fontWeight: 700,
+            letterSpacing: "-0.03em",
+            color: C.cream,
+            margin: "0 0 14px",
+          }}
+        >
+          Your CRM. Your servers. Your rules.
+        </h2>
+        <p style={{ fontFamily: body, fontSize: 16.5, lineHeight: 1.6, color: C.slate, margin: 0 }}>
+          Run Sales Nebula where your data already lives. No per-seat tax for growing the team that closes.
+        </p>
+      </div>
+      <p
+        style={{
+          fontFamily: body,
+          fontSize: 15,
+          lineHeight: 1.65,
+          color: C.dim,
+          margin: 0,
+          maxWidth: 360,
+        }}
+      >
+        Demo the product in the browser, then request access when you are ready to bring your own pipeline online.
+      </p>
+    </section>
+  );
+}
+
+// ── Access form ──────────────────────────────────────────────────────
 
 function AccessForm() {
-  const [form, setForm] = useState({ email: "", firstName: "", lastName: "", company: "", companySize: "", useCase: "", interestedIn: "cloud" });
-  const [state, setState] = useState("idle"); // idle | sending | sent | error
+  const [form, setForm] = useState({
+    email: "",
+    firstName: "",
+    lastName: "",
+    company: "",
+    companySize: "",
+    useCase: "",
+    interestedIn: "cloud",
+  });
+  const [state, setState] = useState("idle");
   const [message, setMessage] = useState("");
   const [devLink, setDevLink] = useState(null);
 
-  const set = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }));
+  const set = (k) => (e) => setForm((p) => ({ ...p, [k]: e.target.value }));
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!form.email.trim()) { setState("error"); setMessage("Enter your email address."); return; }
-    setState("sending"); setMessage("");
+    if (!form.email.trim()) {
+      setState("error");
+      setMessage("Enter your work email.");
+      return;
+    }
+    setState("sending");
+    setMessage("");
     try {
       const res = await fetch("/api/signup", {
         method: "POST",
@@ -591,7 +706,11 @@ function AccessForm() {
         body: JSON.stringify({ ...form, source: "landing" }),
       });
       const data = await res.json();
-      if (!res.ok) { setState("error"); setMessage(data.error || "Something went wrong. Try again."); return; }
+      if (!res.ok) {
+        setState("error");
+        setMessage(data.error || "Something went wrong. Try again.");
+        return;
+      }
       setState("sent");
       setMessage(data.message);
       if (data.devVerifyUrl) setDevLink(data.devVerifyUrl);
@@ -602,166 +721,211 @@ function AccessForm() {
   };
 
   const field = {
-    width: "100%", padding: "11px 13px", borderRadius: 7,
-    background: C.raised, border: `1px solid ${C.rule}`,
-    color: C.cream, fontSize: 14, fontFamily: "Inter, sans-serif",
-    outline: "none", transition: "border-color 140ms",
+    width: "100%",
+    padding: "12px 14px",
+    borderRadius: 8,
+    background: C.raised,
+    border: `1px solid ${C.rule}`,
+    color: C.cream,
+    fontSize: 15,
+    fontFamily: body,
+    outline: "none",
   };
   const label = {
-    display: "block", fontFamily: mono, fontSize: 10,
-    letterSpacing: "0.14em", textTransform: "uppercase",
-    color: C.dim, marginBottom: 6,
+    display: "block",
+    fontFamily: body,
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+    color: C.dim,
+    marginBottom: 6,
   };
 
   if (state === "sent") {
     return (
-      <Section id="access">
-        <div style={{
-          background: C.panel, border: `1px solid rgba(52,211,153,0.30)`,
-          borderRadius: 12, padding: "44px 32px", textAlign: "center",
-          maxWidth: 560, margin: "0 auto",
-        }}>
-          <div style={{
-            width: 44, height: 44, borderRadius: 11, margin: "0 auto 20px",
-            background: "rgba(52,211,153,0.10)", border: `1px solid rgba(52,211,153,0.30)`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontFamily: mono, fontSize: 20, color: C.green,
-          }}>OK</div>
-          <h3 style={{
-            fontFamily: display, fontWeight: 700, fontSize: 28,
-            color: C.cream, margin: "0 0 12px", textTransform: "uppercase",
-          }}>Check your inbox</h3>
-          <p style={{
-            fontSize: 15, lineHeight: 1.6, color: C.slate,
-            fontFamily: "Inter, sans-serif", margin: 0,
-          }}>{message}</p>
+      <section id="access" style={{ maxWidth: 560, margin: "0 auto", padding: "clamp(64px, 9vw, 100px) 20px" }}>
+        <div
+          style={{
+            textAlign: "center",
+            padding: "48px 28px",
+            borderTop: `1px solid color-mix(in srgb, var(--sn-green) 40%, var(--sn-rule))`,
+          }}
+        >
+          <h3
+            style={{
+              fontFamily: display,
+              fontWeight: 700,
+              fontSize: 32,
+              letterSpacing: "-0.03em",
+              color: C.cream,
+              margin: "0 0 12px",
+            }}
+          >
+            Check your inbox
+          </h3>
+          <p style={{ fontFamily: body, fontSize: 16, lineHeight: 1.6, color: C.slate, margin: 0 }}>
+            {message}
+          </p>
           {devLink && (
-            <a href={devLink} style={{
-              display: "inline-block", marginTop: 20, fontFamily: mono,
-              fontSize: 11, color: C.amber, wordBreak: "break-all",
-            }}>Development link: verify now</a>
+            <a
+              href={devLink}
+              style={{
+                display: "inline-block",
+                marginTop: 20,
+                fontFamily: body,
+                fontSize: 13,
+                color: C.amber,
+                wordBreak: "break-all",
+              }}
+            >
+              Development link: verify now
+            </a>
           )}
         </div>
-      </Section>
+      </section>
     );
   }
 
   return (
-    <Section id="access">
-      <div style={{
-        display: "grid", gap: 44,
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
+    <section
+      id="access"
+      style={{
+        maxWidth: 1120,
+        margin: "0 auto",
+        padding: "clamp(64px, 9vw, 110px) clamp(18px, 4vw, 40px)",
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
+        gap: 48,
         alignItems: "start",
-      }}>
-        <div>
-          <Eyebrow color={C.green}>Access</Eyebrow>
-          <h2 style={{
-            fontFamily: display, fontWeight: 700, textTransform: "uppercase",
-            fontSize: "clamp(30px, 5vw, 54px)", lineHeight: 1,
-            letterSpacing: "-0.015em", color: C.cream, margin: "0 0 18px",
-          }}>
-            Tell us what you<br />are replacing
-          </h2>
-          <p style={{
-            fontSize: 15.5, lineHeight: 1.65, color: C.slate,
-            fontFamily: "Inter, sans-serif", margin: "0 0 22px",
-          }}>
-            Access is granted by invitation. You will get a verification email
-            first, then an invite once we have looked at your request. We read
-            every one.
-          </p>
-          <div style={{
-            fontFamily: mono, fontSize: 11.5, lineHeight: 1.9,
-            color: C.dim, paddingTop: 18, borderTop: `1px solid ${C.rule}`,
-          }}>
-            <div>1. Submit this form</div>
-            <div>2. Confirm your email</div>
-            <div>3. Receive an invite and set a password</div>
+      }}
+    >
+      <div>
+        <h2
+          style={{
+            fontFamily: display,
+            fontWeight: 700,
+            fontSize: "clamp(28px, 4vw, 40px)",
+            letterSpacing: "-0.03em",
+            color: C.cream,
+            margin: "0 0 14px",
+          }}
+        >
+          Request access
+        </h2>
+        <p style={{ fontFamily: body, fontSize: 16, lineHeight: 1.6, color: C.slate, margin: "0 0 20px" }}>
+          Tell us what you sell and what you are replacing. We review every request and send an invite when you are approved.
+        </p>
+        <p style={{ fontFamily: body, fontSize: 14, lineHeight: 1.55, color: C.dim, margin: 0 }}>
+          Prefer to look around first?{" "}
+          <a href="/login" style={{ color: C.amber, fontWeight: 600 }}>
+            Open the demo
+          </a>{" "}
+          with the credentials on the sign-in page.
+        </p>
+      </div>
+
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {state === "error" && (
+          <div
+            style={{
+              padding: "12px 14px",
+              borderRadius: 8,
+              background: "rgba(248,113,113,0.1)",
+              border: "1px solid rgba(248,113,113,0.25)",
+              color: "var(--sn-red)",
+              fontFamily: body,
+              fontSize: 14,
+            }}
+          >
+            {message}
+          </div>
+        )}
+        <div className="sn-form-2col">
+          <div>
+            <label style={label} htmlFor="fn">
+              First name
+            </label>
+            <input id="fn" style={field} value={form.firstName} onChange={set("firstName")} />
+          </div>
+          <div>
+            <label style={label} htmlFor="ln">
+              Last name
+            </label>
+            <input id="ln" style={field} value={form.lastName} onChange={set("lastName")} />
           </div>
         </div>
-
-        <form onSubmit={submit} style={{
-          background: C.panel, border: `1px solid ${C.rule}`,
-          borderRadius: 12, padding: "26px 24px",
-        }}>
-          {state === "error" && (
-            <div style={{
-              background: "rgba(248,113,113,0.10)", border: `1px solid rgba(248,113,113,0.25)`,
-              borderRadius: 7, padding: "10px 13px", marginBottom: 16,
-              fontSize: 13.5, color: C.red, fontFamily: "Inter, sans-serif",
-            }}>{message}</div>
-          )}
-
-          <div className="sn-form-2col" style={{ marginBottom: 14 }}>
-            <div>
-              <label style={label} htmlFor="fn">First name</label>
-              <input id="fn" style={field} value={form.firstName} onChange={set("firstName")}
-                onFocus={e => e.target.style.borderColor = C.amber}
-                onBlur={e => e.target.style.borderColor = C.rule} />
-            </div>
-            <div>
-              <label style={label} htmlFor="ln">Last name</label>
-              <input id="ln" style={field} value={form.lastName} onChange={set("lastName")}
-                onFocus={e => e.target.style.borderColor = C.amber}
-                onBlur={e => e.target.style.borderColor = C.rule} />
-            </div>
-          </div>
-
-          <div style={{ marginBottom: 14 }}>
-            <label style={label} htmlFor="em">Work email</label>
-            <input id="em" type="email" required style={field} value={form.email} onChange={set("email")}
-              placeholder="you@company.com"
-              onFocus={e => e.target.style.borderColor = C.amber}
-              onBlur={e => e.target.style.borderColor = C.rule} />
-          </div>
-
-          <div className="sn-form-2col" style={{ marginBottom: 14 }}>
-            <div>
-              <label style={label} htmlFor="co">Company</label>
-              <input id="co" style={field} value={form.company} onChange={set("company")}
-                onFocus={e => e.target.style.borderColor = C.amber}
-                onBlur={e => e.target.style.borderColor = C.rule} />
-            </div>
-            <div>
-              <label style={label} htmlFor="sz">Team size</label>
-              <select id="sz" style={field} value={form.companySize} onChange={set("companySize")}>
-                <option value="">Select</option>
-                {["1-10", "11-50", "51-200", "201-1000", "1000+"].map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div style={{ marginBottom: 14 }}>
-            <label style={label} htmlFor="in">Interested in</label>
-            <select id="in" style={field} value={form.interestedIn} onChange={set("interestedIn")}>
-              <option value="cloud">Managed hosting</option>
-              <option value="self-hosted">Self-hosting</option>
-              <option value="both">Still deciding</option>
+        <div>
+          <label style={label} htmlFor="em">
+            Work email
+          </label>
+          <input id="em" type="email" required style={field} value={form.email} onChange={set("email")} />
+        </div>
+        <div>
+          <label style={label} htmlFor="co">
+            Company
+          </label>
+          <input id="co" style={field} value={form.company} onChange={set("company")} />
+        </div>
+        <div className="sn-form-2col">
+          <div>
+            <label style={label} htmlFor="sz">
+              Company size
+            </label>
+            <select id="sz" style={field} value={form.companySize} onChange={set("companySize")}>
+              <option value="">Select</option>
+              <option value="1-10">1–10</option>
+              <option value="11-50">11–50</option>
+              <option value="51-200">51–200</option>
+              <option value="201-1000">201–1,000</option>
+              <option value="1000+">1,000+</option>
             </select>
           </div>
-
-          <div style={{ marginBottom: 20 }}>
-            <label style={label} htmlFor="uc">What are you replacing</label>
-            <textarea id="uc" rows={3} style={{ ...field, resize: "vertical" }}
-              value={form.useCase} onChange={set("useCase")}
-              placeholder="Salesforce, a stack of spreadsheets, nothing yet"
-              onFocus={e => e.target.style.borderColor = C.amber}
-              onBlur={e => e.target.style.borderColor = C.rule} />
+          <div>
+            <label style={label} htmlFor="dep">
+              Deploy preference
+            </label>
+            <select id="dep" style={field} value={form.interestedIn} onChange={set("interestedIn")}>
+              <option value="cloud">Hosted for us</option>
+              <option value="self-host">Self-hosted</option>
+              <option value="either">Either</option>
+            </select>
           </div>
-
-          <Cta full onClick={submit}>
-            {state === "sending" ? "Sending" : "Request access"}
-          </Cta>
-
-          <p style={{
-            fontFamily: mono, fontSize: 10.5, color: C.dim,
-            textAlign: "center", margin: "14px 0 0", lineHeight: 1.6,
-          }}>
-            No newsletter. We use this to reply to you.
-          </p>
-        </form>
-      </div>
-    </Section>
+        </div>
+        <div>
+          <label style={label} htmlFor="uc">
+            What are you replacing?
+          </label>
+          <textarea
+            id="uc"
+            rows={3}
+            style={{ ...field, resize: "vertical" }}
+            value={form.useCase}
+            onChange={set("useCase")}
+            placeholder="Salesforce, HubSpot, spreadsheets…"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={state === "sending"}
+          style={{
+            marginTop: 6,
+            fontFamily: body,
+            fontSize: 15,
+            fontWeight: 700,
+            padding: "14px 20px",
+            borderRadius: 8,
+            border: "none",
+            background: C.amber,
+            color: C.cta,
+            cursor: state === "sending" ? "wait" : "pointer",
+            opacity: state === "sending" ? 0.7 : 1,
+          }}
+        >
+          {state === "sending" ? "Sending…" : "Submit request"}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -769,23 +933,56 @@ function AccessForm() {
 
 function Footer({ go }) {
   return (
-    <footer style={{ borderTop: `1px solid ${C.rule}`, marginTop: 40 }}>
-      <div style={{
-        maxWidth: 1180, margin: "0 auto",
-        padding: "32px clamp(20px, 5vw, 48px)",
-        display: "flex", flexWrap: "wrap", gap: 20,
-        alignItems: "center", justifyContent: "space-between",
-      }}>
-        <div style={{ fontFamily: mono, fontSize: 11, color: C.dim }}>
-          Sales Nebula · {new Date().getFullYear()}
+    <footer
+      style={{
+        borderTop: `1px solid ${C.rule}`,
+        padding: "28px clamp(18px, 4vw, 40px)",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1120,
+          margin: "0 auto",
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <BrandMark size={28} />
+          <span style={{ fontFamily: display, fontWeight: 700, fontSize: 15, color: C.cream }}>
+            Sales Nebula
+          </span>
         </div>
-        <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
-          <a href="#modules" className="nav-link" style={{ fontFamily: mono, fontSize: 11, color: C.dim, textDecoration: "none" }}>Modules</a>
-          <a href="#deploy" className="nav-link" style={{ fontFamily: mono, fontSize: 11, color: C.dim, textDecoration: "none" }}>Deployment</a>
-          <button onClick={() => go("/login")} style={{
-            fontFamily: mono, fontSize: 11, color: C.dim, background: "none",
-            border: "none", cursor: "pointer", padding: 0,
-          }}>Sign in</button>
+        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={() => go("/login")}
+            style={{
+              fontFamily: body,
+              fontSize: 13,
+              fontWeight: 600,
+              color: C.slate,
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: 0,
+            }}
+          >
+            Sign in
+          </button>
+          <a
+            href="#access"
+            onClick={(e) => {
+              e.preventDefault();
+              scrollTo("access");
+            }}
+            style={{ fontFamily: body, fontSize: 13, fontWeight: 600, color: C.amber, textDecoration: "none" }}
+          >
+            Request access
+          </a>
         </div>
       </div>
     </footer>
@@ -795,28 +992,326 @@ function Footer({ go }) {
 // ── Page ─────────────────────────────────────────────────────────────
 
 export default function Landing({ go }) {
+  useEffect(() => {
+    const scrollToAccess = () => {
+      if (window.location.hash !== "#access") return;
+      window.setTimeout(() => scrollTo("access"), 80);
+    };
+    scrollToAccess();
+    window.addEventListener("hashchange", scrollToAccess);
+    return () => window.removeEventListener("hashchange", scrollToAccess);
+  }, []);
+
   return (
     <div style={{ background: C.void, minHeight: "100vh", color: C.cream, overflow: "visible" }}>
       <style>{`
-        .nav-link:hover { color: var(--sn-amber) !important; }
-        @media (prefers-reduced-motion: reduce) {
-          html { scroll-behavior: auto; }
-          * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+        .sn-hero-plain {
+          background: var(--sn-void);
+          color: var(--sn-cream);
+          padding: clamp(28px, 5vw, 56px) clamp(18px, 4vw, 40px) clamp(48px, 7vw, 80px);
+          overflow: hidden;
+        }
+        .sn-hero-grid {
+          max-width: 1180px;
+          margin: 0 auto;
+          display: grid;
+          grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.15fr);
+          gap: clamp(28px, 4vw, 48px);
+          align-items: center;
+        }
+        .sn-hero-copy h1 {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: clamp(32px, 4.4vw, 48px);
+          font-weight: 700;
+          letter-spacing: -0.03em;
+          line-height: 1.12;
+          color: var(--sn-cream);
+          margin: 0 0 16px;
+          max-width: 14ch;
+        }
+        .sn-hero-copy > p {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 16px;
+          line-height: 1.6;
+          color: var(--sn-slate);
+          margin: 0 0 22px;
+          max-width: 44ch;
+        }
+        .sn-hero-copy ul {
+          list-style: none;
+          margin: 0 0 26px;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .sn-hero-copy li {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 14.5px;
+          font-weight: 500;
+          color: var(--sn-body);
+          line-height: 1.4;
+        }
+        .sn-check {
+          flex-shrink: 0;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: var(--sn-amber);
+          color: var(--sn-cta-text);
+          font-size: 11px;
+          font-weight: 700;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          margin-top: 1px;
+        }
+        .sn-hero-ctas {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .sn-btn-primary {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 15px;
+          font-weight: 700;
+          padding: 14px 22px;
+          border-radius: 10px;
+          border: none;
+          background: var(--sn-amber);
+          color: var(--sn-cta-text);
+          cursor: pointer;
+        }
+        .sn-btn-secondary {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 15px;
+          font-weight: 700;
+          padding: 14px 22px;
+          border-radius: 10px;
+          border: 1px solid var(--sn-rule);
+          background: var(--sn-raised);
+          color: var(--sn-cream);
+          cursor: pointer;
+        }
+        .sn-hero-micro {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 12.5px;
+          color: var(--sn-dim);
+          margin: 0;
+        }
+        .sn-hero-visual { position: relative; min-height: 360px; }
+        .sn-hero-shot { position: relative; width: 100%; min-height: 380px; }
+        .sn-laptop {
+          position: relative;
+          margin-left: 8%;
+          width: 92%;
+          z-index: 1;
+        }
+        .sn-laptop-bezel {
+          background: #0A1224;
+          border: 1px solid var(--sn-rule);
+          border-radius: 12px 12px 6px 6px;
+          padding: 10px 10px 0;
+          box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+        }
+        .sn-portal {
+          display: flex;
+          background: var(--sn-void);
+          border-radius: 8px 8px 0 0;
+          overflow: hidden;
+          min-height: 268px;
+        }
+        .sn-portal-side {
+          width: 48px;
+          background: var(--sn-panel);
+          border-right: 1px solid var(--sn-rule);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+          padding: 12px 0;
+          color: var(--sn-dim);
+          font-size: 12px;
+        }
+        .sn-side-brand {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          background: linear-gradient(135deg, #F5A623, #E8961A);
+          color: #060B1A;
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 9px;
+          font-weight: 800;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 4px;
+        }
+        .sn-portal-side span.active {
+          color: var(--sn-amber);
+        }
+        .sn-portal-main { flex: 1; min-width: 0; padding: 12px 12px 16px; background: var(--sn-void); }
+        .sn-portal-top {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 12px;
+          font-family: "Poppins", system-ui, sans-serif;
+          color: var(--sn-cream);
+        }
+        .sn-portal-top strong { font-size: 14px; font-weight: 700; }
+        .sn-pill {
+          font-size: 10px;
+          font-weight: 600;
+          background: rgba(245, 166, 35, 0.12);
+          color: var(--sn-amber);
+          border: 1px solid rgba(245, 166, 35, 0.28);
+          padding: 3px 8px;
+          border-radius: 999px;
+        }
+        .sn-kanban {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .sn-col-h {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--sn-dim);
+          margin-bottom: 8px;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .sn-card {
+          background: var(--sn-panel);
+          border: 1px solid var(--sn-rule);
+          border-radius: 8px;
+          padding: 8px;
+          margin-bottom: 8px;
+        }
+        .sn-card.hot { border-color: rgba(245, 166, 35, 0.45); }
+        .sn-card-t {
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--sn-cream);
+          margin-bottom: 6px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .sn-card-m {
+          display: flex;
+          justify-content: space-between;
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 10px;
+          color: var(--sn-slate);
+        }
+        .sn-card-m b { color: var(--sn-amber); font-weight: 700; }
+        .sn-laptop-base {
+          height: 10px;
+          width: 104%;
+          margin-left: -2%;
+          background: linear-gradient(180deg, #142038, #0A1224);
+          border-radius: 0 0 10px 10px;
+          border: 1px solid var(--sn-rule);
+          border-top: none;
+        }
+        .sn-phone {
+          position: absolute;
+          left: 0;
+          bottom: 18px;
+          width: 118px;
+          background: #0A1224;
+          border: 1px solid var(--sn-rule);
+          border-radius: 18px;
+          padding: 8px;
+          box-shadow: 0 18px 36px rgba(0, 0, 0, 0.4);
+          z-index: 3;
+        }
+        .sn-phone-notch {
+          width: 42px;
+          height: 5px;
+          border-radius: 999px;
+          background: var(--sn-rule);
+          margin: 2px auto 8px;
+        }
+        .sn-phone-body {
+          background: var(--sn-panel);
+          border: 1px solid var(--sn-rule);
+          border-radius: 12px;
+          padding: 10px;
+          min-height: 170px;
+        }
+        .sn-phone-h { font-family: "Poppins", system-ui, sans-serif; font-size: 10px; color: var(--sn-amber); font-weight: 600; margin-bottom: 4px; }
+        .sn-phone-title { font-family: "Poppins", system-ui, sans-serif; font-size: 13px; font-weight: 700; color: var(--sn-cream); }
+        .sn-phone-val { font-family: "Poppins", system-ui, sans-serif; font-size: 16px; font-weight: 700; color: var(--sn-amber); margin: 6px 0 10px; }
+        .sn-phone-row { font-family: "Poppins", system-ui, sans-serif; font-size: 10px; color: var(--sn-slate); margin-bottom: 4px; }
+        .sn-phone-btn {
+          margin-top: 12px;
+          background: var(--sn-amber);
+          color: var(--sn-cta-text);
+          font-family: "Poppins", system-ui, sans-serif;
+          font-size: 10px;
+          font-weight: 700;
+          text-align: center;
+          padding: 8px;
+          border-radius: 8px;
+        }
+        .sn-float {
+          position: absolute;
+          background: var(--sn-panel);
+          border: 1px solid var(--sn-rule);
+          border-radius: 12px;
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+          padding: 12px 14px;
+          z-index: 4;
+          font-family: "Poppins", system-ui, sans-serif;
+        }
+        .sn-float-report { top: 0; right: 4%; width: 158px; }
+        .sn-float-ai { right: 2%; bottom: 28px; width: 176px; }
+        .sn-float-label { font-size: 11px; font-weight: 700; color: var(--sn-cream); margin-bottom: 8px; }
+        .sn-bars { display: flex; align-items: flex-end; gap: 5px; height: 54px; }
+        .sn-bars span {
+          flex: 1;
+          background: linear-gradient(180deg, var(--sn-amber), color-mix(in srgb, var(--sn-amber) 35%, transparent));
+          border-radius: 3px 3px 1px 1px;
+          display: block;
+        }
+        .sn-ai-line { font-size: 12px; color: var(--sn-slate); margin-bottom: 8px; }
+        .sn-ai-bar { height: 6px; border-radius: 999px; background: var(--sn-raised); overflow: hidden; }
+        .sn-ai-bar i { display: block; width: 68%; height: 100%; background: var(--sn-amber); border-radius: 999px; }
+        @media (max-width: 900px) {
+          .sn-hero-grid { grid-template-columns: 1fr; }
+          .sn-hero-copy h1 { max-width: none; }
+          .sn-hero-visual { min-height: 320px; }
+          .sn-laptop { margin-left: 14%; width: 86%; }
+          .sn-phone { width: 100px; }
+          .sn-kanban { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 560px) {
+          .sn-float-report, .sn-float-ai, .sn-phone { display: none; }
+          .sn-laptop { margin-left: 0; width: 100%; }
         }
         select option { background: var(--sn-raised); color: var(--sn-cream); }
       `}</style>
       <Header go={go} />
       <Hero go={go} />
-      <ModuleMatrix />
-      <Claims />
-      <Deploy />
+      <Product />
+      <Workflow />
+      <Ownership />
       <AccessForm />
       <Footer go={go} />
     </div>
   );
 }
 
-// ── Email verification screen ────────────────────────────────────────
+// ── Email verification ───────────────────────────────────────────────
 
 export function VerifyPage({ go }) {
   const [state, setState] = useState("working");
@@ -824,31 +1319,49 @@ export function VerifyPage({ go }) {
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("token");
-    if (!token) { setState("error"); setMessage("That link is missing its verification token."); return; }
+    if (!token) {
+      setState("error");
+      setMessage("That link is missing its verification token.");
+      return;
+    }
 
     fetch("/api/signup/verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
     })
-      .then(async r => {
+      .then(async (r) => {
         const data = await r.json();
-        if (!r.ok) { setState("error"); setMessage(data.error || "That verification link is not valid."); return; }
+        if (!r.ok) {
+          setState("error");
+          setMessage(data.error || "That verification link is not valid.");
+          return;
+        }
         setState("done");
         setMessage(data.message);
       })
-      .catch(() => { setState("error"); setMessage("Could not reach the server. Try the link again shortly."); });
+      .catch(() => {
+        setState("error");
+        setMessage("Could not reach the server. Try the link again shortly.");
+      });
   }, []);
 
-  const accent = state === "error" ? C.red : state === "done" ? C.green : C.amber;
+  const accent = state === "error" ? "var(--sn-red)" : state === "done" ? C.green : C.amber;
 
   return (
     <CenteredCard
-      badge={state === "working" ? "..." : state === "done" ? "OK" : "!"}
+      badge={state === "working" ? "…" : state === "done" ? "OK" : "!"}
       accent={accent}
       title={state === "done" ? "Email confirmed" : state === "error" ? "Link not valid" : "One moment"}
       body={message}
-      action={state !== "working" ? { label: state === "done" ? "Back to home" : "Request access again", onClick: () => go("/") } : null}
+      action={
+        state !== "working"
+          ? {
+              label: state === "done" ? "Back to home" : "Request access again",
+              onClick: () => go("/"),
+            }
+          : null
+      }
     />
   );
 }
@@ -863,16 +1376,27 @@ export function AcceptInvitePage({ go }) {
   const token = useRef(new URLSearchParams(window.location.search).get("token"));
 
   useEffect(() => {
-    if (!token.current) { setState("invalid"); setError("That link is missing its invite token."); return; }
+    if (!token.current) {
+      setState("invalid");
+      setError("That link is missing its invite token.");
+      return;
+    }
     fetch(`/api/signup/invites/lookup/${encodeURIComponent(token.current)}`)
-      .then(async r => {
+      .then(async (r) => {
         const data = await r.json();
-        if (!r.ok) { setState("invalid"); setError(data.error || "That invite link is not valid."); return; }
+        if (!r.ok) {
+          setState("invalid");
+          setError(data.error || "That invite link is not valid.");
+          return;
+        }
         setInvite(data);
-        setForm(p => ({ ...p, firstName: data.firstName || "", lastName: data.lastName || "" }));
+        setForm((p) => ({ ...p, firstName: data.firstName || "", lastName: data.lastName || "" }));
         setState("ready");
       })
-      .catch(() => { setState("invalid"); setError("Could not reach the server."); });
+      .catch(() => {
+        setState("invalid");
+        setError("Could not reach the server.");
+      });
   }, []);
 
   const rules = [
@@ -882,17 +1406,24 @@ export function AcceptInvitePage({ go }) {
     ["A number", /[0-9]/.test(form.password)],
     ["A symbol", /[^A-Za-z0-9]/.test(form.password)],
   ];
-  const ready = rules.every(r => r[1]) && form.password === form.confirm && form.firstName && form.lastName;
+  const ready =
+    rules.every((r) => r[1]) && form.password === form.confirm && form.firstName && form.lastName;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!ready) return;
-    setState("submitting"); setError("");
+    setState("submitting");
+    setError("");
     try {
       const res = await fetch("/api/signup/invites/accept", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: token.current, password: form.password, firstName: form.firstName, lastName: form.lastName }),
+        body: JSON.stringify({
+          token: token.current,
+          password: form.password,
+          firstName: form.firstName,
+          lastName: form.lastName,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -900,7 +1431,6 @@ export function AcceptInvitePage({ go }) {
         setError(data.details?.join(". ") || data.error || "Could not create your account.");
         return;
       }
-      // Matches the key AuthProvider reads on boot
       localStorage.setItem("sn_token", data.token);
       window.location.href = "/app";
     } catch {
@@ -909,108 +1439,204 @@ export function AcceptInvitePage({ go }) {
     }
   };
 
+  const field = {
+    width: "100%",
+    padding: "11px 13px",
+    borderRadius: 8,
+    background: C.raised,
+    border: `1px solid ${C.rule}`,
+    color: C.cream,
+    fontSize: 14,
+    fontFamily: body,
+    outline: "none",
+  };
+  const label = {
+    display: "block",
+    fontFamily: body,
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    color: C.dim,
+    marginBottom: 6,
+  };
+
   if (state === "loading") {
-    return <CenteredCard badge="..." accent={C.amber} title="Checking your invite" body="One moment." />;
+    return <CenteredCard badge="…" accent={C.amber} title="Checking your invite" body="One moment." />;
   }
   if (state === "invalid") {
     return (
-      <CenteredCard badge="!" accent={C.red} title="Invite not valid" body={error}
-        action={{ label: "Request access", onClick: () => go("/") }} />
+      <CenteredCard
+        badge="!"
+        accent="var(--sn-red)"
+        title="Invite not valid"
+        body={error}
+        action={{ label: "Request access", onClick: () => go("/") }}
+      />
     );
   }
 
-  const field = {
-    width: "100%", padding: "11px 13px", borderRadius: 7,
-    background: C.raised, border: `1px solid ${C.rule}`,
-    color: C.cream, fontSize: 14, fontFamily: "Inter, sans-serif", outline: "none",
-  };
-  const label = {
-    display: "block", fontFamily: mono, fontSize: 10, letterSpacing: "0.14em",
-    textTransform: "uppercase", color: C.dim, marginBottom: 6,
-  };
-
   return (
-    <div style={{
-      background: C.void, minHeight: "100vh", display: "flex",
-      alignItems: "center", justifyContent: "center", padding: 20,
-    }}>
+    <div
+      style={{
+        background: C.void,
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
       <div style={{ width: "100%", maxWidth: 420 }}>
         <div style={{ textAlign: "center", marginBottom: 26 }}>
-          <h1 style={{
-            fontFamily: display, fontWeight: 700, fontSize: 32,
-            color: C.cream, margin: "0 0 6px", textTransform: "uppercase",
-          }}>Set your password</h1>
-          <p style={{ fontFamily: mono, fontSize: 12, color: C.dim, margin: 0 }}>{invite.email}</p>
+          <h1
+            style={{
+              fontFamily: display,
+              fontWeight: 700,
+              fontSize: 28,
+              letterSpacing: "-0.03em",
+              color: C.cream,
+              margin: "0 0 6px",
+            }}
+          >
+            Set your password
+          </h1>
+          <p style={{ fontFamily: body, fontSize: 13, color: C.dim, margin: 0 }}>{invite.email}</p>
         </div>
 
-        <form onSubmit={submit} style={{
-          background: C.panel, border: `1px solid ${C.rule}`,
-          borderRadius: 12, padding: "24px 22px",
-        }}>
+        <form
+          onSubmit={submit}
+          style={{
+            background: C.panel,
+            border: `1px solid ${C.rule}`,
+            borderRadius: 12,
+            padding: "24px 22px",
+          }}
+        >
           {invite.message && (
-            <div style={{
-              background: C.raised, borderRadius: 7, padding: "11px 13px",
-              marginBottom: 16, fontSize: 13.5, color: C.slate,
-              fontFamily: "Inter, sans-serif", lineHeight: 1.55,
-            }}>{invite.message}</div>
+            <div
+              style={{
+                background: C.raised,
+                borderRadius: 8,
+                padding: "11px 13px",
+                marginBottom: 16,
+                fontSize: 14,
+                color: C.slate,
+                fontFamily: body,
+                lineHeight: 1.55,
+              }}
+            >
+              {invite.message}
+            </div>
           )}
           {error && (
-            <div style={{
-              background: "rgba(248,113,113,0.10)", border: `1px solid rgba(248,113,113,0.25)`,
-              borderRadius: 7, padding: "10px 13px", marginBottom: 16,
-              fontSize: 13.5, color: C.red, fontFamily: "Inter, sans-serif",
-            }}>{error}</div>
+            <div
+              style={{
+                background: "rgba(248,113,113,0.10)",
+                border: "1px solid rgba(248,113,113,0.25)",
+                borderRadius: 8,
+                padding: "10px 13px",
+                marginBottom: 16,
+                fontSize: 14,
+                color: "var(--sn-red)",
+                fontFamily: body,
+              }}
+            >
+              {error}
+            </div>
           )}
 
           <div className="sn-form-2col" style={{ marginBottom: 14 }}>
             <div>
-              <label style={label} htmlFor="ifn">First name</label>
-              <input id="ifn" style={field} value={form.firstName}
-                onChange={e => setForm(p => ({ ...p, firstName: e.target.value }))} required />
+              <label style={label} htmlFor="ifn">
+                First name
+              </label>
+              <input
+                id="ifn"
+                style={field}
+                value={form.firstName}
+                onChange={(e) => setForm((p) => ({ ...p, firstName: e.target.value }))}
+                required
+              />
             </div>
             <div>
-              <label style={label} htmlFor="iln">Last name</label>
-              <input id="iln" style={field} value={form.lastName}
-                onChange={e => setForm(p => ({ ...p, lastName: e.target.value }))} required />
+              <label style={label} htmlFor="iln">
+                Last name
+              </label>
+              <input
+                id="iln"
+                style={field}
+                value={form.lastName}
+                onChange={(e) => setForm((p) => ({ ...p, lastName: e.target.value }))}
+                required
+              />
             </div>
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <label style={label} htmlFor="ipw">Password</label>
-            <input id="ipw" type="password" style={field} value={form.password}
-              onChange={e => setForm(p => ({ ...p, password: e.target.value }))} required />
+            <label style={label} htmlFor="ipw">
+              Password
+            </label>
+            <input
+              id="ipw"
+              type="password"
+              style={field}
+              value={form.password}
+              onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
+              required
+            />
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <label style={label} htmlFor="ipc">Confirm password</label>
-            <input id="ipc" type="password" style={field} value={form.confirm}
-              onChange={e => setForm(p => ({ ...p, confirm: e.target.value }))} required />
-            {form.confirm && form.password !== form.confirm && (
-              <div style={{ fontFamily: mono, fontSize: 11, color: C.red, marginTop: 6 }}>
-                Passwords do not match
-              </div>
-            )}
+            <label style={label} htmlFor="ipc">
+              Confirm password
+            </label>
+            <input
+              id="ipc"
+              type="password"
+              style={field}
+              value={form.confirm}
+              onChange={(e) => setForm((p) => ({ ...p, confirm: e.target.value }))}
+              required
+            />
           </div>
 
           <div style={{ marginBottom: 18 }}>
             {rules.map(([text, met]) => (
-              <div key={text} style={{
-                display: "flex", gap: 8, alignItems: "center",
-                fontFamily: mono, fontSize: 11,
-                color: met ? C.green : C.dim, marginBottom: 4,
-              }}>
-                <span style={{ width: 10 }}>{met ? "+" : "-"}</span>{text}
+              <div
+                key={text}
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  fontFamily: body,
+                  fontSize: 12,
+                  color: met ? C.green : C.dim,
+                  marginBottom: 4,
+                }}
+              >
+                <span style={{ width: 10 }}>{met ? "+" : "–"}</span>
+                {text}
               </div>
             ))}
           </div>
 
-          <button type="submit" disabled={!ready || state === "submitting"} style={{
-            width: "100%", padding: "13px", borderRadius: 8, border: "none",
-            background: ready ? C.amber : C.rule,
-            color: ready ? C.void : C.dim,
-            fontSize: 14, fontWeight: 600, fontFamily: "Inter, sans-serif",
-            cursor: ready ? "pointer" : "not-allowed", transition: "all 140ms",
-          }}>
+          <button
+            type="submit"
+            disabled={!ready || state === "submitting"}
+            style={{
+              width: "100%",
+              padding: "13px",
+              borderRadius: 8,
+              border: "none",
+              background: ready ? C.amber : C.rule,
+              color: ready ? C.cta : C.dim,
+              fontSize: 14,
+              fontWeight: 700,
+              fontFamily: body,
+              cursor: ready ? "pointer" : "not-allowed",
+            }}
+          >
             {state === "submitting" ? "Creating your account" : "Create account"}
           </button>
         </form>
@@ -1019,35 +1645,82 @@ export function AcceptInvitePage({ go }) {
   );
 }
 
-// ── Shared status card ───────────────────────────────────────────────
-
 function CenteredCard({ badge, accent, title, body, action }) {
   return (
-    <div style={{
-      background: C.void, minHeight: "100vh", display: "flex",
-      alignItems: "center", justifyContent: "center", padding: 20,
-    }}>
-      <div style={{
-        background: C.panel, border: `1px solid ${C.rule}`, borderRadius: 12,
-        padding: "40px 32px", textAlign: "center", maxWidth: 440, width: "100%",
-      }}>
-        <div style={{
-          width: 44, height: 44, borderRadius: 11, margin: "0 auto 20px",
-          background: `${accent}1A`, border: `1px solid ${accent}4D`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontFamily: mono, fontSize: 18, color: accent,
-        }}>{badge}</div>
-        <h1 style={{
-          fontFamily: display, fontWeight: 700, fontSize: 27,
-          color: C.cream, margin: "0 0 12px", textTransform: "uppercase",
-        }}>{title}</h1>
-        <p style={{
-          fontSize: 14.5, lineHeight: 1.6, color: C.slate,
-          fontFamily: "Inter, sans-serif", margin: 0,
-        }}>{body}</p>
+    <div
+      style={{
+        background: C.void,
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          background: C.panel,
+          border: `1px solid ${C.rule}`,
+          borderRadius: 12,
+          padding: "40px 32px",
+          textAlign: "center",
+          maxWidth: 440,
+          width: "100%",
+        }}
+      >
+        <div
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: 10,
+            margin: "0 auto 20px",
+            background: `color-mix(in srgb, ${accent} 12%, transparent)`,
+            border: `1px solid color-mix(in srgb, ${accent} 35%, transparent)`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontFamily: display,
+            fontSize: 16,
+            fontWeight: 700,
+            color: accent,
+          }}
+        >
+          {badge}
+        </div>
+        <h1
+          style={{
+            fontFamily: display,
+            fontWeight: 700,
+            fontSize: 26,
+            letterSpacing: "-0.03em",
+            color: C.cream,
+            margin: "0 0 12px",
+          }}
+        >
+          {title}
+        </h1>
+        <p style={{ fontSize: 15, lineHeight: 1.6, color: C.slate, fontFamily: body, margin: 0 }}>
+          {body}
+        </p>
         {action && (
           <div style={{ marginTop: 24 }}>
-            <Cta variant="ghost" onClick={action.onClick}>{action.label}</Cta>
+            <button
+              type="button"
+              onClick={action.onClick}
+              style={{
+                fontFamily: body,
+                fontSize: 14,
+                fontWeight: 600,
+                padding: "12px 20px",
+                borderRadius: 8,
+                border: `1px solid ${C.rule}`,
+                background: "transparent",
+                color: C.cream,
+                cursor: "pointer",
+              }}
+            >
+              {action.label}
+            </button>
           </div>
         )}
       </div>

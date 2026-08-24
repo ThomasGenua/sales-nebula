@@ -45,6 +45,60 @@ html[data-theme="light"] {
   color-scheme: light;
 }
 
+/* Remap hardcoded dashboard card/surface colors that still use dark hex classes */
+html[data-theme="light"] .bg-\[\#060B1A\],
+html[data-theme="light"] .bg-\[\#081024\] {
+  background-color: var(--sn-void) !important;
+}
+html[data-theme="light"] .bg-\[\#0B1228\],
+html[data-theme="light"] .bg-\[\#101B3A\] {
+  background-color: var(--sn-panel) !important;
+}
+html[data-theme="light"] .bg-\[\#0E1630\],
+html[data-theme="light"] .bg-\[\#0F1A38\] {
+  background-color: var(--sn-raised) !important;
+}
+html[data-theme="light"] .hover\:bg-\[\#0E1630\]:hover,
+html[data-theme="light"] .hover\:bg-\[\#101B3A\]:hover,
+html[data-theme="light"] .hover\:bg-\[\#0B1228\]:hover,
+html[data-theme="light"] .active\:bg-\[\#101B3A\]:active {
+  background-color: #EFEBE3 !important;
+}
+html[data-theme="light"] .border-\[\#182550\] {
+  border-color: var(--sn-rule) !important;
+}
+html[data-theme="light"] .border-\[\#203060\],
+html[data-theme="light"] .hover\:border-\[\#203060\]:hover,
+html[data-theme="light"] .hover\:border-\[\#182550\]:hover {
+  border-color: #C9C0B0 !important;
+}
+html[data-theme="light"] .text-\[\#F0EDE5\] {
+  color: var(--sn-cream) !important;
+}
+html[data-theme="light"] .text-\[\#C8C2B4\] {
+  color: var(--sn-body) !important;
+}
+html[data-theme="light"] .text-\[\#7E8598\] {
+  color: var(--sn-slate) !important;
+}
+html[data-theme="light"] .text-\[\#4A5168\] {
+  color: var(--sn-dim) !important;
+}
+html[data-theme="light"] .placeholder-\[\#4A5168\]::placeholder {
+  color: var(--sn-dim) !important;
+}
+html[data-theme="light"] .hover\:text-\[\#C8C2B4\]:hover,
+html[data-theme="light"] .hover\:text-\[\#F0EDE5\]:hover {
+  color: var(--sn-cream) !important;
+}
+html[data-theme="light"] .hover\:text-\[\#7E8598\]:hover {
+  color: var(--sn-slate) !important;
+}
+html[data-theme="light"] .bg-\[\#081024\]\/80,
+html[data-theme="light"] .bg-\[\#081024\]\/95 {
+  background-color: color-mix(in srgb, var(--sn-panel) 92%, transparent) !important;
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
@@ -64,7 +118,7 @@ body {
   min-height: 100%;
   background: var(--sn-void);
   color: var(--sn-body);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Poppins', system-ui, sans-serif;
   overflow-x: hidden;
   overflow-y: auto;
   touch-action: manipulation;

@@ -1,9 +1,5 @@
-// Generated from the live route table. Every count is real.
-// Regenerate: node scripts/module-manifest.js
-export const MODULES = [["calendar",39],["admin",37],["projects",36],["securityGroups",24],["studio",23],["maps",22],["prospects",22],["configuration",20],["security",20],["customComponents",19],["advancedCpq",18],["customCode",18],["customObjects",18],["sla",18],["inboundEmail",17],["omnichannel",17],["territories",17],["analytics",16],["environments",16],["pdfTemplates",16],["reports",16],["aiAgents",15],["bugs",15],["flowBuilder",15],["integrations",15],["cdp",14],["connectedApps",14],["mobile",14],["searchIndex",14],["signup",14],["cpq",13],["favorites",13],["macros",13],["marketplace",13],["salesPath",13],["users",13],["emails",12],["events",12],["export",12],["knowledge",12],["partners",12],["tags",12],["teams",12],["webToCase",12],["assets",11],["dealExtras",11],["feed",11],["notes",11],["portal",11],["scheduler",11],["views",11],["approvals",10],["attachments",10],["bulkApi",10],["contracts",10],["documents",10],["fieldService",10],["forecasts",10],["monitoring",10],["quoteExtras",10],["sequences",10],["surveys",10],["consent",9],["conversationIntelligence",9],["dataExport",9],["entitlements",9],["revenueRecognition",9],["subscriptions",9],["webhooks",9],["workflows",9],["campaignInfluence",8],["chatter",8],["copilot",8],["duplicates",8],["emailToCase",8],["invoices",8],["orders",8],["quotes",8],["recycleBin",8],["sharing",8],["ai",7],["formulas",7],["personAccounts",7],["auth",6],["massActions",6],["timeline",6],["campaigns",5],["accounts",4],["adminDashboard",4],["cases",4],["contacts",4],["dashboard",4],["products",4],["search",4],["import",3],["oauth",3],["leads",2]];
-
-export const TOTALS = {
-  modules: MODULES.length,
-  endpoints: MODULES.reduce((s, m) => s + m[1], 0),
-  models: 286,
-};
+// Intentionally empty of route/endpoint inventories.
+// Public marketing must not expose API surface area.
+// Internal tooling can count routes from the server source directly.
+export const MODULES = [];
+export const TOTALS = { modules: 0, models: 0 };

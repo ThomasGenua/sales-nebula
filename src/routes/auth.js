@@ -136,6 +136,39 @@ router.get('/me', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/auth/me — update own profile (no users:full required)
+router.put('/me', authenticate, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { firstName, lastName, email, avatar } = req.body || {};
+    const data = {};
+    if (typeof firstName === 'string' && firstName.trim()) data.firstName = firstName.trim();
+    if (typeof lastName === 'string' && lastName.trim()) data.lastName = lastName.trim();
+    if (typeof email === 'string' && email.trim()) data.email = email.trim().toLowerCase();
+    if (avatar !== undefined) data.avatar = avatar || null;
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'No profile fields to update' });
+    }
+
+    if (data.email) {
+      const clash = await prisma.user.findFirst({
+        where: { email: data.email, NOT: { id: req.userId } },
+      });
+      if (clash) return res.status(409).json({ error: 'Email already in use' });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: req.userId },
+      data,
+      include: { role: { include: { permissions: true } } },
+    });
+    await audit(prisma, { action: 'update', module: 'auth', details: 'Updated own profile', userId: req.userId });
+    const { password: _, ...safeUser } = user;
+    res.json(safeUser);
+  } catch (err) { next(err); }
+});
+
 // POST /api/auth/register
 router.post('/register', limiters.auth, validate(schemas.register), async (req, res, next) => {
   try {

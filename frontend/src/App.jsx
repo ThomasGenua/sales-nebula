@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
-import { BrandMark, ThemeToggle } from "./theme";
+import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
 import {
   Search, Bell, Settings, LogOut, Menu, X, Plus, Edit2, Trash2, Eye,
@@ -88,7 +88,11 @@ function AuthProvider({ children }) {
     window.location.reload();
   };
 
-  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, apiFetch }}>{children}</AuthContext.Provider>;
+  const updateUser = (partial) => {
+    setUser((current) => (current ? { ...current, ...partial } : current));
+  };
+
+  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
 }
 
 function useApi(path, deps = []) {
@@ -150,9 +154,15 @@ function Button({ children, variant = "primary", size = "md", onClick, disabled,
 function Input({ label, value, onChange, type = "text", placeholder, required, className = "", ...props }) {
   return (
     <label className={`block ${className}`}>
-      {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
+      {label && <span className="block text-xs font-medium mb-1.5" style={{ color: "var(--sn-slate)" }}>{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
       <input type={type} value={value || ""} onChange={e => onChange(e.target.value)} placeholder={placeholder} {...props}
-        className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] focus:ring-1 focus:ring-[rgba(245,166,35,0.20)] transition-colors min-h-[44px]" />
+        className="w-full px-3 py-2.5 rounded-lg text-sm focus:outline-none focus:ring-1 transition-colors min-h-[44px]"
+        style={{
+          background: "var(--sn-raised)",
+          border: "1px solid var(--sn-rule)",
+          color: "var(--sn-cream)",
+        }}
+      />
     </label>
   );
 }
@@ -1598,72 +1608,147 @@ function GlobalSearchPage() {
 }
 
 function SettingsPage() {
-  const { user, apiFetch } = useAuth();
+  const { user, apiFetch, demoMode, updateUser } = useAuth();
+  const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState("profile");
-  const [profile, setProfile] = useState({ firstName: user?.firstName, lastName: user?.lastName, email: user?.email });
+  const [profile, setProfile] = useState({
+    firstName: user?.firstName || "",
+    lastName: user?.lastName || "",
+    email: user?.email || "",
+  });
+  const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
+  const roleName = typeof user?.role === "string" ? user.role : (user?.role?.name || "User");
+
+  useEffect(() => {
+    setProfile({
+      firstName: user?.firstName || "",
+      lastName: user?.lastName || "",
+      email: user?.email || "",
+    });
+  }, [user?.id, user?.firstName, user?.lastName, user?.email]);
 
   const tabs = [
     { id: "profile", label: "Profile", icon: Users },
+    { id: "appearance", label: "Appearance", icon: LayoutGrid },
     { id: "security", label: "Security", icon: Shield },
     { id: "notifications", label: "Notifications", icon: Bell },
-    { id: "system", label: "System", icon: Settings },
   ];
 
   const saveProfile = async () => {
+    setSaving(true);
     try {
-      await apiFetch(`/users/${user.id}`, { method: "PUT", body: profile });
+      if (demoMode) {
+        updateUser?.({
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          email: profile.email,
+        });
+        setToast({ message: "Profile updated in this demo session", type: "success" });
+        return;
+      }
+      const updated = await apiFetch("/auth/me", {
+        method: "PUT",
+        body: {
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          email: profile.email,
+        },
+      });
+      updateUser?.(updated);
       setToast({ message: "Profile updated", type: "success" });
-    } catch (e) { setToast({ message: e.message, type: "error" }); }
+    } catch (e) {
+      setToast({ message: e.message, type: "error" });
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const changePassword = async () => {
+    if (!passwords.next || passwords.next !== passwords.confirm) {
+      setToast({ message: "New passwords do not match", type: "error" });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (demoMode) {
+        setToast({ message: "Password changes are disabled in demo mode", type: "error" });
+        return;
+      }
+      await apiFetch("/auth/change-password", {
+        method: "POST",
+        body: { currentPassword: passwords.current, newPassword: passwords.next },
+      });
+      setPasswords({ current: "", next: "", confirm: "" });
+      setToast({ message: "Password updated", type: "success" });
+    } catch (e) {
+      setToast({ message: e.message, type: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const panel = "rounded-xl p-4 sm:p-6 border";
+  const panelStyle = { background: "var(--sn-panel)", borderColor: "var(--sn-rule)" };
+  const heading = { color: "var(--sn-cream)" };
+  const muted = { color: "var(--sn-slate)" };
+  const dim = { color: "var(--sn-dim)" };
 
   return (
     <div>
-      <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Settings</h1>
+      <h1 className="text-lg sm:text-xl font-bold mb-4" style={heading}>Settings</h1>
 
-      {/* Tab bar - scrollable on mobile */}
       <div className="flex items-center gap-1 overflow-x-auto pb-2 mb-4 -mx-3 px-3 sm:mx-0 sm:px-0">
         {tabs.map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-colors min-h-[36px] touch-manipulation ${
-              activeTab === tab.id ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623]" : "text-[#7E8598] hover:bg-[#0E1630]"
-            }`}>
+              activeTab === tab.id ? "font-semibold" : ""
+            }`}
+            style={activeTab === tab.id
+              ? { background: "var(--sn-amber)", color: "var(--sn-cta-text)", opacity: 0.95 }
+              : { color: "var(--sn-slate)" }}
+          >
             <tab.icon size={14} />
             {tab.label}
           </button>
         ))}
       </div>
 
-      {/* Profile tab */}
       {activeTab === "profile" && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Personal Information</h3>
+          <div className={panel} style={panelStyle}>
+            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Personal Information</h3>
             <div className="flex items-center gap-4 mb-6">
               <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xl font-bold text-[#F0EDE5]">
                 {user?.firstName?.[0]}{user?.lastName?.[0]}
               </div>
               <div>
-                <div className="text-sm font-medium text-[#F0EDE5]">{user?.firstName} {user?.lastName}</div>
-                <div className="text-xs text-[#7E8598]">{user?.email}</div>
-                <div className="text-xs text-[#4A5168] mt-0.5">{user?.role || "User"}</div>
+                <div className="text-sm font-medium" style={heading}>{user?.firstName} {user?.lastName}</div>
+                <div className="text-xs" style={muted}>{user?.email}</div>
+                <div className="text-xs mt-0.5" style={dim}>{roleName}</div>
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
               <Input label="First Name" value={profile.firstName} onChange={v => setProfile(p => ({ ...p, firstName: v }))} />
               <Input label="Last Name" value={profile.lastName} onChange={v => setProfile(p => ({ ...p, lastName: v }))} />
-              <Input label="Email" value={profile.email} onChange={v => setProfile(p => ({ ...p, email: v }))} type="email" />
-              <Input label="Phone" value={profile.phone} onChange={v => setProfile(p => ({ ...p, phone: v }))} type="tel" />
+              <Input label="Email" value={profile.email} onChange={v => setProfile(p => ({ ...p, email: v }))} type="email" className="sm:col-span-2" />
             </div>
-            <Button onClick={saveProfile} size="md">Save Changes</Button>
+            <Button onClick={saveProfile} size="md" disabled={saving}>{saving ? "Saving..." : "Save Changes"}</Button>
           </div>
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Account Details</h3>
+          <div className={panel} style={panelStyle}>
+            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Account Details</h3>
             <div className="space-y-3">
-              {[["User ID", user?.id?.substring(0, 12) + "..."], ["Role", user?.role || "User"], ["Created", user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : "-"], ["Last Login", user?.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : "-"], ["Status", "Active"]].map(([k, v]) => (
-                <div key={k} className="flex justify-between py-2 border-b border-[#182550]/40">
-                  <span className="text-xs text-[#7E8598]">{k}</span>
-                  <span className="text-xs text-[#C8C2B4] font-mono">{v}</span>
+              {[
+                ["User ID", user?.id ? `${String(user.id).substring(0, 12)}...` : "-"],
+                ["Role", roleName],
+                ["Created", user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : "-"],
+                ["Last Login", user?.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : "-"],
+                ["Status", user?.active === false ? "Inactive" : "Active"],
+              ].map(([k, v]) => (
+                <div key={k} className="flex justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+                  <span className="text-xs" style={muted}>{k}</span>
+                  <span className="text-xs font-mono" style={{ color: "var(--sn-body)" }}>{String(v)}</span>
                 </div>
               ))}
             </div>
@@ -1671,68 +1756,69 @@ function SettingsPage() {
         </div>
       )}
 
-      {/* Security tab */}
-      {activeTab === "security" && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Change Password</h3>
-            <div className="space-y-3 mb-4">
-              <Input label="Current Password" type="password" value="" onChange={() => {}} />
-              <Input label="New Password" type="password" value="" onChange={() => {}} />
-              <Input label="Confirm Password" type="password" value="" onChange={() => {}} />
+      {activeTab === "appearance" && (
+        <div className={panel} style={panelStyle}>
+          <h3 className="text-sm font-semibold mb-2" style={{ color: "var(--sn-body)" }}>Theme</h3>
+          <p className="text-xs mb-4" style={muted}>Switch between light and dark backgrounds for the product shell.</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <ThemeToggle />
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant={theme === "dark" ? "primary" : "secondary"}
+                onClick={() => setTheme("dark")}
+              >
+                Dark
+              </Button>
+              <Button
+                size="sm"
+                variant={theme === "light" ? "primary" : "secondary"}
+                onClick={() => setTheme("light")}
+              >
+                Light
+              </Button>
             </div>
-            <Button size="md">Update Password</Button>
-          </div>
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Two-Factor Authentication</h3>
-            <p className="text-xs text-[#7E8598] mb-4">Add an extra layer of security to your account.</p>
-            <Button variant="secondary" size="md" icon={Shield}>Enable 2FA</Button>
           </div>
         </div>
       )}
 
-      {/* Notifications tab */}
+      {activeTab === "security" && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className={panel} style={panelStyle}>
+            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Change Password</h3>
+            <div className="space-y-3 mb-4">
+              <Input label="Current Password" type="password" value={passwords.current} onChange={v => setPasswords(p => ({ ...p, current: v }))} />
+              <Input label="New Password" type="password" value={passwords.next} onChange={v => setPasswords(p => ({ ...p, next: v }))} />
+              <Input label="Confirm Password" type="password" value={passwords.confirm} onChange={v => setPasswords(p => ({ ...p, confirm: v }))} />
+            </div>
+            <Button size="md" onClick={changePassword} disabled={saving || demoMode}>Update Password</Button>
+            {demoMode && <p className="text-xs mt-2" style={dim}>Password changes are unavailable in demo mode.</p>}
+          </div>
+          <div className={panel} style={panelStyle}>
+            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Two-Factor Authentication</h3>
+            <p className="text-xs mb-4" style={muted}>Add an extra layer of security to your account.</p>
+            <Button variant="secondary" size="md" icon={Shield} onClick={() => setToast({ message: "2FA setup is available after you create a live account.", type: "success" })}>
+              Enable 2FA
+            </Button>
+          </div>
+        </div>
+      )}
+
       {activeTab === "notifications" && (
-        <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-          <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Notification Preferences</h3>
+        <div className={panel} style={panelStyle}>
+          <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Notification Preferences</h3>
           <div className="space-y-4">
             {[["Deal updates", "Get notified when deals change stage"], ["New leads", "Alerts for newly assigned leads"], ["Case assignments", "Notifications for case routing"], ["Task reminders", "Reminders for upcoming due dates"], ["Mentions", "When someone mentions you in a comment"], ["Weekly digest", "Weekly summary of your pipeline"]].map(([title, desc], i) => (
-              <div key={i} className="flex items-center justify-between py-2 border-b border-[#182550]/40">
+              <div key={i} className="flex items-center justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
                 <div>
-                  <div className="text-sm text-[#F0EDE5]">{title}</div>
-                  <div className="text-xs text-[#4A5168]">{desc}</div>
+                  <div className="text-sm" style={heading}>{title}</div>
+                  <div className="text-xs" style={dim}>{desc}</div>
                 </div>
-                <div className="w-10 h-5 rounded-full bg-[#F5A623] relative cursor-pointer touch-manipulation">
+                <div className="w-10 h-5 rounded-full relative cursor-pointer touch-manipulation" style={{ background: "var(--sn-amber)" }}>
                   <div className="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow" />
                 </div>
               </div>
             ))}
-          </div>
-        </div>
-      )}
-
-      {/* System tab */}
-      {activeTab === "system" && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">System Information</h3>
-            <div className="space-y-2">
-              {[["Version", "4.1.0"], ["Modules", "86 routes"], ["Models", "173"], ["API Endpoints", "575+"], ["Indexes", "253"], ["Database", "PostgreSQL + Prisma"]].map(([k, v]) => (
-                <div key={k} className="flex justify-between py-1.5 border-b border-[#182550]/40">
-                  <span className="text-xs text-[#7E8598]">{k}</span>
-                  <span className="text-xs text-[#C8C2B4] font-mono">{v}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
-            <h3 className="text-sm font-semibold text-[#C8C2B4] mb-4">Data Management</h3>
-            <div className="space-y-3">
-              <Button variant="secondary" size="sm" icon={Download} fullWidth>Export All Data</Button>
-              <Button variant="secondary" size="sm" icon={Upload} fullWidth>Import Data</Button>
-              <Button variant="secondary" size="sm" icon={Recycle} fullWidth>Recycle Bin</Button>
-              <Button variant="danger" size="sm" icon={Trash2} fullWidth>Clear Cache</Button>
-            </div>
           </div>
         </div>
       )}
@@ -1866,7 +1952,7 @@ function LoginPage({ go }) {
             <BrandMark size={56} />
           </div>
           <h1 className="text-2xl font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</h1>
-          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>Enterprise CRM Platform</p>
+          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>Sales CRM</p>
         </div>
         <form onSubmit={handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
           {error && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red)" }}>{error}</div>}
@@ -3999,68 +4085,348 @@ function MapsPage() {
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: Home },
-  { id: "divider-1", divider: true, label: "CRM" },
-  { id: "contacts", label: "Contacts", icon: Users },
-  { id: "leads", label: "Leads", icon: UserPlus },
-  { id: "deals", label: "Deals", icon: Target },
-  { id: "accounts", label: "Accounts", icon: Building2 },
-  { id: "activities", label: "Activities", icon: Calendar },
-  { id: "calendar", label: "Calendar", icon: CalendarDays },
-  { id: "divider-2", divider: true, label: "Communication" },
-  { id: "emails", label: "Emails", icon: Mail },
-  { id: "campaigns", label: "Campaigns", icon: Send },
-  { id: "divider-3", divider: true, label: "Revenue" },
-  { id: "products", label: "Products", icon: Package },
-  { id: "quotes", label: "Quotes", icon: FileText },
-  { id: "invoices", label: "Invoices", icon: DollarSign },
-  { id: "contracts", label: "Contracts", icon: FileText },
-  { id: "orders", label: "Orders", icon: Package },
-  { id: "subscriptions", label: "Subscriptions", icon: RefreshCw },
-  { id: "forecasts", label: "Forecasts", icon: TrendingUp },
-  { id: "divider-4", divider: true, label: "Service" },
-  { id: "cases", label: "Cases", icon: Shield },
-  { id: "entitlements", label: "Entitlements", icon: Shield },
-  { id: "workOrders", label: "Work Orders", icon: Wrench },
-  { id: "knowledge", label: "Knowledge", icon: BookOpen },
-  { id: "divider-5", divider: true, label: "Automation & AI" },
-  { id: "workflows", label: "Workflows", icon: GitBranch },
-  { id: "flowBuilder", label: "Flow Builder", icon: GitBranch },
-  { id: "sequences", label: "Sequences", icon: GitBranch },
-  { id: "approvals", label: "Approvals", icon: CheckCircle2 },
-  { id: "aiAgents", label: "AI Agents", icon: Zap },
-  { id: "copilot", label: "AI Copilot", icon: Zap },
-  { id: "projects", label: "Projects", icon: ListTree },
-  { id: "prospects", label: "Prospects", icon: Target },
-  { id: "bugs", label: "Bugs", icon: AlertTriangle },
-  { id: "sla", label: "SLA Board", icon: Timer },
-  { id: "maps", label: "Territory Map", icon: MapPin },
-  { id: "divider-6", divider: true, label: "Platform" },
-  { id: "customObjects", label: "Custom Objects", icon: Database },
-  { id: "marketplace", label: "Marketplace", icon: Globe },
-  { id: "partners", label: "Partners", icon: Briefcase },
-  { id: "territories", label: "Territories", icon: Globe },
-  { id: "divider-7", divider: true, label: "Content" },
-  { id: "documents", label: "Documents", icon: FolderOpen },
-  { id: "surveys", label: "Surveys", icon: MessageSquare },
-  { id: "chatter", label: "Chatter", icon: MessageSquare },
-  { id: "notes", label: "Notes", icon: FileText },
-  { id: "divider-8", divider: true, label: "Tools" },
-  { id: "reports", label: "Reports", icon: BarChart3 },
-  { id: "analytics", label: "Analytics", icon: PieChart },
-  { id: "search", label: "Search", icon: Search },
-  { id: "import", label: "Import", icon: Upload },
-  { id: "tags", label: "Tags", icon: Tag },
-  { id: "webhooks", label: "Webhooks", icon: Webhook },
-  { id: "recycleBin", label: "Recycle Bin", icon: Recycle },
-  { id: "assets", label: "Assets", icon: Package },
-  { id: "templates", label: "Templates", icon: FileText },
-  { id: "studio", label: "Studio", icon: Wrench },
-  { id: "securityGroups", label: "Security Groups", icon: Lock },
-  { id: "admin", label: "Admin", icon: BarChart3 },
+  {
+    id: "nav-crm",
+    label: "CRM",
+    icon: Users,
+    children: [
+      { id: "contacts", label: "Contacts", icon: Users },
+      { id: "leads", label: "Leads", icon: UserPlus },
+      { id: "deals", label: "Deals", icon: Target },
+      {
+        id: "crm-more",
+        label: "More",
+        icon: MoreVertical,
+        children: [
+          { id: "accounts", label: "Accounts", icon: Building2 },
+          { id: "activities", label: "Activities", icon: Calendar },
+          { id: "calendar", label: "Calendar", icon: CalendarDays },
+        ],
+      },
+    ],
+  },
+  {
+    id: "nav-communication",
+    label: "Communication",
+    icon: Mail,
+    children: [
+      { id: "emails", label: "Emails", icon: Mail },
+      { id: "campaigns", label: "Campaigns", icon: Send },
+      { id: "chatter", label: "Chatter", icon: MessageSquare },
+      { id: "notes", label: "Notes", icon: FileText },
+    ],
+  },
+  {
+    id: "nav-revenue",
+    label: "Revenue",
+    icon: DollarSign,
+    children: [
+      { id: "products", label: "Products", icon: Package },
+      { id: "quotes", label: "Quotes", icon: FileText },
+      { id: "invoices", label: "Invoices", icon: DollarSign },
+      {
+        id: "revenue-more",
+        label: "More",
+        icon: MoreVertical,
+        children: [
+          { id: "contracts", label: "Contracts", icon: FileText },
+          { id: "orders", label: "Orders", icon: Package },
+          { id: "subscriptions", label: "Subscriptions", icon: RefreshCw },
+          { id: "forecasts", label: "Forecasts", icon: TrendingUp },
+        ],
+      },
+    ],
+  },
+  {
+    id: "nav-service",
+    label: "Service",
+    icon: Shield,
+    children: [
+      { id: "cases", label: "Cases", icon: Shield },
+      { id: "knowledge", label: "Knowledge", icon: BookOpen },
+      { id: "workOrders", label: "Work Orders", icon: Wrench },
+      { id: "entitlements", label: "Entitlements", icon: Shield },
+    ],
+  },
+  {
+    id: "nav-automation",
+    label: "Automation & AI",
+    icon: Zap,
+    children: [
+      { id: "workflows", label: "Workflows", icon: GitBranch },
+      { id: "approvals", label: "Approvals", icon: CheckCircle2 },
+      { id: "aiAgents", label: "AI Agents", icon: Zap },
+      {
+        id: "automation-more",
+        label: "More",
+        icon: MoreVertical,
+        children: [
+          { id: "copilot", label: "AI Copilot", icon: Zap },
+          { id: "flowBuilder", label: "Flow Builder", icon: GitBranch },
+          { id: "sequences", label: "Sequences", icon: GitBranch },
+        ],
+      },
+    ],
+  },
+  {
+    id: "nav-operations",
+    label: "Operations",
+    icon: ListTree,
+    children: [
+      { id: "projects", label: "Projects", icon: ListTree },
+      { id: "prospects", label: "Prospects", icon: Target },
+      { id: "sla", label: "SLA Board", icon: Timer },
+      {
+        id: "ops-more",
+        label: "More",
+        icon: MoreVertical,
+        children: [
+          { id: "bugs", label: "Bugs", icon: AlertTriangle },
+          { id: "maps", label: "Territory Map", icon: MapPin },
+        ],
+      },
+    ],
+  },
+  {
+    id: "nav-platform",
+    label: "Platform",
+    icon: Database,
+    children: [
+      { id: "customObjects", label: "Custom Objects", icon: Database },
+      { id: "marketplace", label: "Marketplace", icon: Globe },
+      { id: "partners", label: "Partners", icon: Briefcase },
+      { id: "territories", label: "Territories", icon: Globe },
+    ],
+  },
+  {
+    id: "nav-content",
+    label: "Content",
+    icon: FolderOpen,
+    children: [
+      { id: "documents", label: "Documents", icon: FolderOpen },
+      { id: "surveys", label: "Surveys", icon: MessageSquare },
+      { id: "templates", label: "Templates", icon: FileText },
+      { id: "assets", label: "Assets", icon: Package },
+    ],
+  },
+  {
+    id: "nav-tools",
+    label: "Tools",
+    icon: Wrench,
+    children: [
+      { id: "reports", label: "Reports", icon: BarChart3 },
+      { id: "analytics", label: "Analytics", icon: PieChart },
+      { id: "search", label: "Search", icon: Search },
+      {
+        id: "tools-more",
+        label: "More",
+        icon: MoreVertical,
+        children: [
+          { id: "import", label: "Import", icon: Upload },
+          { id: "tags", label: "Tags", icon: Tag },
+          { id: "webhooks", label: "Webhooks", icon: Webhook },
+          { id: "studio", label: "Studio", icon: Wrench },
+          { id: "securityGroups", label: "Security Groups", icon: Lock },
+        ],
+      },
+    ],
+  },
   { id: "settings", label: "Settings", icon: Settings },
+  { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true },
 ];
 
-// Mobile bottom tab items (quick-access)
+function navContainsPage(item, page) {
+  if (!item) return false;
+  if (item.id === page) return true;
+  return Boolean(item.children?.some((child) => navContainsPage(child, page)));
+}
+
+function useVisibleNavItems() {
+  const { demoMode } = useAuth();
+  return useMemo(
+    () => NAV_ITEMS.filter((item) => !(item.hideInDemo && demoMode)),
+    [demoMode],
+  );
+}
+
+function NavLeaf({ item, page, setPage, onNavigate, depth = 0 }) {
+  const active = page === item.id;
+  const pad = depth === 0 ? "px-2.5 py-2" : depth === 1 ? "px-2.5 py-1.5 pl-8" : "px-2.5 py-1.5 pl-11";
+  return (
+    <button
+      type="button"
+      onClick={() => { setPage(item.id); onNavigate?.(); }}
+      className={`w-full flex items-center gap-2.5 rounded-lg text-sm transition-all touch-manipulation ${pad}`}
+      style={active
+        ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)", fontWeight: 600 }
+        : { color: "var(--sn-slate)" }}
+    >
+      <item.icon size={depth ? 16 : 18} className="shrink-0" />
+      <span className="truncate">{item.label}</span>
+    </button>
+  );
+}
+
+function NavBranch({ item, page, setPage, onNavigate, depth = 0, openMap, toggle }) {
+  const open = Boolean(openMap[item.id]);
+  const activeBranch = navContainsPage(item, page);
+  const pad = depth === 0 ? "px-2.5 py-2" : "px-2.5 py-1.5 pl-8";
+
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={() => toggle(item.id)}
+        className={`w-full flex items-center gap-2.5 rounded-lg text-sm transition-all touch-manipulation ${pad}`}
+        style={activeBranch
+          ? { background: "rgba(245,166,35,0.08)", color: "var(--sn-amber)", fontWeight: 600 }
+          : { color: "var(--sn-slate)" }}
+      >
+        <item.icon size={depth ? 16 : 18} className="shrink-0" />
+        <span className="truncate flex-1 text-left">{item.label}</span>
+        {open ? <ChevronDown size={14} className="shrink-0" /> : <ChevronRight size={14} className="shrink-0" />}
+      </button>
+      {open && item.children.map((child) => (
+        child.children?.length ? (
+          <NavBranch
+            key={child.id}
+            item={child}
+            page={page}
+            setPage={setPage}
+            onNavigate={onNavigate}
+            depth={depth + 1}
+            openMap={openMap}
+            toggle={toggle}
+          />
+        ) : (
+          <NavLeaf
+            key={child.id}
+            item={child}
+            page={page}
+            setPage={setPage}
+            onNavigate={onNavigate}
+            depth={depth + 1}
+          />
+        )
+      ))}
+    </div>
+  );
+}
+
+function NavTree({ page, setPage, collapsed = false, onNavigate }) {
+  const items = useVisibleNavItems();
+
+  const [openMap, setOpenMap] = useState(() => {
+    const initial = {};
+    for (const item of NAV_ITEMS) {
+      if (item.children && navContainsPage(item, page)) {
+        initial[item.id] = true;
+        for (const child of item.children) {
+          if (child.children && navContainsPage(child, page)) initial[child.id] = true;
+        }
+      }
+    }
+    return initial;
+  });
+
+  useEffect(() => {
+    setOpenMap((prev) => {
+      const next = { ...prev };
+      for (const item of NAV_ITEMS) {
+        if (item.children && navContainsPage(item, page)) {
+          next[item.id] = true;
+          for (const child of item.children) {
+            if (child.children && navContainsPage(child, page)) next[child.id] = true;
+          }
+        }
+      }
+      return next;
+    });
+  }, [page]);
+
+  const toggle = (id) => {
+    setOpenMap((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  if (collapsed) {
+    return (
+      <>
+        {items.map((item) => {
+          if (item.children?.length) {
+            const active = navContainsPage(item, page);
+            const firstLeaf = (() => {
+              const walk = (node) => {
+                if (!node.children?.length) return node.id;
+                return walk(node.children[0]);
+              };
+              return walk(item);
+            })();
+            return (
+              <button
+                key={item.id}
+                type="button"
+                title={item.label}
+                onClick={() => { setPage(firstLeaf); onNavigate?.(); }}
+                className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg"
+                style={active
+                  ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)" }
+                  : { color: "var(--sn-slate)" }}
+              >
+                <item.icon size={18} />
+              </button>
+            );
+          }
+          return (
+            <button
+              key={item.id}
+              type="button"
+              title={item.label}
+              onClick={() => { setPage(item.id); onNavigate?.(); }}
+              className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg"
+              style={page === item.id
+                ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)" }
+                : { color: "var(--sn-slate)" }}
+            >
+              <item.icon size={18} />
+            </button>
+          );
+        })}
+      </>
+    );
+  }
+
+  return (
+    <>
+      {items.map((item) => {
+        if (item.children?.length) {
+          return (
+            <NavBranch
+              key={item.id}
+              item={item}
+              page={page}
+              setPage={setPage}
+              onNavigate={onNavigate}
+              depth={0}
+              openMap={openMap}
+              toggle={toggle}
+            />
+          );
+        }
+        return (
+          <NavLeaf
+            key={item.id}
+            item={item}
+            page={page}
+            setPage={setPage}
+            onNavigate={onNavigate}
+            depth={0}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 const BOTTOM_TABS = [
   { id: "dashboard", label: "Home", icon: Home },
   { id: "deals", label: "Deals", icon: Target },
@@ -4069,43 +4435,39 @@ const BOTTOM_TABS = [
   { id: "more", label: "More", icon: Menu },
 ];
 
-// ========================================================================
-// SIDEBAR -- desktop only
-// ========================================================================
 function Sidebar({ page, setPage, collapsed, setCollapsed }) {
   const { logout } = useAuth();
   return (
-    <div className={`hidden md:flex h-full bg-[#081024] border-r border-[#182550] flex-col transition-all duration-200 ${collapsed ? "w-16" : "w-56"}`}>
-      {/* Logo */}
-      <div className="flex items-center gap-2.5 px-4 py-4 border-b border-[#182550]">
+    <div
+      className={`hidden md:flex h-full border-r flex-col transition-all duration-200 ${collapsed ? "w-16" : "w-56"}`}
+      style={{ background: "var(--sn-panel)", borderColor: "var(--sn-rule)" }}
+    >
+      <div className="flex items-center gap-2.5 px-4 py-4 border-b" style={{ borderColor: "var(--sn-rule)" }}>
         <BrandMark size={32} />
-        {!collapsed && <span className="text-sm font-bold text-[#F0EDE5] tracking-tight">Sales Nebula</span>}
+        {!collapsed && (
+          <span className="text-sm font-bold tracking-tight" style={{ color: "var(--sn-cream)" }}>
+            Sales Nebula
+          </span>
+        )}
       </div>
-      {/* Nav */}
       <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-0.5">
-        {NAV_ITEMS.map(item => {
-          if (item.divider) {
-            if (collapsed) return <div key={item.id} className="my-2 border-t border-[#182550]/60" />;
-            return <div key={item.id} className="px-2 pt-4 pb-1.5 text-[10px] font-semibold text-[#4A5168] uppercase tracking-widest">{item.label}</div>;
-          }
-          const active = page === item.id;
-          return (
-            <button key={item.id} onClick={() => setPage(item.id)} title={collapsed ? item.label : undefined}
-              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-all ${active
-                ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623] font-medium"
-                : "text-[#7E8598] hover:bg-[#0E1630] hover:text-[#C8C2B4]"}`}>
-              <item.icon size={18} className="shrink-0" />
-              {!collapsed && <span className="truncate">{item.label}</span>}
-            </button>
-          );
-        })}
+        <NavTree page={page} setPage={setPage} collapsed={collapsed} />
       </nav>
-      {/* Footer */}
-      <div className="border-t border-[#182550] p-2">
-        <button onClick={() => setCollapsed(!collapsed)} className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg text-[#4A5168] hover:bg-[#0E1630] hover:text-[#C8C2B4] text-sm transition-colors">
+      <div className="border-t p-2" style={{ borderColor: "var(--sn-rule)" }}>
+        <button
+          type="button"
+          onClick={() => setCollapsed(!collapsed)}
+          className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg text-sm transition-colors"
+          style={{ color: "var(--sn-dim)" }}
+        >
           {collapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /><span>Collapse</span></>}
         </button>
-        <button onClick={logout} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[#4A5168] hover:bg-[rgba(248,113,113,0.10)] hover:text-[#F87171] text-sm transition-colors mt-0.5">
+        <button
+          type="button"
+          onClick={logout}
+          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm transition-colors mt-0.5"
+          style={{ color: "var(--sn-dim)" }}
+        >
           <LogOut size={16} className="shrink-0" />
           {!collapsed && <span>Sign Out</span>}
         </button>
@@ -4114,41 +4476,35 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
   );
 }
 
-// ========================================================================
-// MOBILE DRAWER
-// ========================================================================
 function MobileDrawer({ open, onClose, page, setPage }) {
   const { logout } = useAuth();
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 md:hidden">
-      <div className="absolute inset-0 bg-[rgba(4,6,16,0.85)]" onClick={onClose} />
-      <div className="relative z-10 h-full w-72 max-w-[80vw] bg-[#081024] shadow-2xl flex flex-col animate-[slideRight_0.2s_ease-out]">
-        <div className="flex items-center justify-between px-4 py-4 border-b border-[#182550]">
+      <div className="absolute inset-0" style={{ background: "rgba(4,6,16,0.85)" }} onClick={onClose} />
+      <div
+        className="relative z-10 h-full w-72 max-w-[80vw] shadow-2xl flex flex-col animate-[slideRight_0.2s_ease-out]"
+        style={{ background: "var(--sn-panel)" }}
+      >
+        <div className="flex items-center justify-between px-4 py-4 border-b" style={{ borderColor: "var(--sn-rule)" }}>
           <div className="flex items-center gap-2.5">
             <BrandMark size={32} />
-            <span className="text-sm font-bold text-[#F0EDE5]">Sales Nebula</span>
+            <span className="text-sm font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</span>
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-[#0E1630] text-[#4A5168]"><X size={18} /></button>
+          <button type="button" onClick={onClose} className="p-2 rounded-lg" style={{ color: "var(--sn-dim)" }}>
+            <X size={18} />
+          </button>
         </div>
         <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-0.5 overscroll-contain">
-          {NAV_ITEMS.map(item => {
-            if (item.divider) return <div key={item.id} className="px-2 pt-4 pb-1.5 text-[10px] font-semibold text-[#4A5168] uppercase tracking-widest">{item.label}</div>;
-            const active = page === item.id;
-            return (
-              <button key={item.id} onClick={() => { setPage(item.id); onClose(); }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all touch-manipulation ${active
-                  ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623] font-medium"
-                  : "text-[#7E8598] hover:bg-[#0E1630] hover:text-[#C8C2B4]"}`}>
-                <item.icon size={18} className="shrink-0" />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+          <NavTree page={page} setPage={setPage} onNavigate={onClose} />
         </nav>
-        <div className="border-t border-[#182550] p-3">
-          <button onClick={() => { logout(); onClose(); }}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-[#4A5168] hover:bg-[rgba(248,113,113,0.10)] hover:text-[#F87171] text-sm">
+        <div className="border-t p-3" style={{ borderColor: "var(--sn-rule)" }}>
+          <button
+            type="button"
+            onClick={() => { logout(); onClose(); }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm"
+            style={{ color: "var(--sn-dim)" }}
+          >
             <LogOut size={16} /> Sign Out
           </button>
         </div>
@@ -4158,20 +4514,23 @@ function MobileDrawer({ open, onClose, page, setPage }) {
   );
 }
 
-// ========================================================================
-// BOTTOM NAV -- mobile only
-// ========================================================================
 function BottomNav({ page, setPage, onMoreClick }) {
   return (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#081024]/95 backdrop-blur-lg border-t border-[#182550] safe-area-bottom">
+    <div
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 backdrop-blur-lg border-t safe-area-bottom"
+      style={{ background: "color-mix(in srgb, var(--sn-panel) 95%, transparent)", borderColor: "var(--sn-rule)" }}
+    >
       <div className="flex items-stretch">
-        {BOTTOM_TABS.map(tab => {
+        {BOTTOM_TABS.map((tab) => {
           const active = tab.id === "more" ? false : page === tab.id;
           return (
-            <button key={tab.id}
-              onClick={() => tab.id === "more" ? onMoreClick() : setPage(tab.id)}
-              className={`flex-1 flex flex-col items-center justify-center py-2 gap-0.5 transition-colors touch-manipulation min-h-[56px]
-                ${active ? "text-[#F5A623]" : "text-[#4A5168] active:text-[#7E8598]"}`}>
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => (tab.id === "more" ? onMoreClick() : setPage(tab.id))}
+              className="flex-1 flex flex-col items-center justify-center py-2 gap-0.5 transition-colors touch-manipulation min-h-[56px]"
+              style={{ color: active ? "var(--sn-amber)" : "var(--sn-dim)" }}
+            >
               <tab.icon size={20} strokeWidth={active ? 2.2 : 1.8} />
               <span className={`text-[10px] ${active ? "font-semibold" : "font-medium"}`}>{tab.label}</span>
             </button>
@@ -4182,55 +4541,75 @@ function BottomNav({ page, setPage, onMoreClick }) {
   );
 }
 
-// ========================================================================
-// TOP BAR
-// ========================================================================
 function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggle }) {
   return (
-    <div className="h-14 border-b border-[#182550] bg-[#081024]/80 backdrop-blur-sm flex items-center justify-between px-3 sm:px-4 md:px-6">
+    <div
+      className="h-14 border-b backdrop-blur-sm flex items-center justify-between px-3 sm:px-4 md:px-6"
+      style={{
+        borderColor: "var(--sn-rule)",
+        background: "color-mix(in srgb, var(--sn-panel) 88%, transparent)",
+      }}
+    >
       <div className="flex items-center gap-2">
-        <button onClick={onMenuToggle} className="md:hidden p-2.5 -ml-1 rounded-lg hover:bg-[#0E1630] text-[#7E8598] hover:text-[#C8C2B4] transition-colors touch-manipulation">
+        <button
+          type="button"
+          onClick={onMenuToggle}
+          className="md:hidden p-2.5 -ml-1 rounded-lg transition-colors touch-manipulation"
+          style={{ color: "var(--sn-slate)" }}
+        >
           <Menu size={20} />
         </button>
-        {/* Quick actions trigger - desktop */}
-        <button onClick={onQuickActionsToggle}
-          className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0E1630] border border-[#182550] hover:border-[#203060] text-[#4A5168] hover:text-[#7E8598] transition-colors text-sm">
+        <button
+          type="button"
+          onClick={onQuickActionsToggle}
+          className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors"
+          style={{ background: "var(--sn-raised)", borderColor: "var(--sn-rule)", color: "var(--sn-dim)" }}
+        >
           <Search size={14} />
           <span>Quick actions...</span>
-          <kbd className="ml-4 px-1 py-0.5 rounded bg-[#081024] text-[9px] border border-[#182550]">Ctrl+K</kbd>
+          <kbd className="ml-4 px-1 py-0.5 rounded text-[9px] border" style={{ background: "var(--sn-panel)", borderColor: "var(--sn-rule)" }}>
+            Ctrl+K
+          </kbd>
         </button>
         <div className="hidden md:block ml-2">
           <ThemeToggle compact />
         </div>
       </div>
       <div className="flex items-center gap-1 sm:gap-2">
-        {/* Quick action - mobile */}
         <div className="md:hidden">
           <ThemeToggle compact />
         </div>
-        <button onClick={onQuickActionsToggle}
-          className="md:hidden p-2.5 rounded-lg hover:bg-[#0E1630] text-[#7E8598] hover:text-[#C8C2B4] transition-colors touch-manipulation">
+        <button
+          type="button"
+          onClick={onQuickActionsToggle}
+          className="md:hidden p-2.5 rounded-lg transition-colors touch-manipulation"
+          style={{ color: "var(--sn-slate)" }}
+        >
           <Search size={18} />
         </button>
-        {/* Notifications */}
-        <button onClick={onNotificationsToggle}
-          className="relative p-2.5 rounded-lg hover:bg-[#0E1630] text-[#7E8598] hover:text-[#C8C2B4] transition-colors touch-manipulation">
+        <button
+          type="button"
+          onClick={onNotificationsToggle}
+          className="relative p-2.5 rounded-lg transition-colors touch-manipulation"
+          style={{ color: "var(--sn-slate)" }}
+        >
           <Bell size={18} />
-          <div className="absolute top-2 right-2 w-2 h-2 bg-[#F5A623] rounded-full" />
+          <div className="absolute top-2 right-2 w-2 h-2 rounded-full" style={{ background: "var(--sn-amber)" }} />
         </button>
-        {/* User avatar */}
-        <div className="flex items-center gap-2 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-[#0E1630] cursor-pointer transition-colors">
+        <div className="flex items-center gap-2 px-2 sm:px-3 py-1.5 rounded-lg cursor-pointer transition-colors">
           <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xs font-bold text-[#F0EDE5]">
             {user?.firstName?.[0]}{user?.lastName?.[0]}
           </div>
-          <span className="hidden sm:inline text-sm text-[#C8C2B4]">{user?.firstName} {user?.lastName}</span>
+          <span className="hidden sm:inline text-sm" style={{ color: "var(--sn-body)" }}>
+            {user?.firstName} {user?.lastName}
+          </span>
         </div>
       </div>
     </div>
   );
 }
 
-function DemoBanner({ go }) {
+function DemoBanner() {
   return (
     <div
       role="status"
@@ -4243,9 +4622,9 @@ function DemoBanner({ go }) {
       <button
         type="button"
         onClick={() => {
-          if (go) go("/");
-          else window.location.href = "/";
-          window.setTimeout(() => { window.location.hash = "access"; }, 0);
+          localStorage.removeItem("sn_demo_mode");
+          localStorage.removeItem("sn_token");
+          window.location.assign("/#access");
         }}
         className="shrink-0 self-start sm:self-auto rounded-md px-3 py-1.5 text-xs font-semibold"
         style={{ background: "var(--sn-cta-text)", color: "var(--sn-amber)" }}
@@ -4265,7 +4644,10 @@ function AppShell({ go }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
 
-  // Keyboard shortcut for quick actions
+  useEffect(() => {
+    if (demo && page === "admin") setPage("dashboard");
+  }, [demo, page]);
+
   useEffect(() => {
     const handler = (e) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setQuickActionsOpen(o => !o); }
@@ -4278,7 +4660,6 @@ function AppShell({ go }) {
   const handleQuickAction = (actionId) => {
     const pageActions = { dashboard: "dashboard", search: "search", settings: "settings" };
     if (pageActions[actionId]) { setPage(pageActions[actionId]); return; }
-    // For "new" actions, navigate to page (create modal handled by page)
     const newActions = { newContact: "contacts", newLead: "leads", newDeal: "deals", newCase: "cases", newActivity: "activities", newQuote: "quotes" };
     if (newActions[actionId]) setPage(newActions[actionId]);
   };
@@ -4308,26 +4689,26 @@ function AppShell({ go }) {
   const PageComponent = pageMap[page] || DashboardPage;
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-[#060B1A] overflow-hidden">
-      {demo && <DemoBanner go={go} />}
+    <div className="flex flex-col h-[100dvh] overflow-hidden" style={{ background: "var(--sn-void)", color: "var(--sn-body)" }}>
+      {demo && <DemoBanner />}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-      <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
-      <MobileDrawer open={mobileDrawerOpen} onClose={() => setMobileDrawerOpen(false)} page={page} setPage={setPage} />
+        <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
+        <MobileDrawer open={mobileDrawerOpen} onClose={() => setMobileDrawerOpen(false)} page={page} setPage={setPage} />
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <TopBar user={user}
-          onMenuToggle={() => setMobileDrawerOpen(o => !o)}
-          onNotificationsToggle={() => setNotificationsOpen(o => !o)}
-          onQuickActionsToggle={() => setQuickActionsOpen(o => !o)} />
+        <div className="flex-1 flex flex-col min-w-0">
+          <TopBar user={user}
+            onMenuToggle={() => setMobileDrawerOpen(o => !o)}
+            onNotificationsToggle={() => setNotificationsOpen(o => !o)}
+            onQuickActionsToggle={() => setQuickActionsOpen(o => !o)} />
 
-        <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
-          <PageComponent />
-        </main>
-      </div>
+          <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
+            <PageComponent />
+          </main>
+        </div>
 
-      <BottomNav page={page} setPage={setPage} onMoreClick={() => setMobileDrawerOpen(true)} />
-      <NotificationPanel open={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
-      <QuickActions open={quickActionsOpen} onClose={() => setQuickActionsOpen(false)} onAction={handleQuickAction} />
+        <BottomNav page={page} setPage={setPage} onMoreClick={() => setMobileDrawerOpen(true)} />
+        <NotificationPanel open={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
+        <QuickActions open={quickActionsOpen} onClose={() => setQuickActionsOpen(false)} onAction={handleQuickAction} />
       </div>
     </div>
   );
