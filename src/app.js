@@ -334,9 +334,9 @@ function createApp(prisma) {
 
   // ─── SERVE THE SINGLE PAGE APP ───
   // Runs after every /api route so it never shadows the API, and before the
-  // 404 handler so client routes like /verify and /accept-invite resolve.
-  // Without the fallback, a visitor who follows an emailed verification link
-  // lands on a JSON 404 instead of the app.
+  // 404 handler so client routes like /verify, /accept-invite, /privacy,
+  // /terms, and /reset-password resolve. Without the fallback, a visitor
+  // who follows an emailed link lands on a JSON 404 instead of the app.
   const spaDir = path.join(__dirname, '..', 'frontend', 'dist');
   if (fs.existsSync(path.join(spaDir, 'index.html'))) {
     app.use(express.static(spaDir, {

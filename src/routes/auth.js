@@ -254,4 +254,88 @@ router.post('/change-password', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/auth/forgot-password — always returns a generic response
+router.post('/forgot-password', limiters.auth, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const generic = {
+      accepted: true,
+      message: 'If an account exists for that address, a reset link is on its way. Check your inbox and spam folder.',
+    };
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(202).json(generic);
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (user && user.active !== false) {
+      const { sendPasswordResetEmail, appUrl } = require('../utils/mail');
+      const resetToken = jwt.sign(
+        { sub: user.id, purpose: 'password-reset' },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+      const resetUrl = appUrl(`/reset-password?token=${encodeURIComponent(resetToken)}`);
+      await sendPasswordResetEmail({
+        to: user.email,
+        firstName: user.firstName,
+        resetUrl,
+      });
+      if (process.env.NODE_ENV !== 'production') {
+        generic.devResetUrl = resetUrl;
+      }
+      await audit(prisma, {
+        action: 'password_reset_request',
+        module: 'auth',
+        details: 'Password reset email issued',
+        userId: user.id,
+      }).catch(() => {});
+    }
+
+    res.status(202).json(generic);
+  } catch (err) { next(err); }
+});
+
+// POST /api/auth/reset-password
+router.post('/reset-password', limiters.auth, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { token, newPassword } = req.body || {};
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'token and newPassword are required' });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(400).json({ error: 'That reset link is invalid or has expired.' });
+    }
+    if (decoded.purpose !== 'password-reset' || !decoded.sub) {
+      return res.status(400).json({ error: 'That reset link is invalid or has expired.' });
+    }
+
+    const pwCheck = validatePassword(newPassword);
+    if (!pwCheck.valid) {
+      return res.status(400).json({ error: 'New password does not meet requirements', details: pwCheck.errors });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: decoded.sub } });
+    if (!user || user.active === false) {
+      return res.status(400).json({ error: 'That reset link is invalid or has expired.' });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 12);
+    await prisma.user.update({ where: { id: user.id }, data: { password: hash } });
+    await audit(prisma, {
+      action: 'password_reset',
+      module: 'auth',
+      details: 'Password reset via email link',
+      userId: user.id,
+    });
+
+    res.json({ success: true, message: 'Password updated. You can sign in with your new password.' });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

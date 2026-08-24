@@ -1928,10 +1928,12 @@ function LoginPage({ go }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState("login"); // login | forgot
 
   const handleLogin = async (e) => {
-    e.preventDefault(); setError(""); setLoading(true);
+    e.preventDefault(); setError(""); setInfo(""); setLoading(true);
     try {
       await login(email, password);
       if (window.location.pathname !== "/app") {
@@ -1939,6 +1941,26 @@ function LoginPage({ go }) {
       }
     } catch (e) { setError(e.message || "Login failed"); }
     finally { setLoading(false); }
+  };
+
+  const handleForgot = async (e) => {
+    e.preventDefault(); setError(""); setInfo(""); setLoading(true);
+    try {
+      const res = await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setInfo(data.message || "If an account exists for that address, a reset link is on its way.");
+      if (data.devResetUrl && import.meta.env.DEV) {
+        setInfo(`${data.message || "Reset link issued."} Dev link: ${data.devResetUrl}`);
+      }
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -1952,31 +1974,59 @@ function LoginPage({ go }) {
             <BrandMark size={56} />
           </div>
           <h1 className="text-2xl font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</h1>
-          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>Sales CRM</p>
+          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>
+            {mode === "forgot" ? "Reset your password" : "Sales CRM"}
+          </p>
         </div>
-        <form onSubmit={handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+        <form onSubmit={mode === "forgot" ? handleForgot : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
           {error && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red)" }}>{error}</div>}
+          {info && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(52,211,153,0.10)", border: "1px solid rgba(52,211,153,0.20)", color: "var(--sn-green, #34D399)" }}>{info}</div>}
           <Input label="Email" type="email" value={email} onChange={setEmail} required placeholder="your@email.com" />
-          <Input label="Password" type="password" value={password} onChange={setPassword} required placeholder="Password" />
-          <Button onClick={handleLogin} disabled={loading} fullWidth size="lg">
-            {loading ? "Signing in..." : "Sign In"}
+          {mode === "login" && (
+            <Input label="Password" type="password" value={password} onChange={setPassword} required placeholder="Password" />
+          )}
+          <Button onClick={mode === "forgot" ? handleForgot : handleLogin} disabled={loading} fullWidth size="lg">
+            {loading
+              ? (mode === "forgot" ? "Sending..." : "Signing in...")
+              : (mode === "forgot" ? "Send reset link" : "Sign In")}
           </Button>
 
-          <button
-            type="button"
-            onClick={() => { setEmail(DEMO_LOGIN.email); setPassword(DEMO_LOGIN.password); setError(""); }}
-            className="w-full rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
-            style={{
-              background: "var(--sn-raised)",
-              border: "1px solid var(--sn-rule)",
-              color: "var(--sn-cream)",
-            }}
-          >
-            Use demo access
-          </button>
-          <p className="text-center text-xs" style={{ color: "var(--sn-dim)" }}>
-            Fills the form with the shared demo login. Request an account for your own data.
-          </p>
+          {mode === "login" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => { setMode("forgot"); setError(""); setInfo(""); }}
+                className="w-full text-xs hover:underline"
+                style={{ color: "var(--sn-amber)", background: "none", border: "none", cursor: "pointer" }}
+              >
+                Forgot password?
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEmail(DEMO_LOGIN.email); setPassword(DEMO_LOGIN.password); setError(""); setInfo(""); }}
+                className="w-full rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
+                style={{
+                  background: "var(--sn-raised)",
+                  border: "1px solid var(--sn-rule)",
+                  color: "var(--sn-cream)",
+                }}
+              >
+                Use demo access
+              </button>
+              <p className="text-center text-xs" style={{ color: "var(--sn-dim)" }}>
+                Fills the form with the shared demo login. Request an account for your own data.
+              </p>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setMode("login"); setError(""); setInfo(""); }}
+              className="w-full text-xs hover:underline"
+              style={{ color: "var(--sn-amber)", background: "none", border: "none", cursor: "pointer" }}
+            >
+              Back to sign in
+            </button>
+          )}
         </form>
 
         <div className="text-center mt-5 space-y-2">

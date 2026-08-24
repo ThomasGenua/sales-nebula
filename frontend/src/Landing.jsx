@@ -956,7 +956,39 @@ function Footer({ go }) {
             Sales Nebula
           </span>
         </div>
-        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => go("/privacy")}
+            style={{
+              fontFamily: body,
+              fontSize: 13,
+              fontWeight: 600,
+              color: C.slate,
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: 0,
+            }}
+          >
+            Privacy
+          </button>
+          <button
+            type="button"
+            onClick={() => go("/terms")}
+            style={{
+              fontFamily: body,
+              fontSize: 13,
+              fontWeight: 600,
+              color: C.slate,
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: 0,
+            }}
+          >
+            Terms
+          </button>
           <button
             type="button"
             onClick={() => go("/login")}

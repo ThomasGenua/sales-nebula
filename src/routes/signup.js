@@ -4,6 +4,11 @@ const bcrypt = require('bcryptjs');
 const { authenticate, requirePermission, validatePassword, signAccessToken } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createLimiter } = require('../middleware/rateLimit');
+const {
+  sendVerificationEmail,
+  sendInviteEmail,
+  sendWelcomeEmail,
+} = require('../utils/mail');
 
 const router = Router();
 
@@ -13,6 +18,11 @@ const verifyLimiter = createLimiter({ windowMs: 15 * 60 * 1000, max: 20, message
 
 const VERIFY_TTL_HOURS = 48;
 const INVITE_TTL_DAYS = 7;
+
+function publicOrigin(req) {
+  const raw = process.env.FRONTEND_URL || req.headers.origin || `${req.protocol}://${req.get('host')}`;
+  return String(raw).replace(/\/$/, '');
+}
 
 /** Generate a token and its storage hash. The raw value is shown once. */
 function makeToken() {
@@ -115,10 +125,15 @@ router.post('/', signupLimiter, async (req, res, next) => {
       });
     }
 
-    const verifyUrl = `${req.headers.origin || `${req.protocol}://${req.get('host')}`}/verify?token=${raw}`;
+    const verifyUrl = `${publicOrigin(req)}/verify?token=${raw}`;
 
-    // Delivery is handled by the mail worker. The raw token is returned only
-    // outside production so the flow is testable without an SMTP server.
+    await sendVerificationEmail({
+      to: clean,
+      firstName: firstName || request.firstName,
+      verifyUrl,
+    });
+
+    // Raw token is returned only outside production so the flow is testable without SMTP.
     const payload = genericAccepted(clean);
     if (process.env.NODE_ENV !== 'production') payload.devVerifyUrl = verifyUrl;
 
@@ -177,8 +192,10 @@ router.post('/resend', signupLimiter, async (req, res, next) => {
     });
 
     const payload = genericAccepted(clean);
+    const verifyUrl = `${publicOrigin(req)}/verify?token=${raw}`;
+    await sendVerificationEmail({ to: clean, firstName: request.firstName, verifyUrl });
     if (process.env.NODE_ENV !== 'production') {
-      payload.devVerifyUrl = `${req.headers.origin || `${req.protocol}://${req.get('host')}`}/verify?token=${raw}`;
+      payload.devVerifyUrl = verifyUrl;
     }
     res.status(202).json(payload);
   } catch (err) { next(err); }
@@ -288,7 +305,13 @@ router.post('/requests/:id/approve', authenticate, requirePermission('admin', 'e
 
     await req.audit({ action: 'update', module: 'signup', recordId: request.id, details: `Signup approved and invite issued: ${request.email}` });
 
-    const inviteUrl = `${req.headers.origin || `${req.protocol}://${req.get('host')}`}/accept-invite?token=${raw}`;
+    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    await sendInviteEmail({
+      to: request.email,
+      firstName: request.firstName,
+      inviteUrl,
+      message: req.body.message || null,
+    });
     const payload = { approved: true, inviteId: invite.id, email: request.email, expiresAt: invite.expiresAt };
     if (process.env.NODE_ENV !== 'production') payload.devInviteUrl = inviteUrl;
     res.status(201).json(payload);
@@ -365,7 +388,8 @@ router.post('/invites', authenticate, requirePermission('admin', 'edit'), auditM
 
     await req.audit({ action: 'create', module: 'signup', recordId: invite.id, details: `Invite sent: ${clean}` });
 
-    const inviteUrl = `${req.headers.origin || `${req.protocol}://${req.get('host')}`}/accept-invite?token=${raw}`;
+    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    await sendInviteEmail({ to: clean, firstName, inviteUrl, message });
     const payload = { id: invite.id, email: invite.email, expiresAt: invite.expiresAt, status: invite.status };
     if (process.env.NODE_ENV !== 'production') payload.devInviteUrl = inviteUrl;
     res.status(201).json(payload);
@@ -404,8 +428,15 @@ router.post('/invites/:id/resend', authenticate, requirePermission('admin', 'edi
     });
 
     const payload = { resent: true, resendCount: updated.resendCount, expiresAt: updated.expiresAt };
+    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    await sendInviteEmail({
+      to: invite.email,
+      firstName: invite.firstName,
+      inviteUrl,
+      message: invite.message,
+    });
     if (process.env.NODE_ENV !== 'production') {
-      payload.devInviteUrl = `${req.headers.origin || `${req.protocol}://${req.get('host')}`}/accept-invite?token=${raw}`;
+      payload.devInviteUrl = inviteUrl;
     }
     res.json(payload);
   } catch (err) { next(err); }
@@ -476,6 +507,11 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
 
     const accessToken = signAccessToken(user.id, user.role.name);
     const { password: _pw, ...safeUser } = user;
+
+    await sendWelcomeEmail({ to: user.email, firstName: user.firstName }).catch((err) => {
+      console.error('[welcome-email]', err.message);
+    });
+
     res.status(201).json({ token: accessToken, user: safeUser });
   } catch (err) { next(err); }
 });

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import Landing, { VerifyPage, AcceptInvitePage } from "./Landing";
+import { PrivacyPage, TermsPage } from "./Legal";
+import ResetPasswordPage from "./ResetPassword";
 import { ThemeProvider } from "./theme";
 import "./index.css";
 
@@ -11,15 +13,17 @@ import "./index.css";
  * The public site and the authenticated product are separate surfaces:
  * "/" must render marketing to a stranger, and "/app" must never render
  * anything before a session exists. Hand-rolled rather than pulling in a
- * router dependency, since there are only four routes.
+ * router dependency.
  */
 function Root() {
   const [path, setPath] = useState(window.location.pathname);
 
   const go = useCallback((next) => {
-    if (next === window.location.pathname) return;
-    window.history.pushState({}, "", next);
-    setPath(next);
+    const url = new URL(next, window.location.origin);
+    const nextPath = url.pathname + url.search;
+    if (nextPath === window.location.pathname + window.location.search) return;
+    window.history.pushState({}, "", nextPath);
+    setPath(url.pathname);
     window.scrollTo(0, 0);
   }, []);
 
@@ -31,6 +35,9 @@ function Root() {
 
   if (path === "/verify") return <VerifyPage go={go} />;
   if (path === "/accept-invite") return <AcceptInvitePage go={go} />;
+  if (path === "/privacy") return <PrivacyPage go={go} />;
+  if (path === "/terms") return <TermsPage go={go} />;
+  if (path === "/reset-password") return <ResetPasswordPage go={go} />;
   if (path === "/app" || path.startsWith("/app/") || path === "/login") return <App go={go} startOnLogin={path === "/login"} />;
   if (path === "/") return <Landing go={go} />;
 

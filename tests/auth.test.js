@@ -148,3 +148,61 @@ describe('Permission middleware', () => {
     expect(createRes.status).toBe(403);
   });
 });
+
+describe('POST /api/auth/forgot-password and reset-password', () => {
+  it('accepts a forgot-password request and issues a reset token in non-production', async () => {
+    await createTestUser({ email: 'resetme@test.com', password: 'OldPass1!' });
+
+    const res = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'resetme@test.com' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.accepted).toBe(true);
+    expect(res.body.devResetUrl).toMatch(/\/reset-password\?token=/);
+  });
+
+  it('does not reveal whether an email exists', async () => {
+    const res = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'nobody@test.com' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.accepted).toBe(true);
+    expect(res.body.devResetUrl).toBeUndefined();
+  });
+
+  it('resets the password with a valid token', async () => {
+    await createTestUser({ email: 'changeme@test.com', password: 'OldPass1!' });
+
+    const forgot = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'changeme@test.com' });
+    const token = new URL(forgot.body.devResetUrl).searchParams.get('token');
+
+    const reset = await request(app)
+      .post('/api/auth/reset-password')
+      .send({ token, newPassword: 'NewPass2!' });
+
+    expect(reset.status).toBe(200);
+    expect(reset.body.success).toBe(true);
+
+    const loginOld = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'changeme@test.com', password: 'OldPass1!' });
+    expect(loginOld.status).toBe(401);
+
+    const loginNew = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'changeme@test.com', password: 'NewPass2!' });
+    expect(loginNew.status).toBe(200);
+    expect(loginNew.body.token).toBeDefined();
+  });
+
+  it('rejects an invalid reset token', async () => {
+    const res = await request(app)
+      .post('/api/auth/reset-password')
+      .send({ token: 'not-a-token', newPassword: 'NewPass2!' });
+    expect(res.status).toBe(400);
+  });
+});
