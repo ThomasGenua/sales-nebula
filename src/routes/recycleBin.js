@@ -1,0 +1,185 @@
+const { Router } = require('express');
+const { authenticate, requirePermission } = require('../middleware/auth');
+const { auditMiddleware } = require('../middleware/audit');
+
+const router = Router();
+router.use(authenticate, auditMiddleware);
+
+const MODEL_MAP = {
+  contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
+  activities: 'activity', cases: 'case', products: 'product',
+  quotes: 'quote', invoices: 'invoice', campaigns: 'campaign',
+  documents: 'document', emails: 'email',
+  contracts: 'contract', orders: 'order', entitlements: 'entitlement',
+};
+
+// LIST deleted items
+router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module, page = 1, limit = 50, search } = req.query;
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
+
+    let where = {};
+    if (module) where.module = module;
+
+    const [items, total] = await Promise.all([
+      prisma.recycleBinItem.findMany({
+        where, orderBy: { deletedAt: 'desc' }, skip, take,
+      }),
+      prisma.recycleBinItem.count({ where }),
+    ]);
+
+    // Hydrate deleted-by user
+    const userIds = [...new Set(items.map(i => i.deletedById))];
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    const userMap = Object.fromEntries(users.map(u => [u.id, u]));
+
+    const data = items.map(item => ({
+      id: item.id,
+      module: item.module,
+      recordId: item.recordId,
+      name: extractName(item.module, item.recordData),
+      deletedBy: userMap[item.deletedById] || null,
+      deletedAt: item.deletedAt,
+      expiresAt: item.expiresAt,
+    }));
+
+    res.json({ data, meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) } });
+  } catch (err) { next(err); }
+});
+
+// RESTORE a deleted item
+router.post('/:id/restore', requirePermission('settings', 'full'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const item = await prisma.recycleBinItem.findUnique({ where: { id: req.params.id } });
+    if (!item) return res.status(404).json({ error: 'Not found in recycle bin' });
+
+    const modelName = MODEL_MAP[item.module];
+    if (!modelName || !prisma[modelName]) {
+      return res.status(400).json({ error: `Cannot restore module: ${item.module}` });
+    }
+
+    // Check if record ID already exists (was re-created)
+    const existing = await prisma[modelName].findUnique({ where: { id: item.recordId } }).catch(() => null);
+    if (existing) {
+      return res.status(409).json({ error: 'A record with this ID already exists. It may have been re-created.' });
+    }
+
+    // Restore the record
+    const data = typeof item.recordData === 'string' ? JSON.parse(item.recordData) : item.recordData;
+    // Strip auto-managed fields that Prisma handles
+    delete data.createdAt;
+    delete data.updatedAt;
+
+    const restored = await prisma[modelName].create({ data });
+
+    // Remove from recycle bin
+    await prisma.recycleBinItem.delete({ where: { id: item.id } });
+
+    await req.audit({ action: 'create', module: item.module, recordId: restored.id, details: `Restored from recycle bin` });
+    res.json({ success: true, restored });
+  } catch (err) { next(err); }
+});
+
+// PERMANENTLY DELETE
+router.delete('/:id', requirePermission('settings', 'full'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    await prisma.recycleBinItem.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// EMPTY recycle bin (purge all)
+router.post('/empty', requirePermission('settings', 'full'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module } = req.body;
+    const where = module ? { module } : {};
+    const result = await prisma.recycleBinItem.deleteMany({ where });
+    await req.audit({ action: 'delete', module: 'settings', details: `Emptied recycle bin (${result.count} items)` });
+    res.json({ success: true, purged: result.count });
+  } catch (err) { next(err); }
+});
+
+// GET recycle bin stats
+router.get('/stats', requirePermission('settings', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const items = await prisma.recycleBinItem.groupBy({ by: ['module'], _count: true });
+    const total = items.reduce((s, i) => s + i._count, 0);
+    const byModule = Object.fromEntries(items.map(i => [i.module, i._count]));
+    res.json({ total, byModule });
+  } catch (err) { next(err); }
+});
+
+function extractName(module, data) {
+  const d = typeof data === 'string' ? JSON.parse(data) : data;
+  switch (module) {
+    case 'contacts': return `${d.firstName || ''} ${d.lastName || ''}`.trim();
+    case 'leads': return `${d.firstName || ''} ${d.lastName || ''}`.trim();
+    case 'deals': return d.name || '';
+    case 'accounts': return d.name || '';
+    case 'cases': return d.subject || d.caseNumber || '';
+    case 'products': return d.name || '';
+    default: return d.name || d.subject || d.id || '';
+  }
+}
+
+module.exports = router;
+
+// Recycle bin stats
+router.get('/stats', authenticate, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const modules = ['contact', 'lead', 'deal', 'account', 'case', 'activity', 'campaign', 'product', 'quote', 'invoice', 'contract', 'order'];
+    const stats = {};
+    let total = 0;
+    for (const mod of modules) {
+      try {
+        const count = await prisma[mod].count({ where: { deletedAt: { not: null } } });
+        stats[mod] = count;
+        total += count;
+      } catch (e) { stats[mod] = 0; }
+    }
+    const oldestDeletion = await prisma.contact.findFirst({ where: { deletedAt: { not: null } }, orderBy: { deletedAt: 'asc' }, select: { deletedAt: true } }).catch(() => null);
+    res.json({ total, byModule: stats, oldestDeletion: oldestDeletion?.deletedAt, retentionDays: 30 });
+  } catch (err) { next(err); }
+});
+
+// Bulk restore
+router.post('/restore/bulk', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module, ids } = req.body;
+    if (!module || !ids?.length) return res.status(400).json({ error: 'module and ids required' });
+    const result = await prisma[module].updateMany({ where: { id: { in: ids }, deletedAt: { not: null } }, data: { deletedAt: null } });
+    await req.audit({ action: 'restore', module: 'recycleBin', recordId: module, details: `Bulk restored ${result.count} ${module} records` });
+    res.json({ restored: result.count });
+  } catch (err) { next(err); }
+});
+
+// Permanent delete (purge)
+router.delete('/purge', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module, olderThanDays = 30 } = req.body;
+    const cutoff = new Date(Date.now() - olderThanDays * 86400000);
+    const modules = module ? [module] : ['contact', 'lead', 'deal', 'account', 'case', 'activity'];
+    let totalPurged = 0;
+    for (const m of modules) {
+      try {
+        const result = await prisma[m].deleteMany({ where: { deletedAt: { not: null, lt: cutoff } } });
+        totalPurged += result.count;
+      } catch (e) {}
+    }
+    await req.audit({ action: 'delete', module: 'recycleBin', recordId: 'purge', details: `Purged ${totalPurged} records older than ${olderThanDays} days` });
+    res.json({ purged: totalPurged, cutoffDate: cutoff });
+  } catch (err) { next(err); }
+});

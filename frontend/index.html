@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#060B1A" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("sn_theme");
+        document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
+        if (t === "light") document.querySelector('meta[name="theme-color"]').setAttribute("content", "#F4F1E8");
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    })();
+  </script>
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
+  <title>Sales Nebula — the entire back office, on your servers</title>
+  <meta name="description" content="Self-hostable CRM, quoting, projects, field service, and case management in one codebase. 1,172 API endpoints across 97 modules. No per-seat licence." />
+  <link rel="canonical" href="https://salesnebula.com/" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Sales Nebula" />
+  <meta property="og:title" content="Sales Nebula — the entire back office, on your servers" />
+  <meta property="og:description" content="CRM, quoting, projects, field service, and case management in one codebase you can host and change. No per-seat licence." />
+  <meta property="og:url" content="https://salesnebula.com/" />
+  <meta property="og:image" content="/og.svg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Sales Nebula — the entire back office, on your servers" />
+  <meta name="twitter:description" content="1,172 API endpoints across 97 modules. Self-host it, read it, change it." />
+  <meta name="twitter:image" content="/og.svg" />
+
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

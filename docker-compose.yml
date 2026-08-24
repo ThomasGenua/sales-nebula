@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # ─── PostgreSQL Database ───
+  postgres:
+    image: postgres:16-alpine
+    container_name: sn-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: salesnebula
+      POSTGRES_PASSWORD: snpassword
+      POSTGRES_DB: sales_nebula
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesnebula -d sales_nebula"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis (Cache + Job Queue) ───
+  redis:
+    image: redis:7-alpine
+    container_name: sn-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Sales Nebula API ───
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sn-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "7544:7544"
+    environment:
+      NODE_ENV: production
+      PORT: 7544
+      DATABASE_URL: postgresql://salesnebula:snpassword@postgres:5432/sales_nebula?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-strong-random-secret-in-production}
+      JWT_EXPIRES_IN: 7d
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:7544}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+    volumes:
+      - uploads_data:/app/uploads
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:7544/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  # ─── Database Migration & Seed (run once) ───
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sn-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://salesnebula:snpassword@postgres:5432/sales_nebula?schema=public
+    command: >
+      sh -c "
+        npx prisma migrate deploy &&
+        node prisma/seed.js &&
+        echo 'Migration and seed complete!'
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local

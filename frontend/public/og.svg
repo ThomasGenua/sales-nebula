@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#060B1A"/>
+  <g stroke="#182550" stroke-width="1" opacity="0.55">
+    <line x1="0" y1="150" x2="1200" y2="150"/>
+    <line x1="0" y1="480" x2="1200" y2="480"/>
+  </g>
+  <g font-family="IBM Plex Mono, monospace" font-size="19" fill="#4A5168" letter-spacing="3">
+    <text x="80" y="98">SELF-HOSTED CRM / ERP</text>
+  </g>
+  <g font-family="IBM Plex Sans Condensed, Arial Narrow, sans-serif" font-weight="700" font-size="104" letter-spacing="-1">
+    <text x="80" y="272" fill="#F0EDE5">THE ENTIRE</text>
+    <text x="80" y="368" fill="#F0EDE5">BACK OFFICE.</text>
+    <text x="80" y="452" fill="#F5A623">YOUR SERVERS.</text>
+  </g>
+  <g font-family="IBM Plex Mono, monospace" font-size="26" fill="#7E8598">
+    <text x="80" y="552">1,172 endpoints</text>
+    <text x="420" y="552">97 modules</text>
+    <text x="680" y="552">286 models</text>
+    <text x="960" y="552" fill="#34D399">0 seat fees</text>
+  </g>
+</svg>

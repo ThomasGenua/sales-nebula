@@ -1,0 +1,395 @@
+const { createCrudRouter } = require('../utils/crud');
+const { requirePermission } = require('../middleware/auth');
+
+module.exports = createCrudRouter('deal', 'deals', {
+  include: {
+    account: { select: { id: true, name: true, industry: true } },
+    contact: { select: { id: true, firstName: true, lastName: true, email: true } },
+    owner: { select: { id: true, firstName: true, lastName: true } },
+    customValues: { include: { customField: true } },
+  },
+  searchFilter: (q) => ({ name: { contains: q, mode: 'insensitive' } }),
+  validate: (data) => {
+    const errors = {};
+    if (!data.name?.trim()) errors.name = 'Required';
+    return { valid: Object.keys(errors).length === 0, errors };
+  },
+  orderBy: { updatedAt: 'desc' },
+  afterUpdate: async (record, req) => {
+    // Track stage changes
+    const prisma = req.app.locals.prisma;
+    const oldStage = req._oldDealStage;
+    if (oldStage && oldStage !== record.stage) {
+      // Calculate days in old stage
+      const lastHistory = await prisma.dealStageHistory.findFirst({
+        where: { dealId: record.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      const duration = lastHistory
+        ? Math.round((Date.now() - lastHistory.createdAt.getTime()) / 86400000)
+        : null;
+
+      await prisma.dealStageHistory.create({
+        data: {
+          dealId: record.id,
+          fromStage: oldStage,
+          toStage: record.stage,
+          changedById: req.userId,
+          duration,
+        },
+      });
+
+      if (req.app.locals.emit?.dealStageChanged) {
+        req.app.locals.emit.dealStageChanged(record, oldStage, record.stage);
+      }
+    }
+  },
+  beforeUpdate: async (data, req) => {
+    // Store old stage for afterUpdate comparison
+    if (data.stage) {
+      const prisma = req.app.locals.prisma;
+      const current = await prisma.deal.findUnique({ where: { id: req.params.id }, select: { stage: true } });
+      req._oldDealStage = current?.stage;
+    }
+    return data;
+  },
+  customRoutes: (router) => {
+    // GET /api/deals/pipeline - Pipeline summary stats
+    router.get('/stats/pipeline', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const deals = await prisma.deal.findMany();
+        const stages = ['Qualification', 'Discovery', 'Proposal', 'Negotiation', 'Closed Won', 'Closed Lost'];
+        const pipeline = stages.map(stage => ({
+          stage,
+          count: deals.filter(d => d.stage === stage).length,
+          value: deals.filter(d => d.stage === stage).reduce((s, d) => s + d.value, 0),
+        }));
+        const open = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
+        const won = deals.filter(d => d.stage === 'Closed Won');
+        const lost = deals.filter(d => d.stage === 'Closed Lost');
+        res.json({
+          pipeline,
+          summary: {
+            totalOpen: open.length,
+            totalValue: open.reduce((s, d) => s + d.value, 0),
+            wonCount: won.length,
+            wonValue: won.reduce((s, d) => s + d.value, 0),
+            lostCount: lost.length,
+            winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
+            avgDealSize: open.length > 0 ? Math.round(open.reduce((s, d) => s + d.value, 0) / open.length) : 0,
+          },
+        });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/:id/timeline
+    router.get('/:id/timeline', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const id = req.params.id;
+        const [activities, emails, cases, quotes, invoices, stageHistory] = await Promise.all([
+          prisma.activity.findMany({ where: { dealId: id }, orderBy: { date: 'desc' }, take: 20 }),
+          prisma.email.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 20 }),
+          prisma.case.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 10 }),
+          prisma.quote.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
+          prisma.invoice.findMany({ where: { quote: { dealId: id } }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
+          prisma.dealStageHistory.findMany({ where: { dealId: id }, orderBy: { createdAt: 'asc' } }),
+        ]);
+        res.json({ activities, emails, cases, quotes, invoices, stageHistory });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/stats/velocity - Average time in each stage
+    router.get('/stats/velocity', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const history = await prisma.dealStageHistory.findMany({
+          where: { duration: { not: null } },
+          select: { fromStage: true, duration: true },
+        });
+
+        const stages = {};
+        history.forEach(h => {
+          if (!h.fromStage) return;
+          if (!stages[h.fromStage]) stages[h.fromStage] = { total: 0, count: 0 };
+          stages[h.fromStage].total += h.duration;
+          stages[h.fromStage].count++;
+        });
+
+        const velocity = Object.entries(stages).map(([stage, data]) => ({
+          stage,
+          avgDays: Math.round(data.total / data.count),
+          count: data.count,
+        }));
+
+        res.json({ data: velocity });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/:id/line-items
+    router.get('/:id/line-items', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const items = await prisma.dealLineItem.findMany({
+          where: { dealId: req.params.id },
+          include: { product: { select: { id: true, name: true, sku: true } } },
+          orderBy: { sortOrder: 'asc' },
+        });
+        const subtotal = items.reduce((s, i) => s + i.total, 0);
+        res.json({ data: items, subtotal });
+      } catch (err) { next(err); }
+    });
+
+    // POST /api/deals/:id/line-items
+    router.post('/:id/line-items', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const { productId, name, quantity = 1, price, discount = 0 } = req.body;
+        const total = price * quantity * (1 - discount / 100);
+        const count = await prisma.dealLineItem.count({ where: { dealId: req.params.id } });
+        const item = await prisma.dealLineItem.create({
+          data: { dealId: req.params.id, productId, name, quantity, price, discount, total, sortOrder: count },
+          include: { product: { select: { id: true, name: true, sku: true } } },
+        });
+
+        // Update deal value to match line items total
+        const allItems = await prisma.dealLineItem.findMany({ where: { dealId: req.params.id } });
+        const dealTotal = allItems.reduce((s, i) => s + i.total, 0);
+        await prisma.deal.update({ where: { id: req.params.id }, data: { value: dealTotal } });
+
+        res.status(201).json(item);
+      } catch (err) { next(err); }
+    });
+
+    // DELETE /api/deals/:id/line-items/:itemId
+    router.delete('/:id/line-items/:itemId', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        await prisma.dealLineItem.delete({ where: { id: req.params.itemId } });
+
+        // Recalculate deal value
+        const allItems = await prisma.dealLineItem.findMany({ where: { dealId: req.params.id } });
+        const dealTotal = allItems.reduce((s, i) => s + i.total, 0);
+        await prisma.deal.update({ where: { id: req.params.id }, data: { value: dealTotal } });
+
+        res.json({ success: true });
+      } catch (err) { next(err); }
+    });
+
+    // POST /api/deals/:id/clone
+    router.post('/:id/clone', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const source = await prisma.deal.findUnique({
+          where: { id: req.params.id },
+          include: { lineItems: true },
+        });
+        if (!source) return res.status(404).json({ error: 'Not found' });
+
+        const { id, createdAt, updatedAt, lineItems, stageHistory, ...data } = source;
+        data.name = `${data.name} (Copy)`;
+        data.stage = 'Qualification';
+        data.closeDate = new Date(Date.now() + 30 * 86400000); // 30 days out
+        data.ownerId = req.userId;
+
+        const clone = await prisma.deal.create({
+          data: {
+            ...data,
+            lineItems: lineItems.length > 0 ? {
+              create: lineItems.map(({ id, dealId, createdAt, ...item }) => item),
+            } : undefined,
+          },
+          include: {
+            account: { select: { id: true, name: true } },
+            lineItems: true,
+          },
+        });
+        res.status(201).json(clone);
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/:id/competitors
+    router.get('/:id/competitors', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+        if (!deal) return res.status(404).json({ error: 'Not found' });
+        // Competitors stored as JSON on the deal
+        res.json({ data: deal.competitors || [] });
+      } catch (err) { next(err); }
+    });
+
+    // PUT /api/deals/:id/competitors
+    router.put('/:id/competitors', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const { competitors } = req.body; // Array of {name, strengths, weaknesses, threat}
+        const deal = await prisma.deal.update({
+          where: { id: req.params.id },
+          data: { competitors },
+        });
+        res.json({ data: deal.competitors });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/stats/aging - Deal aging (days in current stage)
+    router.get('/stats/aging', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const deals = await prisma.deal.findMany({
+          where: { stage: { notIn: ['Closed Won', 'Closed Lost'] } },
+          select: { id: true, name: true, stage: true, value: true, updatedAt: true, createdAt: true, account: { select: { name: true } } },
+        });
+
+        const now = Date.now();
+        const aging = deals.map(d => ({
+          id: d.id,
+          name: d.name,
+          account: d.account?.name,
+          stage: d.stage,
+          value: d.value,
+          daysInStage: Math.round((now - d.updatedAt.getTime()) / 86400000),
+          totalAge: Math.round((now - d.createdAt.getTime()) / 86400000),
+        })).sort((a, b) => b.daysInStage - a.daysInStage);
+
+        const staleDeals = aging.filter(d => d.daysInStage > 30);
+        const atRisk = aging.filter(d => d.daysInStage > 14 && d.daysInStage <= 30);
+
+        res.json({ data: aging, staleDeals: staleDeals.length, atRisk: atRisk.length, total: aging.length });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/stats/win-loss - Win/loss analysis
+    router.get('/stats/win-loss', async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const { period } = req.query; // e.g. 'month', 'quarter', 'year'
+        const now = new Date();
+        let dateFilter = {};
+
+        if (period === 'month') {
+          dateFilter = { gte: new Date(now.getFullYear(), now.getMonth(), 1) };
+        } else if (period === 'quarter') {
+          dateFilter = { gte: new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1) };
+        } else if (period === 'year') {
+          dateFilter = { gte: new Date(now.getFullYear(), 0, 1) };
+        }
+
+        const where = dateFilter.gte ? { closeDate: dateFilter, stage: { in: ['Closed Won', 'Closed Lost'] } } : { stage: { in: ['Closed Won', 'Closed Lost'] } };
+        const deals = await prisma.deal.findMany({
+          where,
+          select: { id: true, name: true, stage: true, value: true, closeDate: true, lossReason: true, source: true,
+            account: { select: { name: true, industry: true } },
+            owner: { select: { id: true, firstName: true, lastName: true } },
+          },
+        });
+
+        const won = deals.filter(d => d.stage === 'Closed Won');
+        const lost = deals.filter(d => d.stage === 'Closed Lost');
+
+        // Loss reasons breakdown
+        const lossReasons = {};
+        lost.forEach(d => {
+          const reason = d.lossReason || 'Unknown';
+          lossReasons[reason] = (lossReasons[reason] || 0) + 1;
+        });
+
+        // Win rate by rep
+        const byRep = {};
+        deals.forEach(d => {
+          const key = d.owner?.id || 'unassigned';
+          if (!byRep[key]) byRep[key] = { user: d.owner, won: 0, lost: 0, wonValue: 0, lostValue: 0 };
+          if (d.stage === 'Closed Won') { byRep[key].won++; byRep[key].wonValue += d.value; }
+          else { byRep[key].lost++; byRep[key].lostValue += d.value; }
+        });
+
+        Object.values(byRep).forEach(r => {
+          r.winRate = (r.won + r.lost) > 0 ? Math.round(r.won / (r.won + r.lost) * 100) : 0;
+        });
+
+        res.json({
+          totalWon: won.length, totalLost: lost.length,
+          winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
+          wonValue: won.reduce((s, d) => s + d.value, 0),
+          lostValue: lost.reduce((s, d) => s + d.value, 0),
+          avgWonDealSize: won.length > 0 ? Math.round(won.reduce((s, d) => s + d.value, 0) / won.length) : 0,
+          lossReasons,
+          byRep: Object.values(byRep),
+        });
+      } catch (err) { next(err); }
+    });
+
+    // POST /api/deals/:id/submit - Submit deal for approval
+    router.post('/:id/submit', requirePermission('deals', 'edit'), async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+        if (!deal) return res.status(404).json({ error: 'Not found' });
+
+        // Find applicable approval process
+        const process = await prisma.approvalProcess.findFirst({
+          where: { module: 'deals', active: true },
+          include: { steps: { orderBy: { order: 'asc' } } },
+        });
+
+        if (!process) {
+          return res.status(400).json({ error: 'No active approval process configured for deals' });
+        }
+
+        // Create approval request
+        const request = await prisma.approvalRequest.create({
+          data: {
+            processId: process.id,
+            recordId: deal.id,
+            module: 'deals',
+            submittedById: req.userId,
+            status: 'Pending',
+            currentStepOrder: 1,
+            steps: {
+              create: process.steps.map(step => ({
+                order: step.order,
+                approverId: step.approverId,
+                status: step.order === 1 ? 'Pending' : 'Waiting',
+              })),
+            },
+          },
+          include: { steps: true },
+        });
+
+        await req.audit({ action: 'update', module: 'deals', recordId: deal.id, details: `Submitted deal for approval` });
+        res.json({ success: true, approvalRequest: request });
+      } catch (err) { next(err); }
+    });
+
+    // GET /api/deals/stats/rollup - Summary of all deal metrics
+    router.get('/stats/rollup', requirePermission('deals', 'read'), async (req, res, next) => {
+      try {
+        const prisma = req.app.locals.prisma;
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
+
+        const deals = await prisma.deal.findMany({
+          select: { stage: true, value: true, probability: true, closeDate: true, createdAt: true },
+        });
+
+        const open = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
+        const won = deals.filter(d => d.stage === 'Closed Won');
+        const lost = deals.filter(d => d.stage === 'Closed Lost');
+        const newThisMonth = deals.filter(d => d.createdAt >= startOfMonth);
+        const wonThisQuarter = won.filter(d => d.closeDate && d.closeDate >= startOfQuarter);
+
+        res.json({
+          pipeline: { count: open.length, value: open.reduce((s, d) => s + d.value, 0), weighted: Math.round(open.reduce((s, d) => s + d.value * d.probability / 100, 0)) },
+          won: { count: won.length, value: won.reduce((s, d) => s + d.value, 0) },
+          lost: { count: lost.length, value: lost.reduce((s, d) => s + d.value, 0) },
+          newThisMonth: { count: newThisMonth.length, value: newThisMonth.reduce((s, d) => s + d.value, 0) },
+          wonThisQuarter: { count: wonThisQuarter.length, value: wonThisQuarter.reduce((s, d) => s + d.value, 0) },
+          winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
+          avgDealSize: open.length > 0 ? Math.round(open.reduce((s, d) => s + d.value, 0) / open.length) : 0,
+        });
+      } catch (err) { next(err); }
+    });
+  },
+});
