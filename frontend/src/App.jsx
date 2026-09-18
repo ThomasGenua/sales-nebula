@@ -39,6 +39,29 @@ const API = "/api";
 // ========================================================================
 // HOOKS
 // ========================================================================
+/**
+ * Props that make a non-button element behave like one.
+ *
+ * A few click targets cannot be a <button> — a table row, a card that already
+ * contains its own buttons — so they get the role, keyboard activation and a
+ * name instead of being unreachable to anyone not using a mouse.
+ */
+function clickable(onClick, label) {
+  return {
+    role: 'button',
+    tabIndex: 0,
+    'aria-label': label,
+    onClick,
+    onKeyDown: e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      // Space scrolls the page by default, which is not what a button does.
+      e.preventDefault();
+      e.stopPropagation();
+      onClick(e);
+    },
+  };
+}
+
 const AuthContext = createContext();
 
 /**
@@ -239,7 +262,7 @@ function Badge({ children, color = "primary", className = "" }) {
   return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${colors[color] || colors.primary} ${className}`}>{children}</span>;
 }
 
-function Button({ children, variant = "primary", size = "md", onClick, disabled, className = "", icon: Icon, fullWidth }) {
+function Button({ children, variant = "primary", size = "md", onClick, disabled, className = "", icon: Icon, fullWidth, type = "button", ariaLabel }) {
   const variants = {
     primary: `bg-[${T.accent}] hover:bg-[${T.accentHover}] text-[${T.base}] font-semibold`,
     secondary: `bg-[${T.surface}] hover:bg-[${T.card}] text-[${T.body}] border border-[${T.border}]`,
@@ -248,7 +271,7 @@ function Button({ children, variant = "primary", size = "md", onClick, disabled,
   };
   const sizes = { sm: "px-2.5 py-1.5 text-xs min-h-[32px]", md: "px-3.5 py-2 text-sm min-h-[40px]", lg: "px-5 py-2.5 text-sm min-h-[44px]" };
   return (
-    <button onClick={onClick} disabled={disabled}
+    <button onClick={onClick} disabled={disabled} type={type} aria-label={ariaLabel}
       className={`inline-flex items-center justify-center gap-2 rounded-lg transition-all disabled:opacity-40 active:scale-[0.97] touch-manipulation ${variants[variant]} ${sizes[size]} ${fullWidth ? "w-full" : ""} ${className}`}>
       {Icon && <Icon size={size === "sm" ? 14 : 16} className="shrink-0" />}
       {children}
@@ -260,7 +283,9 @@ function Input({ label, value, onChange, type = "text", placeholder, required, c
   return (
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium mb-1.5" style={{ color: "var(--sn-slate)" }}>{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
-      <input type={type} value={value || ""} onChange={e => onChange(e.target.value)} placeholder={placeholder} {...props}
+      <input type={type} value={value || ""} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        aria-label={label ? undefined : placeholder}
+        {...props}
         className="w-full px-3 py-2.5 rounded-lg text-sm focus:outline-none focus:ring-1 transition-colors min-h-[44px]"
         style={{
           background: "var(--sn-raised)",
@@ -277,6 +302,7 @@ function Select({ label, value, onChange, options = [], placeholder, className =
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
       <select value={value || ""} onChange={e => onChange(e.target.value)}
+        aria-label={label ? undefined : (placeholder || "Select an option")}
         className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] focus:outline-none focus:border-[#F5A623] transition-colors appearance-none min-h-[44px]">
         {placeholder && <option value="">{placeholder}</option>}
         {options.map(o => typeof o === "string" ? <option key={o} value={o}>{o}</option> : <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -290,6 +316,7 @@ function TextArea({ label, value, onChange, rows = 3, placeholder, className = "
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
       <textarea value={value || ""} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder}
+        aria-label={label ? undefined : placeholder}
         className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] transition-colors resize-none" />
     </label>
   );
@@ -297,24 +324,63 @@ function TextArea({ label, value, onChange, rows = 3, placeholder, className = "
 
 // Modal: bottom sheet on mobile, centered on desktop
 function Modal({ open, onClose, title, children, wide }) {
+  const panelRef = useRef(null);
+  const titleId = useMemo(() => `modal-${Math.random().toString(36).slice(2, 9)}`, []);
+
+  // Escape closes, focus moves into the dialog and returns to whatever opened
+  // it, and Tab is kept inside while it is open.
+  useEffect(() => {
+    if (!open) return undefined;
+    const previouslyFocused = document.activeElement;
+
+    const onKeyDown = e => {
+      if (e.key === 'Escape') { e.stopPropagation(); onClose?.(); return; }
+      if (e.key !== 'Tab' || !panelRef.current) return;
+
+      const focusable = panelRef.current.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    const firstField = panelRef.current?.querySelector('input, select, textarea, button');
+    firstField?.focus();
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+    };
+  }, [open, onClose]);
+
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-[rgba(4,6,16,0.85)] backdrop-blur-sm" />
-      <div className={`relative bg-[#0B1228] border border-[#182550] w-full
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      {/* Clicking away closes; it is a mouse convenience, so Escape covers the
+          same ground for anyone else and this stays out of the tab order. */}
+      <div className="absolute inset-0 bg-[rgba(4,6,16,0.85)] backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={`relative bg-[#0B1228] border border-[#182550] w-full
         rounded-t-2xl sm:rounded-xl shadow-2xl
         ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}
         max-h-[92vh] sm:max-h-[85vh] flex flex-col
-        animate-[slideUp_0.25s_ease-out] sm:animate-[fadeScale_0.2s_ease-out]`}
-        onClick={e => e.stopPropagation()}>
-        {/* Drag handle on mobile */}
-        <div className="sm:hidden flex justify-center pt-2 pb-1">
+        animate-[slideUp_0.25s_ease-out] sm:animate-[fadeScale_0.2s_ease-out]`}>
+        <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden="true">
           <div className="w-10 h-1 rounded-full bg-[#203060]" />
         </div>
         <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-[#182550]">
-          <h3 className="text-base sm:text-lg font-semibold text-[#F0EDE5]">{title}</h3>
-          <button onClick={onClose} className="text-[#4A5168] hover:text-[#C8C2B4] p-1.5 -mr-1 rounded-lg hover:bg-[#0E1630] transition-colors">
-            <X size={18} />
+          <h3 id={titleId} className="text-base sm:text-lg font-semibold text-[#F0EDE5]">{title}</h3>
+          <button type="button" onClick={onClose} aria-label="Close dialog"
+            className="text-[#4A5168] hover:text-[#C8C2B4] p-1.5 -mr-1 rounded-lg hover:bg-[#0E1630] transition-colors">
+            <X size={18} aria-hidden="true" />
           </button>
         </div>
         <div className="px-4 sm:px-6 py-4 overflow-y-auto flex-1 overscroll-contain">{children}</div>
@@ -376,15 +442,22 @@ function ErrorState({ message, onRetry }) {
   );
 }
 
-function Spinner() {
-  return <div className="flex items-center justify-center py-12"><div className="w-7 h-7 border-2 border-[#182550] border-t-[#F5A623] rounded-full animate-spin" /></div>;
+function Spinner({ label = "Loading" }) {
+  // A spinning div says nothing to a screen reader; the status role and the
+  // hidden text are what make the wait audible.
+  return (
+    <div className="flex items-center justify-center py-12" role="status">
+      <div className="w-7 h-7 border-2 border-[#182550] border-t-[#F5A623] rounded-full animate-spin" aria-hidden="true" />
+      <span className="sr-only">{label}</span>
+    </div>
+  );
 }
 
 function Toast({ message, type = "success", onClose }) {
   useEffect(() => { const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, [onClose]);
   const colors = { success: "bg-[#34D399]/10 border-[#34D399]/30 text-[#34D399]", error: "bg-[#F87171]/10 border-[#F87171]/30 text-[#F87171]" };
   return (
-    <div className={`fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl border ${colors[type]} text-sm font-medium shadow-lg backdrop-blur-sm animate-[fadeScale_0.2s_ease-out]`}>
+    <div role={type === "error" ? "alert" : "status"} aria-live={type === "error" ? "assertive" : "polite"} className={`fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl border ${colors[type]} text-sm font-medium shadow-lg backdrop-blur-sm animate-[fadeScale_0.2s_ease-out]`}>
       {message}
     </div>
   );
@@ -399,7 +472,7 @@ function MobileRecordCard({ row, columns, onEdit, onDelete, onRowClick }) {
   const secondaryCol = columns[1];
   const restCols = columns.slice(2, 5);
   return (
-    <div onClick={() => onRowClick?.(row)}
+    <div onClick={onRowClick ? () => onRowClick(row) : undefined}
       className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 active:bg-[#101B3A] transition-colors touch-manipulation">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
@@ -477,39 +550,54 @@ function DataTable({ columns, data = [], onRowClick, onEdit, onDelete, selected,
         <thead>
           <tr className="border-b border-[#182550]">
             {onSelect && (
-              <th className="w-10 py-3 px-3">
-                <input type="checkbox" checked={allSelected} onChange={e => onSelect(e.target.checked ? data.map(r => r.id) : [])}
+              <th className="w-10 py-3 px-3"><span className="sr-only">Select</span>
+                <input type="checkbox" aria-label="Select all rows" checked={allSelected} onChange={e => onSelect(e.target.checked ? data.map(r => r.id) : [])}
                   className="rounded border-[#203060] bg-[#0E1630] text-[#F5A623] focus:ring-[rgba(245,166,35,0.20)]" />
               </th>
             )}
             {columns.map(col => (
               <th key={col.key} className="py-3 px-3 text-left text-xs font-medium text-[#4A5168] uppercase tracking-wider whitespace-nowrap">{col.label}</th>
             ))}
-            {(onEdit || onDelete) && <th className="w-20 py-3 px-3" />}
+            {(onEdit || onDelete) && <th className="w-20 py-3 px-3"><span className="sr-only">Actions</span></th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-[#182550]/60">
           {data.map(row => (
-            <tr key={row.id} onClick={() => onRowClick?.(row)}
+            <tr
+              key={row.id}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
               className="hover:bg-[#101B3A] transition-colors cursor-pointer group">
               {onSelect && (
                 <td className="py-3 px-3" onClick={e => e.stopPropagation()}>
-                  <input type="checkbox" checked={selected?.includes(row.id)} onChange={e => {
+                  <input type="checkbox" aria-label="Select this row" checked={selected?.includes(row.id)} onChange={e => {
                     const next = e.target.checked ? [...(selected || []), row.id] : (selected || []).filter(id => id !== row.id);
                     onSelect(next);
                   }} className="rounded border-[#203060] bg-[#0E1630] text-[#F5A623]" />
                 </td>
               )}
-              {columns.map(col => (
-                <td key={col.key} className="py-3 px-3 text-sm text-[#C8C2B4] whitespace-nowrap max-w-[200px] truncate">
-                  {col.render ? col.render(row[col.key], row) : (row[col.key] ?? "-")}
-                </td>
-              ))}
+              {columns.map((col, i) => {
+                const content = col.render ? col.render(row[col.key], row) : (row[col.key] ?? "-");
+                return (
+                  <td key={col.key} className="py-3 px-3 text-sm text-[#C8C2B4] whitespace-nowrap max-w-[200px] truncate">
+                    {/* Clicking the row is a mouse shortcut; this is how the
+                        row is reached and opened from the keyboard. */}
+                    {i === 0 && onRowClick ? (
+                      <button
+                        type="button"
+                        onClick={e => { e.stopPropagation(); onRowClick(row); }}
+                        className="text-left underline-offset-2 hover:underline"
+                      >
+                        {content}
+                      </button>
+                    ) : content}
+                  </td>
+                );
+              })}
               {(onEdit || onDelete) && (
                 <td className="py-3 px-3" onClick={e => e.stopPropagation()}>
                   <div className="flex items-center gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-                    {onEdit && <button onClick={() => onEdit(row)} className="p-1.5 rounded-md hover:bg-[#182550] text-[#4A5168] hover:text-[#C8C2B4]"><Edit2 size={14} /></button>}
-                    {onDelete && <button onClick={() => onDelete(row)} className="p-1.5 rounded-md hover:bg-[rgba(248,113,113,0.10)] text-[#4A5168] hover:text-[#F87171]"><Trash2 size={14} /></button>}
+                    {onEdit && <button type="button" aria-label="Edit this record" onClick={() => onEdit(row)} className="p-1.5 rounded-md hover:bg-[#182550] text-[#4A5168] hover:text-[#C8C2B4]"><Edit2 size={14} aria-hidden="true" /></button>}
+                    {onDelete && <button type="button" aria-label="Delete this record" onClick={() => onDelete(row)} className="p-1.5 rounded-md hover:bg-[rgba(248,113,113,0.10)] text-[#4A5168] hover:text-[#F87171]"><Trash2 size={14} aria-hidden="true" /></button>}
                   </div>
                 </td>
               )}
@@ -552,13 +640,13 @@ function Pagination({ page, total, limit, onChange }) {
 function FilterPanel({ open, onClose, filters = [], values = {}, onChange, onApply, onReset }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-40 sm:relative sm:inset-auto" onClick={onClose}>
+    <div className="fixed inset-0 z-40 sm:relative sm:inset-auto" onClick={onClose} aria-hidden="true">
       <div className="absolute inset-0 bg-[rgba(4,6,16,0.6)] sm:hidden" />
       <div className="absolute right-0 top-0 bottom-0 w-72 sm:w-full sm:relative bg-[#0B1228] border-l sm:border border-[#182550] sm:rounded-xl p-4 overflow-y-auto animate-[slideLeft_0.2s_ease-out] sm:animate-none"
         onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-[#C8C2B4]">Filters</h3>
-          <button onClick={onClose} className="sm:hidden p-1.5 rounded-lg hover:bg-[#0E1630] text-[#4A5168]"><X size={16} /></button>
+          <button type="button" aria-label="Close menu" onClick={onClose} className="sm:hidden p-1.5 rounded-lg hover:bg-[#0E1630] text-[#4A5168]"><X size={16} /></button>
         </div>
         <div className="space-y-3">
           {filters.map(f => (
@@ -604,7 +692,7 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="p-2 rounded-lg hover:bg-[#0E1630] text-[#4A5168] hover:text-[#C8C2B4] transition-colors touch-manipulation">
+          <button type="button" aria-label="Back to list" onClick={onBack} className="p-2 rounded-lg hover:bg-[#0E1630] text-[#4A5168] hover:text-[#C8C2B4] transition-colors touch-manipulation">
             <ChevronLeft size={20} />
           </button>
           <div>
@@ -762,13 +850,13 @@ function NotificationPanel({ open, onClose }) {
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50" onClick={onClose}>
+    <div className="fixed inset-0 z-50" onClick={onClose} aria-hidden="true">
       <div className="absolute inset-0 bg-[rgba(4,6,16,0.6)]" />
       <div className="absolute right-0 top-0 bottom-0 w-80 max-w-[90vw] bg-[#0B1228] border-l border-[#182550] shadow-2xl flex flex-col animate-[slideLeft_0.2s_ease-out]"
         onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 py-4 border-b border-[#182550]">
           <h3 className="text-sm font-semibold text-[#F0EDE5]">Notifications</h3>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-[#0E1630] text-[#4A5168]"><X size={16} /></button>
+          <button type="button" aria-label="Close" onClick={onClose} className="p-1.5 rounded-lg hover:bg-[#0E1630] text-[#4A5168]"><X size={16} /></button>
         </div>
         <div className="flex-1 overflow-y-auto overscroll-contain">
           {items.length === 0 ? (
@@ -901,7 +989,7 @@ function KpiRow({ items = [] }) {
 // ========================================================================
 // INLINE EDIT CELL
 // ========================================================================
-function InlineEdit({ value, onSave, type = "text" }) {
+function InlineEdit({ value, onSave, type = "text", label = "value" }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const inputRef = useRef(null);
@@ -910,7 +998,7 @@ function InlineEdit({ value, onSave, type = "text" }) {
 
   if (!editing) {
     return (
-      <span onClick={() => { setDraft(value); setEditing(true); }}
+      <span {...clickable(() => { setDraft(value); setEditing(true); }, `Edit ${label || 'value'}`)}
         className="cursor-pointer hover:bg-[#0E1630] px-1 -mx-1 rounded transition-colors group inline-flex items-center gap-1">
         {value || <span className="text-[#4A5168] italic">Empty</span>}
         <Edit2 size={11} className="text-[#4A5168] opacity-0 group-hover:opacity-100" />
@@ -2280,7 +2368,7 @@ function ReportsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4"><h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5]">Reports</h1><Button icon={Plus} onClick={() => setModalOpen(true)}>New Report</Button></div>
       {loading ? <Spinner /> : reports.length === 0 ? <EmptyState icon={BarChart3} title="No reports yet" action="Create Report" onAction={() => setModalOpen(true)} /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{reports.map(r => (
-          <div key={r.id} onClick={() => runReport(r)} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.98] touch-manipulation">
+          <div key={r.id} {...clickable(() => runReport(r), `Run report ${r.name}`)} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.98] touch-manipulation">
             <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.type === 'Summary' ? 'info' : 'primary'}>{r.type || 'Tabular'}</Badge></div>
             <div className="text-xs text-[#4A5168]">{r.module || 'All'}</div></div>))}</div>)}
       {selectedReport && reportData && (<Modal open={!!selectedReport} onClose={() => { setSelectedReport(null); setReportData(null); }} title={selectedReport.name} wide>
@@ -2673,9 +2761,9 @@ function CalendarPage() {
         </div>
         <div className="flex items-center gap-2">
           <div className="flex items-center bg-[#0B1228] border border-[#182550] rounded-lg overflow-hidden">
-            <button onClick={() => shift(-1)} className="p-2.5 hover:bg-[#101B3A] text-[#7E8598] touch-manipulation"><ChevronLeft size={16} /></button>
+            <button type="button" aria-label="Previous period" onClick={() => shift(-1)} className="p-2.5 hover:bg-[#101B3A] text-[#7E8598] touch-manipulation"><ChevronLeft size={16} aria-hidden="true" /></button>
             <button onClick={() => setAnchor(new Date())} className="px-3 py-2 text-xs font-medium text-[#C8C2B4] hover:bg-[#101B3A] border-x border-[#182550] touch-manipulation">Today</button>
-            <button onClick={() => shift(1)} className="p-2.5 hover:bg-[#101B3A] text-[#7E8598] touch-manipulation"><ChevronRight size={16} /></button>
+            <button type="button" aria-label="Next period" onClick={() => shift(1)} className="p-2.5 hover:bg-[#101B3A] text-[#7E8598] touch-manipulation"><ChevronRight size={16} aria-hidden="true" /></button>
           </div>
           <Button icon={Plus} onClick={() => { setForm({ eventType: 'Meeting' }); setComposerOpen(true); }}>
             <span className="hidden sm:inline">New Event</span>
@@ -2809,14 +2897,14 @@ function MonthGrid({ anchor, events, onSelect, onDayClick }) {
           const isCurrentMonth = day.getMonth() === anchor.getMonth();
           const isToday = sameDay(day, today);
           return (
-            <div key={i} onClick={() => onDayClick(day)}
-              className={`min-h-[72px] sm:min-h-[96px] p-1.5 border-b border-r border-[#182550]/50 cursor-pointer transition-colors hover:bg-[#101B3A] touch-manipulation ${isCurrentMonth ? '' : 'opacity-35'}`}>
+            <div key={i} {...clickable(() => onDayClick(day), `Add an event on ${day.toDateString?.() || 'this day'}`)}
+              className={`min-h-[72px] sm:min-h-[96px] p-1.5 border-b border-r border-[#182550]/50 cursor-pointer transition-colors hover:bg-[#101B3A] touch-manipulation ${isCurrentMonth ? '' : 'bg-[#080D1C]'}`}>
               <div className={`text-xs mb-1 w-6 h-6 flex items-center justify-center rounded-full ${isToday ? 'bg-[#F5A623] text-[#060B1A] font-bold' : 'text-[#7E8598]'}`}>
                 {day.getDate()}
               </div>
               <div className="space-y-0.5">
                 {dayEvents.slice(0, 3).map(e => (
-                  <div key={e.id} onClick={ev => { ev.stopPropagation(); onSelect(e); }}
+                  <div key={e.id} {...clickable(ev => { ev.stopPropagation?.(); onSelect(e); }, `Open ${e.title || 'event'}`)}
                     className="text-[10px] px-1 py-0.5 rounded truncate text-[#F0EDE5]"
                     style={{ background: `${EVENT_COLORS[e.eventType] || '#F5A623'}22`, borderLeft: `2px solid ${EVENT_COLORS[e.eventType] || '#F5A623'}` }}>
                     {!e.allDay && <span className="text-[#7E8598] mr-1">{fmtTime(e.startAt)}</span>}
@@ -2849,7 +2937,7 @@ function WeekGrid({ anchor, events, onSelect }) {
             </div>
             <div className="space-y-1">
               {dayEvents.map(e => (
-                <div key={e.id} onClick={() => onSelect(e)}
+                <div key={e.id} {...clickable(() => onSelect(e), `Open ${e.title || 'event'}`)}
                   className="text-xs px-2 py-1.5 rounded-lg cursor-pointer active:scale-[0.98] touch-manipulation"
                   style={{ background: `${EVENT_COLORS[e.eventType] || '#F5A623'}18`, borderLeft: `2px solid ${EVENT_COLORS[e.eventType] || '#F5A623'}` }}>
                   <div className="text-[#F0EDE5] truncate">{e.title}</div>
@@ -2878,7 +2966,7 @@ function DayList({ anchor, events, onSelect }) {
             <div className="w-14 shrink-0 text-xs text-[#4A5168] pt-1">{h % 12 || 12}{h < 12 ? 'am' : 'pm'}</div>
             <div className="flex-1 space-y-1">
               {slot.map(e => (
-                <div key={e.id} onClick={() => onSelect(e)}
+                <div key={e.id} {...clickable(() => onSelect(e), `Open ${e.title || 'event'}`)}
                   className="px-3 py-2 rounded-lg cursor-pointer active:scale-[0.99] touch-manipulation"
                   style={{ background: `${EVENT_COLORS[e.eventType] || '#F5A623'}18`, borderLeft: `3px solid ${EVENT_COLORS[e.eventType] || '#F5A623'}` }}>
                   <div className="text-sm text-[#F0EDE5]">{e.title}</div>
@@ -2906,7 +2994,7 @@ function AgendaList({ events, onSelect }) {
           </div>
           <div className="space-y-2">
             {list.map(e => (
-              <div key={e.id} onClick={() => onSelect(e)}
+              <div key={e.id} {...clickable(() => onSelect(e), `Open ${e.title || 'event'}`)}
                 className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 flex items-center gap-3 cursor-pointer active:scale-[0.99] touch-manipulation">
                 <div className="w-1 self-stretch rounded-full shrink-0" style={{ background: EVENT_COLORS[e.eventType] || '#F5A623' }} />
                 <div className="flex-1 min-w-0">
@@ -2985,7 +3073,7 @@ function ProjectsPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {projects.map(p => (
-            <div key={p.id} onClick={() => setOpenId(p.id)}
+            <div key={p.id} {...clickable(() => setOpenId(p.id), `Open ${p.name || p.title || 'item'}`)}
               className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.99] touch-manipulation">
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="min-w-0">
@@ -3365,7 +3453,7 @@ function SecurityGroupsPage() {
         flat.length === 0 ? <EmptyState icon={Lock} title="No security groups" subtitle="Groups control which records each user can see" action="Create Group" onAction={() => setModalOpen(true)} /> : (
           <div className="space-y-2">
             {flat.map(g => (
-              <div key={g.id} onClick={() => setDetail(g)}
+              <div key={g.id} {...clickable(() => setDetail(g), `Open ${g.name || 'group'}`)}
                 className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.99] touch-manipulation"
                 style={{ marginLeft: `${(g.depth || 0) * 16}px` }}>
                 <div className="flex items-center justify-between gap-3">
@@ -3549,7 +3637,7 @@ function TemplatesPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {templates.map(t => (
-            <div key={t.id} onClick={() => openEditor(t)}
+            <div key={t.id} {...clickable(() => openEditor(t), `Edit ${t.name || 'template'}`)}
               className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.99] touch-manipulation">
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="min-w-0">
@@ -4161,7 +4249,7 @@ function BugsPage() {
       ) : (
         <div className="space-y-2">
           {rows.map(b => (
-            <div key={b.id} onClick={() => setDetail(b)}
+            <div key={b.id} {...clickable(() => setDetail(b), `Open ${b.title || b.name || 'item'}`)}
               className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.99] touch-manipulation">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -4703,7 +4791,8 @@ const BOTTOM_TABS = [
 function Sidebar({ page, setPage, collapsed, setCollapsed }) {
   const { logout } = useAuth();
   return (
-    <div
+    <nav
+      aria-label="Main"
       className={`hidden md:flex h-full border-r flex-col transition-all duration-200 ${collapsed ? "w-16" : "w-56"}`}
       style={{ background: "var(--sn-panel)", borderColor: "var(--sn-rule)" }}
     >
@@ -4737,7 +4826,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed }) {
           {!collapsed && <span>Sign Out</span>}
         </button>
       </div>
-    </div>
+    </nav>
   );
 }
 
@@ -4746,7 +4835,7 @@ function MobileDrawer({ open, onClose, page, setPage }) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 md:hidden">
-      <div className="absolute inset-0" style={{ background: "rgba(4,6,16,0.85)" }} onClick={onClose} />
+      <div className="absolute inset-0" aria-hidden="true" style={{ background: "rgba(4,6,16,0.85)" }} onClick={onClose} />
       <div
         className="relative z-10 h-full w-72 max-w-[80vw] shadow-2xl flex flex-col animate-[slideRight_0.2s_ease-out]"
         style={{ background: "var(--sn-panel)" }}
@@ -4756,7 +4845,7 @@ function MobileDrawer({ open, onClose, page, setPage }) {
             <BrandMark size={32} />
             <span className="text-sm font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</span>
           </div>
-          <button type="button" onClick={onClose} className="p-2 rounded-lg" style={{ color: "var(--sn-dim)" }}>
+          <button type="button" aria-label="Close" onClick={onClose} className="p-2 rounded-lg" style={{ color: "var(--sn-dim)" }}>
             <X size={18} />
           </button>
         </div>
@@ -4808,7 +4897,7 @@ function BottomNav({ page, setPage, onMoreClick }) {
 
 function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggle }) {
   return (
-    <div
+    <header
       className="h-14 border-b backdrop-blur-sm flex items-center justify-between px-3 sm:px-4 md:px-6"
       style={{
         borderColor: "var(--sn-rule)",
@@ -4819,6 +4908,7 @@ function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggl
         <button
           type="button"
           onClick={onMenuToggle}
+          aria-label="Open navigation"
           className="md:hidden p-2.5 -ml-1 rounded-lg transition-colors touch-manipulation"
           style={{ color: "var(--sn-slate)" }}
         >
@@ -4847,6 +4937,7 @@ function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggl
         <button
           type="button"
           onClick={onQuickActionsToggle}
+          aria-label="Search and quick actions"
           className="md:hidden p-2.5 rounded-lg transition-colors touch-manipulation"
           style={{ color: "var(--sn-slate)" }}
         >
@@ -4855,6 +4946,7 @@ function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggl
         <button
           type="button"
           onClick={onNotificationsToggle}
+          aria-label="Notifications"
           className="relative p-2.5 rounded-lg transition-colors touch-manipulation"
           style={{ color: "var(--sn-slate)" }}
         >
@@ -4870,7 +4962,7 @@ function TopBar({ user, onMenuToggle, onNotificationsToggle, onQuickActionsToggl
           </span>
         </div>
       </div>
-    </div>
+    </header>
   );
 }
 
@@ -4977,6 +5069,9 @@ function AppShell({ go }) {
 
   return (
     <div className="flex flex-col h-[100dvh] overflow-hidden" style={{ background: "var(--sn-void)", color: "var(--sn-body)" }}>
+      {/* First stop on Tab: a way past the navigation, which is otherwise
+          dozens of links before the content on every single page. */}
+      <a href="#main-content" className="skip-link">Skip to content</a>
       {demo && <DemoBanner />}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
@@ -4988,7 +5083,7 @@ function AppShell({ go }) {
             onNotificationsToggle={() => setNotificationsOpen(o => !o)}
             onQuickActionsToggle={() => setQuickActionsOpen(o => !o)} />
 
-          <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
+          <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
             {/* keyed on the module so one page's record state never leaks into the next */}
             <RouteContext.Provider value={routeValue}>
               <PageComponent key={route.module} />
