@@ -202,7 +202,11 @@ describe('Emails', () => {
       });
 
     expect(res.status).toBe(201);              // /send creates the email
-    expect(res.body.status).toBe('sent');
+    // /send now hands the message to a transport and records what came back.
+    // There is no SMTP server in the test environment, so the mail utility
+    // logs it: reported as queued, not sent, rather than claiming delivery.
+    expect(res.body.status).toBe('queued');
+    expect(res.body.delivery.delivered).toBe(false);
   });
 });
 

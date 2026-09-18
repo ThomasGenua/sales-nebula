@@ -100,7 +100,7 @@ function matchRule(rules, haystack) {
  * Store, thread and route one batch. Returns the tallies the poll endpoint
  * has always returned, plus the per-message outcome.
  */
-async function ingestMessages(prisma, account, messages) {
+async function ingestMessages(prisma, account, messages, { onAcknowledge } = {}) {
   let fetched = 0, processed = 0, skipped = 0;
   let casesCreated = 0, leadsCreated = 0, repliesLinked = 0, errors = 0;
   const results = [];
@@ -208,8 +208,21 @@ async function ingestMessages(prisma, account, messages) {
           },
         });
         await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdCaseId: newCase.id, status: 'Converted' } }).catch(() => {});
+        // Acknowledge, when the account asks for it. The sender is a real
+        // person here: automated mail never reaches this branch. Sending is
+        // the caller's job, so the pipeline does not depend on a transport.
+        let acknowledged = false;
+        if (account.autoReply && typeof onAcknowledge === 'function') {
+          try {
+            await onAcknowledge({ message: stored, newCase, from, subject });
+            acknowledged = true;
+          } catch (e) {
+            results.push({ subject, action: 'auto-reply failed', reason: String(e.message).slice(0, 160) });
+          }
+        }
+
         casesCreated++; processed++;
-        results.push({ subject, action: 'case created', caseId: newCase.id, matchedRule: routed?.name || null });
+        results.push({ subject, action: 'case created', caseId: newCase.id, matchedRule: routed?.name || null, acknowledged });
         continue;
       }
 

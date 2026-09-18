@@ -337,3 +337,116 @@ describe('Account administration', () => {
     expect(decodeURIComponent(res.body.url)).toContain('offline_access');
   });
 });
+
+describe('Auto-reply', () => {
+  it('acknowledges a new case from the mailbox when the account asks for it', async () => {
+    const account = await makeAccount({ autoReply: true });
+    const message = graphMessage();
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/reply', { status: 202, body: {} }],
+      ['/messages', { body: { value: [message] } }],
+    ]);
+
+    const result = await graphMailbox.pollAccount(prisma, account);
+    expect(result.casesCreated).toBe(1);
+    expect(result.results[0].acknowledged).toBe(true);
+
+    const replyCall = calls.find(c => c.url.includes('/reply'));
+    expect(replyCall).toBeDefined();
+    const created = await prisma.case.findFirst({ where: { origin: 'Email' } });
+    expect(JSON.parse(replyCall.body).comment).toContain(created.caseNumber);
+  });
+
+  it('stays quiet when the account has not asked for it', async () => {
+    const account = await makeAccount({ autoReply: false });
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/reply', { status: 202, body: {} }],
+      ['/messages', { body: { value: [graphMessage()] } }],
+    ]);
+
+    await graphMailbox.pollAccount(prisma, account);
+    expect(calls.find(c => c.url.includes('/reply'))).toBeUndefined();
+  });
+
+  it('uses the configured template, with the case number substituted', async () => {
+    const template = await prisma.emailTemplate.create({
+      data: { name: 'Ack', subject: 'We got it', body: 'Ticket {{caseNumber}} is open.' },
+    });
+    const account = await makeAccount({ autoReply: true, autoReplyTemplateId: template.id });
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/reply', { status: 202, body: {} }],
+      ['/messages', { body: { value: [graphMessage()] } }],
+    ]);
+
+    await graphMailbox.pollAccount(prisma, account);
+    const created = await prisma.case.findFirst({ where: { origin: 'Email' } });
+    const body = JSON.parse(calls.find(c => c.url.includes('/reply')).body).comment;
+    expect(body).toBe(`Ticket ${created.caseNumber} is open.`);
+  });
+
+  it('still records the case when the acknowledgement fails', async () => {
+    const account = await makeAccount({ autoReply: true });
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/reply', { status: 500, body: { error: { message: 'mailbox full' } } }],
+      ['/messages', { body: { value: [graphMessage()] } }],
+    ]);
+
+    const result = await graphMailbox.pollAccount(prisma, account);
+    expect(result.casesCreated).toBe(1);
+    expect(result.results.some(r => r.action === 'auto-reply failed')).toBe(true);
+  });
+});
+
+describe('Outbound send', () => {
+  it('sends through the mailbox when one is named', async () => {
+    const account = await makeAccount();
+    stubFetch([[TOKEN_URL, tokenResponse()], ['/sendMail', { status: 202, body: {} }]]);
+
+    const res = await request(app)
+      .post('/api/emails/send')
+      .set(authHeader(admin.token))
+      .send({ subject: 'Quote attached', body: 'See attached.', toEmail: 'rita@contoso.com', mailboxId: account.id });
+
+    expect(res.status).toBe(201);
+    expect(res.body.delivery).toMatchObject({ status: 'sent', delivered: true, transport: 'graph' });
+    expect(res.body.status).toBe('sent');
+    expect(res.body.sentAt).not.toBeNull();
+
+    const sendCall = calls.find(c => c.url.includes('/sendMail'));
+    expect(JSON.parse(sendCall.body).message.toRecipients[0].emailAddress.address).toBe('rita@contoso.com');
+  });
+
+  it('does not claim delivery when nothing is configured to send', async () => {
+    const res = await request(app)
+      .post('/api/emails/send')
+      .set(authHeader(admin.token))
+      .send({ subject: 'Hello', body: 'Hi there', toEmail: 'rita@contoso.com' });
+
+    expect(res.status).toBe(201);
+    // No SMTP server in the test environment: the mail utility logs instead of
+    // sending, and that is reported as queued rather than sent.
+    expect(res.body.delivery.delivered).toBe(false);
+    expect(res.body.delivery.transport).toBe('console');
+    expect(res.body.status).toBe('queued');
+    expect(res.body.sentAt).toBeNull();
+  });
+
+  it('reports a transport failure instead of recording a send', async () => {
+    const account = await makeAccount();
+    stubFetch([[TOKEN_URL, tokenResponse()], ['/sendMail', { status: 403, body: { error: { message: 'insufficient scope' } } }]]);
+
+    const res = await request(app)
+      .post('/api/emails/send')
+      .set(authHeader(admin.token))
+      .send({ subject: 'x', body: 'y', toEmail: 'rita@contoso.com', mailboxId: account.id });
+
+    expect(res.body.delivery.status).toBe('failed');
+    expect(res.body.delivery.error).toMatch(/insufficient scope/i);
+    expect(res.body.status).toBe('failed');
+    expect(res.body.sentAt).toBeNull();
+  });
+});

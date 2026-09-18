@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendEmail } = require('../services/mailer');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
@@ -57,13 +58,24 @@ router.post('/send', requirePermission('emails', 'edit'), async (req, res, next)
     // Spreading req.body straight into create let any unknown key 500 the
     // request, and any known one (opened, openedAt, id) be set by the caller.
     const { subject, body, from, to, toEmail, toName, contactId, dealId, templateId } = req.body || {};
+    const recipient = toEmail || to;
+    // Actually hand it to a transport, and record what came back rather than
+    // asserting 'sent' regardless.
+    const delivery = await sendEmail(prisma, {
+      to: recipient, subject, body, mailboxId: req.body?.mailboxId,
+    });
+
     const email = await prisma.email.create({
-      data: { subject, body, from, to, toEmail, toName, contactId, dealId, templateId, status: 'sent', sentAt: new Date() },
+      data: {
+        subject, body, from, to, toEmail, toName, contactId, dealId, templateId,
+        status: delivery.status,
+        sentAt: delivery.delivered ? new Date() : null,
+      },
       include: { contact: { select: { id: true, firstName: true, lastName: true } } },
     });
-    // TODO: Integrate with actual SMTP provider here
-    await req.audit({ action: 'create', module: 'emails', recordId: email.id, details: `Email sent to ${email.toEmail}` });
-    res.status(201).json(email);
+
+    await req.audit({ action: 'create', module: 'emails', recordId: email.id, details: `Email to ${recipient}: ${delivery.status}` });
+    res.status(201).json({ ...email, delivery });
   } catch (err) { next(err); }
 });
 
@@ -71,13 +83,23 @@ router.post('/send', requirePermission('emails', 'edit'), async (req, res, next)
 router.post('/:id/send', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const draft = await prisma.email.findUnique({ where: { id: req.params.id } });
+    if (!draft) return res.status(404).json({ error: 'Not found' });
+
+    const delivery = await sendEmail(prisma, {
+      to: draft.toEmail || draft.to,
+      subject: draft.subject,
+      body: draft.body,
+      mailboxId: req.body?.mailboxId,
+    });
+
     const email = await prisma.email.update({
       where: { id: req.params.id },
-      data: { status: 'sent', sentAt: new Date() },
+      data: { status: delivery.status, sentAt: delivery.delivered ? new Date() : null },
     });
-    // TODO: Integrate with actual SMTP provider here
-    await req.audit({ action: 'update', module: 'emails', recordId: email.id, details: 'Email sent' });
-    res.json(email);
+
+    await req.audit({ action: 'update', module: 'emails', recordId: email.id, details: `Send attempt: ${delivery.status}` });
+    res.json({ ...email, delivery });
   } catch (err) { next(err); }
 });
 

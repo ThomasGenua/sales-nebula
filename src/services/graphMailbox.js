@@ -122,7 +122,9 @@ async function pollAccount(prisma, account) {
     );
 
     const messages = raw.map(graph.normalizeMessage);
-    const stats = await ingestMessages(prisma, account, messages);
+    const stats = await ingestMessages(prisma, account, messages, {
+      onAcknowledge: ({ message, newCase }) => acknowledge(prisma, account, message, newCase),
+    });
 
     await recordPoll(prisma, account, stats, messages);
     return { accountId: account.id, durationMs: Date.now() - startedAt, ...stats };
@@ -163,4 +165,32 @@ async function reply(prisma, account, message, comment) {
   }).catch(() => null);
 }
 
-module.exports = { getAccessToken, withToken, connect, testConnection, pollAccount, reply };
+/**
+ * The automatic acknowledgement an account can opt into. Uses the configured
+ * template when there is one, and always replies on the thread so the
+ * correspondent's own client groups it with what they sent.
+ */
+async function acknowledge(prisma, account, storedMessage, newCase) {
+  let body = `Thanks for getting in touch. We have logged this as case ${newCase.caseNumber} and someone will come back to you.`;
+
+  if (account.autoReplyTemplateId) {
+    const template = await prisma.emailTemplate.findUnique({ where: { id: account.autoReplyTemplateId } }).catch(() => null);
+    if (template?.body) {
+      body = template.body
+        .replace(/\{\{\s*caseNumber\s*\}\}/gi, newCase.caseNumber)
+        .replace(/\{\{\s*subject\s*\}\}/gi, newCase.subject || '');
+    }
+  }
+
+  await reply(prisma, account, storedMessage, body);
+}
+
+/** A new message from this mailbox, for outbound mail that is not a reply. */
+async function sendFrom(prisma, account, { to, subject, body, isHtml = false }) {
+  await withToken(prisma, account, accessToken =>
+    graph.sendMail({ accessToken, mailboxAddress: account.mailboxAddress, to, subject, body, isHtml })
+  );
+  return { delivered: true, transport: 'graph', from: account.mailboxAddress };
+}
+
+module.exports = { getAccessToken, withToken, connect, testConnection, pollAccount, reply, sendFrom };
