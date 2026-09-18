@@ -17,7 +17,7 @@ const postInclude = {
 };
 
 // FEED - global or record-specific
-router.get('/feed', async (req, res, next) => {
+router.get(['/', '/feed'], async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordId, page = 1, limit = 20 } = req.query;

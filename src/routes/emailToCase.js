@@ -32,7 +32,8 @@ router.post('/inbound', async (req, res, next) => {
 
     if (existingCase) {
       await prisma.caseComment.create({
-        data: { caseId: existingCase.id, body: body || htmlBody || subject, isPublic: true, authorEmail: emailAddr },
+        // CaseComment stores the message in "text"; "body" is not a column.
+        data: { caseId: existingCase.id, text: body || htmlBody || subject, isPublic: true, authorEmail: emailAddr },
       });
       await prisma.case.update({
         where: { id: existingCase.id },

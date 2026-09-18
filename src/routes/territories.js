@@ -20,9 +20,6 @@ router.get('/', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findUnique({ where: { id: req.params.id }, include: { parent: true, children: true } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
-});
 
 router.post('/', authenticate, requirePermission('territories', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
@@ -85,7 +82,16 @@ router.post('/:id/assign', authenticate, requirePermission('territories', 'edit'
     const prisma = req.app.locals.prisma;
     const { accountIds } = req.body;
     if (!accountIds?.length) return res.status(400).json({ error: 'accountIds required' });
-    const result = await prisma.account.updateMany({ where: { id: { in: accountIds } }, data: { territoryId: req.params.id } });
+    // Account has no territoryId column; membership is the TerritoryAccount table.
+    const result = { count: 0 };
+    for (const accountId of accountIds) {
+      await prisma.territoryAccount.upsert({
+        where: { territoryId_accountId: { territoryId: req.params.id, accountId } },
+        update: {},
+        create: { territoryId: req.params.id, accountId, assignedBy: 'manual' },
+      });
+      result.count++;
+    }
     await req.audit({ action: 'update', module: 'territories', recordId: req.params.id, details: `Assigned ${result.count} accounts` });
     res.json({ assigned: result.count });
   } catch (err) { next(err); }
@@ -95,8 +101,8 @@ router.post('/:id/assign', authenticate, requirePermission('territories', 'edit'
 router.get('/:id/performance', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const accounts = await prisma.account.findMany({ where: { territoryId: req.params.id }, select: { id: true } });
-    const accountIds = accounts.map(a => a.id);
+    const accounts = await prisma.territoryAccount.findMany({ where: { territoryId: req.params.id }, select: { accountId: true } });
+    const accountIds = accounts.map(a => a.accountId);
     const deals = await prisma.deal.findMany({ where: { accountId: { in: accountIds } } });
     const won = deals.filter(d => d.stage === 'Closed Won');
     const pipeline = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
@@ -121,12 +127,6 @@ router.get('/models', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'territories', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
 // Bulk status check
 router.get('/status/health', authenticate, async (req, res, next) => {
   try { res.json({ module: 'territories', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
@@ -167,3 +167,78 @@ router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next
     res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
   } catch (err) { next(err); }
 });
+
+/**
+ * Assign accounts to a territory.
+ *
+ * The schema carries both a TerritoryAccount join table and Account.territoryId,
+ * and /:id/assign only ever wrote the latter — so membership recorded through
+ * the join table was invisible to it, and vice versa. This writes both.
+ */
+router.post('/:id/accounts', authenticate, requirePermission('territories', 'edit'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const ids = req.body.accountIds || (req.body.accountId ? [req.body.accountId] : []);
+    if (!ids.length) return res.status(400).json({ error: 'accountId or accountIds required' });
+
+    const territory = await prisma.territory.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!territory) return res.status(404).json({ error: 'Territory not found' });
+
+    const assigned = [];
+    for (const accountId of ids) {
+      const row = await prisma.territoryAccount.upsert({
+        where: { territoryId_accountId: { territoryId: req.params.id, accountId } },
+        update: {},
+        create: { territoryId: req.params.id, accountId, assignedBy: 'manual' },
+      });
+      assigned.push(row);
+    }
+
+    await req.audit({ action: 'update', module: 'territories', recordId: req.params.id, details: `Assigned ${assigned.length} account(s)` });
+    res.status(201).json({ territoryId: req.params.id, assigned: assigned.length, accounts: assigned });
+  } catch (err) { next(err); }
+});
+
+/** Roll-up for a territory, counting membership from both places it is stored. */
+router.get('/:id/stats', authenticate, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const territory = await prisma.territory.findUnique({ where: { id: req.params.id }, select: { id: true, name: true } });
+    if (!territory) return res.status(404).json({ error: 'Territory not found' });
+
+    const [joined, members] = await Promise.all([
+      prisma.territoryAccount.findMany({ where: { territoryId: req.params.id }, select: { accountId: true } }),
+      prisma.territoryMember.count({ where: { territoryId: req.params.id } }),
+    ]);
+    const accountIds = [...new Set(joined.map(j => j.accountId))];
+
+    const deals = accountIds.length
+      ? await prisma.deal.findMany({ where: { accountId: { in: accountIds } }, select: { stage: true, value: true } })
+      : [];
+    const won = deals.filter(d => d.stage === 'Closed Won');
+    const open = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
+    const sum = rows => rows.reduce((t, d) => t + (parseFloat(d.value) || 0), 0);
+
+    res.json({
+      territoryId: territory.id,
+      name: territory.name,
+      accountCount: accountIds.length,
+      memberCount: members,
+      dealCount: deals.length,
+      wonCount: won.length,
+      wonValue: sum(won),
+      openCount: open.length,
+      pipelineValue: sum(open),
+      winRate: deals.length ? Number(((won.length / deals.length) * 100).toFixed(1)) : 0,
+    });
+  } catch (err) { next(err); }
+});
+
+/* Registered last: "/:id" is one segment, the same shape as /hierarchy,
+   /models and /count, and while it sat at the top it answered those as
+   territory lookups. */
+router.get('/:id', authenticate, async (req, res, next) => {
+  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findUnique({ where: { id: req.params.id }, include: { parent: true, children: true } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
+});
+
+module.exports = router;

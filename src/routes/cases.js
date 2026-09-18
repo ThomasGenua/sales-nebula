@@ -32,7 +32,8 @@ const router = createCrudRouter('case', 'cases', {
       try {
         const prisma = req.app.locals.prisma;
         const comment = await prisma.caseComment.create({
-          data: { caseId: req.params.id, text: req.body.text, authorId: req.userId },
+          // The column is "text"; callers across this repo reach for "body".
+          data: { caseId: req.params.id, text: req.body.text ?? req.body.body, authorId: req.userId },
           include: { author: { select: { id: true, firstName: true, lastName: true } } },
         });
         res.status(201).json(comment);

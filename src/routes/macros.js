@@ -49,7 +49,7 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
           await prisma[macro.module === 'cases' ? 'case' : macro.module].update({ where: { id: recordId }, data: { [action.field]: action.value } });
           results.push({ action: 'updateField', field: action.field, success: true });
         } else if (action.type === 'addComment') {
-          await prisma.caseComment.create({ data: { caseId: recordId, body: action.value, isPublic: action.isPublic || false, authorId: req.user.id } });
+          await prisma.caseComment.create({ data: { caseId: recordId, text: action.value, isPublic: action.isPublic || false, authorId: req.user.id } });
           results.push({ action: 'addComment', success: true });
         } else if (action.type === 'sendEmail') {
           results.push({ action: 'sendEmail', success: true, note: 'Email queued' });

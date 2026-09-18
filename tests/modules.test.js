@@ -64,7 +64,7 @@ describe('Workflows', () => {
       .post(`/api/workflows/${wf.id}/duplicate`)
       .set(authHeader(token));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);   // duplicate creates a record
     expect(res.body.name).toContain('Copy');
     expect(res.body.id).not.toBe(wf.id);
   });
@@ -157,7 +157,7 @@ describe('Formula Fields', () => {
       .set(authHeader(token));
 
     expect(res.status).toBe(200);
-    expect(res.body.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);   // list endpoints return { data }
   });
 });
 
@@ -201,8 +201,12 @@ describe('Emails', () => {
         contactId: contact.id,
       });
 
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('Sent');
+    expect(res.status).toBe(201);              // /send creates the email
+    // /send now hands the message to a transport and records what came back.
+    // There is no SMTP server in the test environment, so the mail utility
+    // logs it: reported as queued, not sent, rather than claiming delivery.
+    expect(res.body.status).toBe('queued');
+    expect(res.body.delivery.delivered).toBe(false);
   });
 });
 
@@ -319,7 +323,7 @@ describe('End-to-End: Lead to Revenue', () => {
     const invoiceRes = await request(app)
       .post(`/api/quotes/${quoteRes.body.id}/create-invoice`)
       .set(authHeader(token));
-    expect(invoiceRes.status).toBe(200);
+    expect(invoiceRes.status).toBe(201);   // converting a quote creates an invoice
 
     // 8. Verify the full chain exists
     const contact = await prisma.contact.findUnique({ where: { id: contactId } });

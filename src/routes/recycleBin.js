@@ -65,19 +65,27 @@ router.post('/:id/restore', requirePermission('settings', 'full'), async (req, r
       return res.status(400).json({ error: `Cannot restore module: ${item.module}` });
     }
 
-    // Check if record ID already exists (was re-created)
     const existing = await prisma[modelName].findUnique({ where: { id: item.recordId } }).catch(() => null);
-    if (existing) {
+
+    // Deleting through the CRUD router is a soft delete for most models, so
+    // the row is still there with deletedAt set. Re-creating it hit the
+    // unique constraints and answered 409 every time — restore has never
+    // worked for a soft-deletable model. Clear the flag instead.
+    let restored;
+    if (existing && existing.deletedAt) {
+      restored = await prisma[modelName].update({
+        where: { id: item.recordId },
+        data: { deletedAt: null },
+      });
+    } else if (existing) {
       return res.status(409).json({ error: 'A record with this ID already exists. It may have been re-created.' });
+    } else {
+      // Hard-deleted (Deal and Workflow have no deletedAt): rebuild from the snapshot.
+      const data = typeof item.recordData === 'string' ? JSON.parse(item.recordData) : item.recordData;
+      delete data.createdAt;
+      delete data.updatedAt;
+      restored = await prisma[modelName].create({ data });
     }
-
-    // Restore the record
-    const data = typeof item.recordData === 'string' ? JSON.parse(item.recordData) : item.recordData;
-    // Strip auto-managed fields that Prisma handles
-    delete data.createdAt;
-    delete data.updatedAt;
-
-    const restored = await prisma[modelName].create({ data });
 
     // Remove from recycle bin
     await prisma.recycleBinItem.delete({ where: { id: item.id } });

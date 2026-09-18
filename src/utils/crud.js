@@ -3,6 +3,12 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
+const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
+const { pickModelFields, modelHasField } = require('./modelFields');
+const { runWorkflowsSafely } = require('../services/workflowEngine');
+const {
+  checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
+} = require('../services/recordRules');
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -25,13 +31,20 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   // Apply auth + audit to all routes
   router.use(authenticate, auditMiddleware);
 
+  const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
+
+  // Deal and Workflow have no deletedAt column, so filtering on it made their
+  // list and count queries throw. Only ask for it where it exists.
+  const softDeletes = modelHasField(modelName, 'deletedAt');
+  const notDeleted = () => (softDeletes ? { deletedAt: null } : {});
+
   // LIST - GET /
-  router.get('/', requirePermission(moduleName, 'read'), async (req, res, next) => {
+  router.get('/', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const { search, page = 1, limit = 50, sortBy, sortDir = 'desc', ...filters } = req.query;
 
-      let where = { deletedAt: null };
+      let where = { ...notDeleted() };
 
       if (search && searchFilter) {
         where = { ...where, ...searchFilter(search) };
@@ -45,6 +58,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
       const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
+
+      // Restrict to what security groups allow. Without this every
+      // authenticated user reads every record in the module.
+      where = applyAccessFilter(where, req.accessFilter);
 
       const [records, total] = await Promise.all([
         prisma[modelName].findMany({
@@ -63,14 +80,19 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // GET ONE - GET /:id
-  router.get('/:id', requirePermission(moduleName, 'read'), async (req, res, next) => {
+  router.get('/:id', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const record = await prisma[modelName].findFirst({
-        where: { id: req.params.id, deletedAt: null },
+        where: { id: req.params.id, ...notDeleted() },
         include,
       });
       if (!record) return res.status(404).json({ error: 'Not found' });
+      // 404 rather than 403: a record the caller may not see should not be
+      // distinguishable from one that does not exist.
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Read'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
       res.json(record);
     } catch (err) { next(err); }
   });
@@ -88,7 +110,36 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (beforeCreate) data = await beforeCreate(data, req);
 
-      const record = await prisma[modelName].create({ data, include });
+      // Validation rules describe what is not allowed. They had admin screens
+      // and a table and were read by nothing, so they validated nothing.
+      const violations = await checkValidationRules(prisma, moduleName, data);
+      if (violations.length) {
+        return res.status(400).json({
+          error: violations[0].message,
+          code: 'VALIDATION_RULE',
+          violations,
+        });
+      }
+
+      // Duplicate rules likewise: configured, never consulted. A blocking rule
+      // refuses; a warning rule lets the record through and says so.
+      const duplicates = await findDuplicates(prisma, moduleName, data);
+      const blocking = duplicates.filter(d => d.action === 'block');
+      if (blocking.length) {
+        return res.status(409).json({
+          error: `This looks like a duplicate of an existing ${moduleName.replace(/s$/, '')}.`,
+          code: 'DUPLICATE_RECORD',
+          duplicates: blocking,
+        });
+      }
+
+      // Assignment rules pick an owner when the caller did not name one.
+      const assignment = await applyAssignmentRules(prisma, moduleName, data);
+      if (assignment) data = { ...data, ...assignment.fields };
+
+      // A key the model does not have used to 500 the whole request.
+      const { data: createData, ignored } = pickModelFields(modelName, data);
+      const record = await prisma[modelName].create({ data: createData, include });
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
 
@@ -99,18 +150,35 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (afterCreate) await afterCreate(record, req);
 
+      // Fire the rules for this module. Nothing used to call the engine, so a
+      // workflow could be enabled and never run. Awaited so a rule's effects
+      // are in place before the caller sees the record, and swallowed so
+      // automation can never fail the write itself.
+      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'create', record, userId: req.userId });
+
       // Fire webhook
       try {
         const { fireWebhookEvent } = require('../services/webhooks');
         await fireWebhookEvent(prisma, `${moduleName}.created`, { id: record.id, module: moduleName, data: record });
       } catch (e) { /* Webhook is best-effort */ }
 
-      res.status(201).json(record);
+      if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
+
+      const warnings = [];
+      if (ignored.length) warnings.push(`Ignored unknown field(s): ${ignored.join(', ')}`);
+      if (duplicates.length) warnings.push(`Possible duplicate of ${duplicates.length} existing record(s).`);
+
+      res.status(201).json({
+        ...record,
+        ...(warnings.length ? { warnings } : {}),
+        ...(duplicates.length ? { duplicates } : {}),
+        ...(assignment ? { assignedBy: assignment.rule } : {}),
+      });
     } catch (err) { next(err); }
   });
 
   // UPDATE - PUT /:id
-  router.put('/:id', requirePermission(moduleName, 'edit'), async (req, res, next) => {
+  router.put('/:id', requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       let data = { ...req.body };
@@ -137,12 +205,26 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // Get old record for field-level audit
       const oldRecord = await prisma[modelName].findUnique({ where: { id: req.params.id } });
       if (!oldRecord) return res.status(404).json({ error: 'Not found' });
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Edit'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
 
       if (beforeUpdate) data = await beforeUpdate(data, req);
 
+      // Validate the record as it will be, not just the fields supplied.
+      const updateViolations = await checkValidationRules(prisma, moduleName, { ...oldRecord, ...data });
+      if (updateViolations.length) {
+        return res.status(400).json({
+          error: updateViolations[0].message,
+          code: 'VALIDATION_RULE',
+          violations: updateViolations,
+        });
+      }
+
+      const { data: updateData } = pickModelFields(modelName, data);
       const record = await prisma[modelName].update({
         where: { id: req.params.id },
-        data,
+        data: updateData,
         include,
       });
 
@@ -161,6 +243,15 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (afterUpdate) await afterUpdate(record, req);
 
+      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: req.userId });
+
+      // A status or stage move is its own trigger, so a rule does not have to
+      // re-derive "did this change" from conditions.
+      const movedStage = ['status', 'stage'].some(f => oldRecord[f] !== undefined && oldRecord[f] !== record[f]);
+      if (movedStage) {
+        await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: req.userId });
+      }
+
       // Fire webhook
       try {
         const { fireWebhookEvent } = require('../services/webhooks');
@@ -172,16 +263,24 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // DELETE - DELETE /:id
-  router.delete('/:id', requirePermission(moduleName, 'full'), async (req, res, next) => {
+  router.delete('/:id', requirePermission(moduleName, 'full'), guard({ minLevel: 'Full' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
 
       // Snapshot record before delete for recycle bin
       const record = await prisma[modelName].findUnique({ where: { id: req.params.id } });
       if (!record) return res.status(404).json({ error: 'Not found' });
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Full'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
 
-      // Soft delete
-      await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+      // Soft delete where the model supports it; otherwise remove the row.
+      // The recycle bin snapshot below covers both cases.
+      if (softDeletes) {
+        await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+      } else {
+        await prisma[modelName].delete({ where: { id: req.params.id } });
+      }
 
       // Send to recycle bin (30-day retention)
       try {

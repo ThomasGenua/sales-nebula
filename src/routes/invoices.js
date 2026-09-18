@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { pickModelFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
@@ -42,7 +43,10 @@ router.get('/:id', requirePermission('invoices', 'read'), async (req, res, next)
 router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, ...data } = req.body;
+    const { items, ...rest } = req.body;
+    // Same reason as the shared CRUD router: one stray key (an "amount" that the
+    // model spells subtotal/total) made Prisma reject the entire input.
+    const { data } = pickModelFields('invoice', rest);
     const count = await prisma.invoice.count();
     data.number = `INV-${String(count + 1).padStart(3, '0')}`;
     const invoice = await prisma.invoice.create({

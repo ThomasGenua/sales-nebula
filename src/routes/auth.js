@@ -9,9 +9,34 @@ const {
   JWT_SECRET,
 } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
+const { verifyTotp, safeEqual } = require('../utils/totp');
 const jwt = require('jsonwebtoken');
 
 const router = Router();
+
+/**
+ * Issue the session for a fully authenticated user. Shared by password login
+ * and the MFA second step so both return an identical shape.
+ */
+async function issueSession(prisma, user, res) {
+  const accessToken = signAccessToken(user.id, user.role.name);
+  const { token: refreshToken } = signRefreshToken(user.id);
+
+  await audit(prisma, {
+    action: 'login', module: 'auth',
+    details: `${user.firstName} ${user.lastName} logged in`,
+    userId: user.id,
+  });
+
+  const { password: _pw, ...safeUser } = user;
+  return res.json({
+    token: accessToken,         // Backward compatible
+    accessToken,
+    refreshToken,
+    expiresIn: 900,             // 15 minutes in seconds
+    user: safeUser,
+  });
+}
 
 // POST /api/auth/login
 router.post('/login', limiters.auth, validate(schemas.login), async (req, res, next) => {
@@ -57,24 +82,23 @@ router.post('/login', limiters.auth, validate(schemas.login), async (req, res, n
     // Successful login: clear attempts
     clearLoginAttempts(email);
 
-    // Issue access + refresh tokens
-    const accessToken = signAccessToken(user.id, user.role.name);
-    const { token: refreshToken, jti: refreshJti } = signRefreshToken(user.id);
-
-    await audit(prisma, {
-      action: 'login', module: 'auth',
-      details: `${user.firstName} ${user.lastName} logged in`,
-      userId: user.id,
+    // A user with a verified device does not get a session from the password
+    // alone. Without this gate, enrolling MFA protects nothing: this route
+    // still hands out a token and every MFA endpoint lives elsewhere.
+    const devices = await prisma.mfaDevice.findMany({
+      where: { userId: user.id, verified: true },
+      select: { id: true, type: true },
     });
+    if (devices.length) {
+      const mfaToken = jwt.sign(
+        { sub: user.id, purpose: 'mfa-pending' },
+        JWT_SECRET,
+        { expiresIn: '5m' }
+      );
+      return res.json({ mfaRequired: true, mfaToken, devices, expiresIn: 300 });
+    }
 
-    const { password: _, ...safeUser } = user;
-    res.json({
-      token: accessToken,         // Backward compatible
-      accessToken,
-      refreshToken,
-      expiresIn: 900,             // 15 minutes in seconds
-      user: safeUser,
-    });
+    return issueSession(prisma, user, res);
   } catch (err) { next(err); }
 });
 
@@ -335,6 +359,65 @@ router.post('/reset-password', limiters.auth, async (req, res, next) => {
     });
 
     res.json({ success: true, message: 'Password updated. You can sign in with your new password.' });
+  } catch (err) { next(err); }
+});
+
+// POST /api/auth/mfa/verify — second step of login, exchanges a code for a session
+router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { mfaToken, deviceId, code } = req.body || {};
+    if (!mfaToken || !code) {
+      return res.status(400).json({ error: 'mfaToken and code are required' });
+    }
+
+    const expired = { error: 'That sign-in attempt expired. Start again.' };
+    let decoded;
+    try {
+      decoded = jwt.verify(mfaToken, JWT_SECRET);
+    } catch {
+      return res.status(401).json(expired);
+    }
+    if (decoded.purpose !== 'mfa-pending' || !decoded.sub) {
+      return res.status(401).json(expired);
+    }
+
+    const device = deviceId
+      ? await prisma.mfaDevice.findFirst({ where: { id: deviceId, userId: decoded.sub, verified: true } })
+      : await prisma.mfaDevice.findFirst({ where: { userId: decoded.sub, verified: true } });
+    if (!device) return res.status(400).json({ error: 'No verified device for this account' });
+
+    let ok = false;
+    if (device.type === 'totp') {
+      ok = verifyTotp(device.secret, code);
+    } else {
+      // SMS/email codes are issued as MfaChallenge rows and used once.
+      const challenge = await prisma.mfaChallenge.findFirst({
+        where: { userId: decoded.sub, deviceId: device.id, verified: false, expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' },
+      });
+      ok = !!challenge && safeEqual(challenge.code, String(code));
+      if (ok) {
+        await prisma.mfaChallenge.update({ where: { id: challenge.id }, data: { verified: true } });
+      }
+    }
+
+    if (!ok) {
+      await audit(prisma, {
+        action: 'mfa_failed', module: 'auth',
+        details: 'Incorrect MFA code', userId: decoded.sub,
+      }).catch(() => {});
+      return res.status(401).json({ error: 'Incorrect code' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.sub },
+      include: { role: { include: { permissions: true } } },
+    });
+    if (!user || !user.active) return res.status(403).json({ error: 'Account disabled' });
+
+    await prisma.mfaDevice.update({ where: { id: device.id }, data: { lastUsedAt: new Date() } });
+    return issueSession(prisma, user, res);
   } catch (err) { next(err); }
 });
 

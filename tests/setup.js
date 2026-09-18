@@ -19,6 +19,10 @@ let app;
 // ─── LIFECYCLE ───
 
 async function setup() {
+  // Open registration is off by default and returns 403; the register and
+  // password-policy specs are about what happens when it is switched on.
+  process.env.ALLOW_OPEN_REGISTRATION = 'true';
+
   prisma = new PrismaClient();
   app = createApp(prisma);
 
@@ -43,6 +47,9 @@ async function teardown() {
 async function cleanDatabase() {
   // Delete in dependency order
   const tables = [
+    'DuplicateRecord', 'DuplicateRule', 'ValidationRule', 'Reminder',
+    'InboundEmailAttachment', 'InboundEmailMessage', 'EmailPollLog',
+    'InboundRoutingRule', 'InboundEmailAccount',
     'ChatterMention', 'ChatterLike', 'ChatterComment', 'ChatterPost',
     'ApprovalStep', 'ApprovalRequest', 'ApprovalProcessStep', 'ApprovalProcess',
     'ReportSchedule', 'Report', 'ReportFolder',

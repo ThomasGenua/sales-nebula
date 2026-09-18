@@ -17,6 +17,29 @@ router.use(authenticate, auditMiddleware);
 
 // ─── MODULE METADATA ───
 // Maps module names to Prisma models and their available fields
+const { Prisma } = require('@prisma/client');
+
+/**
+ * Pick the fields that stand in for a related record's label.
+ *
+ * This used to ask for { id, name } on every relation that was not an owner or
+ * assignee, but Contact has firstName/lastName and no name at all, so any
+ * report touching a contact failed with "Unknown field `name` for select
+ * statement on model `Contact`". Ask the schema instead of guessing.
+ */
+function relationLabelSelect(modelName, relationName) {
+  const model = Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === String(modelName).toLowerCase());
+  const relation = model?.fields.find(f => f.name === relationName && f.kind === 'object');
+  const target = Prisma.dmmf.datamodel.models.find(m => m.name === relation?.type);
+  const has = new Set((target?.fields || []).map(f => f.name));
+
+  const select = { id: true };
+  for (const field of ['name', 'firstName', 'lastName', 'subject', 'title', 'email']) {
+    if (has.has(field)) select[field] = true;
+  }
+  return select;
+}
+
 const MODULE_CONFIG = {
   contacts: {
     model: 'contact',
@@ -458,11 +481,7 @@ async function executeReport(prisma, report) {
     // Include related data names
     const include = {};
     for (const [rel, fk] of Object.entries(config.relations)) {
-      if (rel === 'owner' || rel === 'assignee') {
-        include[rel] = { select: { id: true, firstName: true, lastName: true } };
-      } else {
-        include[rel] = { select: { id: true, name: true } };
-      }
+      include[rel] = { select: relationLabelSelect(config.model, rel) };
     }
     if (Object.keys(include).length && !select) findArgs.include = include;
 

@@ -40,6 +40,22 @@ const API = "/api";
 // HOOKS
 // ========================================================================
 const AuthContext = createContext();
+
+/**
+ * Where we are inside /app, mirrored into the address bar.
+ *
+ * The open record used to be component state, so a record could not be linked
+ * to, bookmarked, or closed with the browser's back button, and a refresh
+ * dropped you back on the dashboard.
+ */
+const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {} });
+
+/** "/app/contacts/abc123" -> { module: "contacts", recordId: "abc123" } */
+function parseAppPath(pathname) {
+  const parts = String(pathname || "").split("/").filter(Boolean);
+  if (parts[0] !== "app") return { module: "dashboard", recordId: null };
+  return { module: parts[1] || "dashboard", recordId: parts[2] || null };
+}
 function useAuth() { return useContext(AuthContext); }
 
 function AuthProvider({ children }) {
@@ -48,18 +64,85 @@ function AuthProvider({ children }) {
   const [token, setToken] = useState(localStorage.getItem("sn_token"));
   const [loading, setLoading] = useState(true);
 
+  // One in-flight renewal shared by every 401 that lands at once, so a burst of
+  // parallel requests refreshes the session once instead of racing each other.
+  const renewal = useRef(null);
+
+  const clearSession = useCallback(() => {
+    setUser(null);
+    setToken(null);
+    localStorage.removeItem("sn_token");
+    localStorage.removeItem("sn_refresh");
+  }, []);
+
+  const applySession = useCallback((d) => {
+    setToken(d.token);
+    localStorage.setItem("sn_token", d.token);
+    // Login hands back a refresh token; it used to be dropped on the floor,
+    // which is why a session died the moment the 15 minute access token did.
+    if (d.refreshToken) localStorage.setItem("sn_refresh", d.refreshToken);
+    setUser(d.user);
+  }, []);
+
+  const renewAccessToken = useCallback(() => {
+    const refreshToken = localStorage.getItem("sn_refresh");
+    if (!refreshToken) return Promise.resolve(null);
+    if (!renewal.current) {
+      renewal.current = fetch(`${API}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          const next = d?.accessToken || d?.token || null;
+          if (next) {
+            localStorage.setItem("sn_token", next);
+            setToken(next);
+          }
+          return next;
+        })
+        .catch(() => null)
+        .finally(() => { renewal.current = null; });
+    }
+    return renewal.current;
+  }, []);
+
   const apiFetch = useCallback(async (path, opts = {}) => {
     if (demoMode) return demoApiFetch(path, opts);
 
-    const res = await fetch(`${API}${path}`, {
-      ...opts,
-      headers: { "Content-Type": "application/json", ...(token && { Authorization: `Bearer ${token}` }), ...opts.headers },
-      ...(opts.body && typeof opts.body === "object" && !opts.rawBody && { body: JSON.stringify(opts.body) }),
+    const { skipRefresh, rawBody, ...init } = opts;
+    const call = (bearer) => fetch(`${API}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(bearer && { Authorization: `Bearer ${bearer}` }),
+        ...opts.headers,
+      },
+      ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
     });
-    if (res.status === 401) { setUser(null); setToken(null); localStorage.removeItem("sn_token"); throw new Error("Unauthorized"); }
+
+    let res = await call(token);
+
+    // Access tokens last 15 minutes. Spend the refresh token and retry once
+    // rather than interrupting whatever the user was in the middle of.
+    if (res.status === 401 && !skipRefresh) {
+      const renewed = await renewAccessToken();
+      if (renewed) res = await call(renewed);
+    }
+
+    if (res.status === 401) {
+      const e = await res.json().catch(() => ({}));
+      // An unauthenticated endpoint rejecting a credential (a wrong password,
+      // a wrong MFA code) is not an expired session. Those calls pass
+      // skipRefresh, so keep their message and leave the session alone
+      // instead of reporting a flat "Unauthorized".
+      if (!skipRefresh) clearSession();
+      throw new Error(e.error || "Unauthorized");
+    }
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
-  }, [token, demoMode]);
+  }, [token, demoMode, renewAccessToken, clearSession]);
 
   useEffect(() => {
     if (demoMode) { setUser(DEMO_USER); setLoading(false); return; }
@@ -77,12 +160,34 @@ function AuthProvider({ children }) {
       return;
     }
 
-    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password } });
-    setToken(d.token); localStorage.setItem("sn_token", d.token); setUser(d.user);
+    // skipRefresh: a stale refresh token from a previous session must not be
+    // spent trying to rescue a wrong password.
+    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true });
+
+    // A verified MFA device means no session yet. The caller collects a code
+    // and finishes at /auth/mfa/verify; storing d.token here would write the
+    // string "undefined" into localStorage and silently strand the user.
+    if (d.mfaRequired) {
+      return { mfaRequired: true, mfaToken: d.mfaToken, devices: d.devices || [] };
+    }
+
+    applySession(d);
+    return { mfaRequired: false };
+  };
+
+  /** Second step of an MFA login: exchange the code for a session. */
+  const completeMfa = async ({ mfaToken, deviceId, code }) => {
+    const d = await apiFetch("/auth/mfa/verify", {
+      method: "POST",
+      body: { mfaToken, deviceId, code },
+      skipRefresh: true,
+    });
+    applySession(d);
   };
   const logout = () => {
     setUser(null); setToken(null); setDemoMode(false);
     localStorage.removeItem("sn_token");
+    localStorage.removeItem("sn_refresh");
     localStorage.removeItem("sn_demo_mode");
     window.history.pushState({}, "", "/");
     window.location.reload();
@@ -92,7 +197,7 @@ function AuthProvider({ children }) {
     setUser((current) => (current ? { ...current, ...partial } : current));
   };
 
-  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
 }
 
 function useApi(path, deps = []) {
@@ -851,6 +956,8 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const { recordId, openRecord, closeRecord } = useContext(RouteContext);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
@@ -864,24 +971,49 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [sortDir, setSortDir] = useState("desc");
   const limit = 50;
 
-  const load = useCallback(() => {
+  // Typing "acme" used to fire four requests, whose responses could land out
+  // of order and leave the list showing results for "ac".
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);            // a new search belongs on the first page
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const load = useCallback((signal) => {
     setLoading(true);
     setLoadError(null);
     let qs = `?page=${page}&limit=${limit}`;
-    if (search) qs += `&search=${encodeURIComponent(search)}`;
+    if (debouncedSearch) qs += `&search=${encodeURIComponent(debouncedSearch)}`;
     if (sortField) qs += `&sortBy=${sortField}&sortDir=${sortDir}`;
     Object.entries(filterValues).forEach(([k, v]) => { if (v) qs += `&${k}=${encodeURIComponent(v)}`; });
-    apiFetch(`${endpoint}${qs}`)
+    apiFetch(`${endpoint}${qs}`, { signal })
       .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.total ?? d.length ?? 0); })
       .catch(err => {
+        if (err?.name === "AbortError") return;   // superseded by a newer request
         setItems([]);
         setTotal(0);
         setLoadError(err?.message || "Check your connection and try again.");
       })
-      .finally(() => setLoading(false));
-  }, [page, search, endpoint, apiFetch, sortField, sortDir, filterValues]);
+      .finally(() => { if (!signal?.aborted) setLoading(false); });
+  }, [page, debouncedSearch, endpoint, apiFetch, sortField, sortDir, filterValues]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  // Open whatever record the URL names, so /app/contacts/<id> lands on it.
+  useEffect(() => {
+    if (!recordId) { setDetailRecord(null); return; }
+    let cancelled = false;
+    apiFetch(`${endpoint}/${recordId}`)
+      .then(r => { if (!cancelled) setDetailRecord(r); })
+      .catch(() => { if (!cancelled) setDetailRecord(null); });
+    return () => { cancelled = true; };
+  }, [recordId, endpoint, apiFetch]);
 
   const save = async () => {
     try {
@@ -896,7 +1028,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
     if (!confirm(`Delete ${row[nameField] || "this record"}?`)) return;
     try {
       await apiFetch(`${endpoint}/${row.id}`, { method: "DELETE" });
-      if (detailRecord?.id === row.id) setDetailRecord(null);
+      if (detailRecord?.id === row.id) { setDetailRecord(null); closeRecord(); }
       load(); setToast({ message: "Deleted", type: "success" });
     } catch (e) { setToast({ message: e.message, type: "error" }); }
   };
@@ -918,7 +1050,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
           record={detailRecord}
           title={detailRecord[nameField] || detailRecord.firstName || detailRecord.subject}
           fields={detailFields || formFields?.map(f => ({ key: f.key, label: f.label, render: f.render })) || columns}
-          onBack={() => setDetailRecord(null)}
+          onBack={() => { setDetailRecord(null); closeRecord(); }}
           onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
           onDelete={remove}
         />
@@ -996,7 +1128,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       <div className="bg-[#0B1228] border border-[#182550] rounded-xl overflow-hidden">
         <div className="p-2 sm:p-0">
           <DataTable columns={columns} data={items} loading={loading} error={loadError} onRetry={load}
-            onRowClick={row => setDetailRecord(row)}
+            onRowClick={row => { setDetailRecord(row); openRecord(row.id); }}
             onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
             onDelete={remove} selected={selected} onSelect={setSelected}
             emptyTitle={emptyTitle || `No ${title.toLowerCase()} yet`} />
@@ -1946,23 +2078,52 @@ function AdminDashboardPage() {
 // LOGIN PAGE -- mobile-first
 // ========================================================================
 function LoginPage({ go }) {
-  const { login } = useAuth();
+  const { login, completeMfa } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [challenge, setChallenge] = useState(null);   // { mfaToken, devices }
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState("login"); // login | forgot
+  const [mode, setMode] = useState("login"); // login | forgot | mfa
+
+  const enterApp = () => {
+    if (window.location.pathname !== "/app") {
+      window.history.pushState({}, "", "/app");
+    }
+  };
 
   const handleLogin = async (e) => {
     e.preventDefault(); setError(""); setInfo(""); setLoading(true);
     try {
-      await login(email, password);
-      if (window.location.pathname !== "/app") {
-        window.history.pushState({}, "", "/app");
+      const result = await login(email, password);
+      // The password alone is not a session when a device is enrolled.
+      if (result?.mfaRequired) {
+        setChallenge({ mfaToken: result.mfaToken, devices: result.devices });
+        setCode("");
+        setMode("mfa");
+        setInfo("Enter the 6-digit code from your authenticator app.");
+        return;
       }
+      enterApp();
     } catch (e) { setError(e.message || "Login failed"); }
     finally { setLoading(false); }
+  };
+
+  const handleMfa = async (e) => {
+    e.preventDefault(); setError(""); setInfo(""); setLoading(true);
+    try {
+      await completeMfa({
+        mfaToken: challenge.mfaToken,
+        deviceId: challenge.devices?.[0]?.id,
+        code,
+      });
+      enterApp();
+    } catch (e) {
+      setError(e.message || "Incorrect code");
+      setCode("");
+    } finally { setLoading(false); }
   };
 
   const handleForgot = async (e) => {
@@ -2000,18 +2161,50 @@ function LoginPage({ go }) {
             {mode === "forgot" ? "Reset your password" : "Sales CRM"}
           </p>
         </div>
-        <form onSubmit={mode === "forgot" ? handleForgot : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+        <form onSubmit={mode === "forgot" ? handleForgot : mode === "mfa" ? handleMfa : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
           {error && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red-ink)" }}>{error}</div>}
           {info && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(52,211,153,0.10)", border: "1px solid rgba(52,211,153,0.20)", color: "var(--sn-green-ink)" }}>{info}</div>}
-          <Input label="Email" type="email" value={email} onChange={setEmail} required placeholder="your@email.com" />
-          {mode === "login" && (
-            <Input label="Password" type="password" value={password} onChange={setPassword} required placeholder="Password" />
+          {mode === "mfa" ? (
+            <Input
+              label="Authentication code"
+              type="text"
+              value={code}
+              onChange={v => setCode(v.replace(/\D/g, "").slice(0, 6))}
+              required
+              placeholder="000000"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoFocus
+            />
+          ) : (
+            <>
+              <Input label="Email" type="email" value={email} onChange={setEmail} required placeholder="your@email.com" />
+              {mode === "login" && (
+                <Input label="Password" type="password" value={password} onChange={setPassword} required placeholder="Password" />
+              )}
+            </>
           )}
-          <Button onClick={mode === "forgot" ? handleForgot : handleLogin} disabled={loading} fullWidth size="lg">
+          <Button
+            onClick={mode === "forgot" ? handleForgot : mode === "mfa" ? handleMfa : handleLogin}
+            disabled={loading || (mode === "mfa" && code.length !== 6)}
+            fullWidth
+            size="lg"
+          >
             {loading
-              ? (mode === "forgot" ? "Sending..." : "Signing in...")
-              : (mode === "forgot" ? "Send reset link" : "Sign In")}
+              ? (mode === "forgot" ? "Sending..." : mode === "mfa" ? "Verifying..." : "Signing in...")
+              : (mode === "forgot" ? "Send reset link" : mode === "mfa" ? "Verify" : "Sign In")}
           </Button>
+
+          {mode === "mfa" && (
+            <button
+              type="button"
+              onClick={() => { setMode("login"); setChallenge(null); setCode(""); setError(""); setInfo(""); }}
+              className="w-full text-xs hover:underline"
+              style={{ color: "var(--sn-amber-ink)", background: "none", border: "none", cursor: "pointer" }}
+            >
+              Back to sign in
+            </button>
+          )}
 
           {mode === "login" ? (
             <>
@@ -4710,7 +4903,29 @@ function DemoBanner() {
 function AppShell({ go }) {
   const { user } = useAuth();
   const demo = isDemoUser(user);
-  const [page, setPage] = useState("dashboard");
+  const [route, setRoute] = useState(() => parseAppPath(window.location.pathname));
+  const page = route.module;
+
+  const navigate = useCallback((module, recordId = null) => {
+    const next = recordId ? `/app/${module}/${recordId}` : `/app/${module}`;
+    if (next !== window.location.pathname) window.history.pushState({}, "", next);
+    setRoute({ module, recordId });
+  }, []);
+
+  const setPage = useCallback((module) => navigate(module, null), [navigate]);
+
+  useEffect(() => {
+    const onPop = () => setRoute(parseAppPath(window.location.pathname));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const routeValue = useMemo(() => ({
+    module: route.module,
+    recordId: route.recordId,
+    openRecord: (id) => navigate(route.module, id),
+    closeRecord: () => navigate(route.module, null),
+  }), [route, navigate]);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -4774,7 +4989,10 @@ function AppShell({ go }) {
             onQuickActionsToggle={() => setQuickActionsOpen(o => !o)} />
 
           <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
-            <PageComponent />
+            {/* keyed on the module so one page's record state never leaks into the next */}
+            <RouteContext.Provider value={routeValue}>
+              <PageComponent key={route.module} />
+            </RouteContext.Provider>
           </main>
         </div>
 

@@ -47,7 +47,9 @@ const router = createCrudRouter('account', 'accounts', {
           prisma.contact.count({ where: { accountId: id } }),
           prisma.deal.findMany({ where: { accountId: id }, select: { stage: true, value: true } }),
           prisma.case.findMany({ where: { accountId: id }, select: { status: true } }),
-          prisma.invoice.findMany({ where: { accountId: id }, select: { status: true }, include: { items: true } }),
+          // select and include are mutually exclusive in Prisma; asking for both
+          // made this whole endpoint throw, so account stats never returned.
+          prisma.invoice.findMany({ where: { accountId: id }, include: { items: true } }),
         ]);
 
         const openDeals = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');

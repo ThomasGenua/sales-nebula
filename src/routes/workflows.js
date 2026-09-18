@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { runWorkflows } = require('../services/workflowEngine');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
@@ -88,89 +89,24 @@ router.get('/logs/all', requirePermission('workflows', 'read'), async (req, res,
 });
 
 // POST /api/workflows/execute - Run matching workflows for a trigger event
+/**
+ * Run the rules for a record on demand.
+ *
+ * The engine used to live inline here and this was its only caller — which
+ * nothing called. It now shares src/services/workflowEngine.js with the write
+ * paths and the scheduler, so a rule behaves the same however it is reached.
+ */
 router.post('/execute', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { module, trigger, record, oldRecord } = req.body;
-
-    const workflows = await prisma.workflow.findMany({ where: { module, trigger, active: true } });
-    const results = [];
-
-    for (const wf of workflows) {
-      try {
-        // Evaluate conditions
-        const conditions = wf.conditions || [];
-        const allMatch = conditions.every(cond => {
-          const val = record[cond.field];
-          const target = cond.value;
-          switch (cond.operator) {
-            case 'equals': return String(val) === String(target);
-            case 'notEquals': return String(val) !== String(target);
-            case 'contains': return String(val || '').includes(target);
-            case 'greaterThan': return Number(val) > Number(target);
-            case 'lessThan': return Number(val) < Number(target);
-            case 'isEmpty': return !val || String(val).trim() === '';
-            case 'isNotEmpty': return val && String(val).trim() !== '';
-            default: return true;
-          }
-        });
-
-        if (!allMatch) continue;
-
-        // Execute actions
-        const actions = wf.actions || [];
-        const actionsRun = [];
-
-        for (const action of actions) {
-          switch (action.type) {
-            case 'updateField':
-              await prisma[module.slice(0, -1)].update({
-                where: { id: record.id },
-                data: { [action.config.field]: action.config.value },
-              });
-              actionsRun.push(`Updated ${action.config.field}`);
-              break;
-            case 'createActivity':
-              await prisma.activity.create({
-                data: {
-                  type: action.config.actType || 'Task',
-                  subject: action.config.subject || `Auto: ${wf.name}`,
-                  date: new Date(),
-                  priority: action.config.priority || 'Medium',
-                  status: 'Scheduled',
-                },
-              });
-              actionsRun.push('Created activity');
-              break;
-            case 'createNotification':
-              await prisma.notification.create({
-                data: {
-                  title: action.config.title || wf.name,
-                  message: action.config.message || 'Workflow triggered',
-                  userId: req.userId,
-                  recordModule: module,
-                  recordId: record.id,
-                },
-              });
-              actionsRun.push('Sent notification');
-              break;
-          }
-        }
-
-        // Log execution
-        await prisma.workflowLog.create({
-          data: { workflowId: wf.id, workflowName: wf.name, module, trigger, recordId: record.id, actionsRun, success: true },
-        });
-        await prisma.workflow.update({ where: { id: wf.id }, data: { runCount: { increment: 1 } } });
-        results.push({ workflow: wf.name, actionsRun, success: true });
-      } catch (err) {
-        await prisma.workflowLog.create({
-          data: { workflowId: wf.id, workflowName: wf.name, module, trigger, recordId: record.id, actionsRun: [], success: false, error: err.message },
-        });
-        results.push({ workflow: wf.name, success: false, error: err.message });
-      }
+    const { module, trigger, record, oldRecord } = req.body || {};
+    if (!module || !trigger || !record?.id) {
+      return res.status(400).json({ error: 'module, trigger and record.id are required' });
     }
 
+    const results = await runWorkflows(prisma, {
+      module, trigger, record, oldRecord, userId: req.userId,
+    });
     res.json({ executed: results.length, results });
   } catch (err) { next(err); }
 });

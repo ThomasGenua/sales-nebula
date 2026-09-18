@@ -2,6 +2,9 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
+const jwt = require('jsonwebtoken');
+const { JWT_SECRET } = require('../middleware/auth');
 const router = Router();
 
 // ─── SSO CONFIG ───
@@ -15,23 +18,25 @@ router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), async (
   try { res.json(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: req.body })); } catch (err) { next(err); }
 });
 // SSO login endpoint
-router.post('/sso/login', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { provider, token, email } = req.body;
-    const config = await prisma.ssoConfig.findFirst({ where: { provider, active: true } });
-    if (!config) return res.status(400).json({ error: 'SSO provider not configured' });
-    // In production: validate SAML assertion or OIDC token
-    // Simplified: look up user by email from token claims
-    let user = await prisma.user.findUnique({ where: { email } });
-    if (!user && config.autoProvision) {
-      user = await prisma.user.create({ data: { email, firstName: req.body.firstName || 'SSO', lastName: req.body.lastName || 'User', password: crypto.randomBytes(32).toString('hex'), roleId: config.defaultRoleId } });
-    }
-    if (!user) return res.status(401).json({ error: 'User not found and auto-provisioning disabled' });
-    const { signToken } = require('../middleware/auth');
-    const accessToken = signToken(user.id, user.roleId);
-    res.json({ token: accessToken, user: { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName } });
-  } catch (err) { next(err); }
+/**
+ * SSO sign-in is deliberately disabled.
+ *
+ * This route used to take { provider, token, email } from the request body,
+ * never verify `token`, look the user up by the supplied email and issue a
+ * valid session. It is unauthenticated, so anyone who could reach the API
+ * could sign in as any user — including an administrator — by naming their
+ * address, and with autoProvision could create accounts outright.
+ *
+ * Verifying an assertion properly needs a SAML or OIDC library and per-provider
+ * certificate handling, neither of which is present. Until that exists this
+ * refuses rather than pretending. The /sso config endpoints above still work,
+ * so nothing an administrator has already set up is lost.
+ */
+router.post('/sso/login', async (req, res) => {
+  res.status(501).json({
+    error: 'SSO sign-in is not implemented',
+    detail: 'This deployment cannot verify SAML assertions or OIDC tokens. Use password sign-in at /api/auth/login.',
+  });
 });
 
 // ─── MFA ───
@@ -41,15 +46,19 @@ router.get('/mfa/devices', authenticate, async (req, res, next) => {
 });
 router.post('/mfa/enroll', authenticate, async (req, res, next) => {
   try {
+    const prisma = req.app.locals.prisma;
     const { type = 'totp' } = req.body;
-    const secret = crypto.randomBytes(20).toString('base32').substring(0, 16);
-    const device = await req.app.locals.prisma.mfaDevice.create({
-      data: { userId: req.userId, type, secret: type === 'totp' ? secret : null, phone: req.body.phone },
+    // crypto's Buffer has no 'base32' encoding, so the previous call threw
+    // "Unknown encoding: base32" and enrolment never once succeeded.
+    const secret = type === 'totp' ? generateSecret() : null;
+    const device = await prisma.mfaDevice.create({
+      data: { userId: req.userId, type, secret, phone: req.body.phone },
     });
     const response = { deviceId: device.id, type };
     if (type === 'totp') {
+      const owner = await prisma.user.findUnique({ where: { id: req.userId }, select: { email: true } });
       response.secret = secret;
-      response.otpAuthUrl = `otpauth://totp/SalesNebula:${req.userId}?secret=${secret}&issuer=SalesNebula`;
+      response.otpAuthUrl = otpAuthUrl({ secret, label: owner?.email || req.userId });
     }
     res.status(201).json(response);
   } catch (err) { next(err); }
@@ -59,25 +68,48 @@ router.post('/mfa/verify', authenticate, async (req, res, next) => {
     const { deviceId, code } = req.body;
     const device = await req.app.locals.prisma.mfaDevice.findUnique({ where: { id: deviceId } });
     if (!device || device.userId !== req.userId) return res.status(404).json({ error: 'Device not found' });
-    // TOTP verification (simplified - in production use speakeasy/otplib)
+    // This used to accept any six digits, so 000000 enrolled a device and the
+    // "verified" flag meant nothing. Now the code has to match the secret.
     if (device.type === 'totp') {
-      // Accept any 6-digit code for now; real impl uses HMAC-based TOTP
-      if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Invalid code format' });
+      if (!verifyTotp(device.secret, code)) {
+        return res.status(400).json({ error: 'Incorrect code' });
+      }
     }
     await req.app.locals.prisma.mfaDevice.update({ where: { id: deviceId }, data: { verified: true, lastUsedAt: new Date() } });
     res.json({ verified: true });
   } catch (err) { next(err); }
 });
+/**
+ * Issue an SMS/email code. Takes the short-lived mfaToken that /api/auth/login
+ * hands back, rather than a userId from the body: the old version let anyone
+ * mint challenges for any account they could name.
+ */
 router.post('/mfa/challenge', async (req, res, next) => {
   try {
-    const { userId, deviceId } = req.body;
-    const device = await req.app.locals.prisma.mfaDevice.findUnique({ where: { id: deviceId } });
-    if (!device || !device.verified) return res.status(400).json({ error: 'Device not verified' });
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    const challenge = await req.app.locals.prisma.mfaChallenge.create({
-      data: { userId, deviceId, code, expiresAt: new Date(Date.now() + 300000) },
+    const { mfaToken, deviceId } = req.body || {};
+    let decoded;
+    try {
+      decoded = jwt.verify(mfaToken, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ error: 'That sign-in attempt expired. Start again.' });
+    }
+    if (decoded.purpose !== 'mfa-pending' || !decoded.sub) {
+      return res.status(401).json({ error: 'That sign-in attempt expired. Start again.' });
+    }
+
+    const prisma = req.app.locals.prisma;
+    const device = await prisma.mfaDevice.findFirst({
+      where: { id: deviceId, userId: decoded.sub, verified: true },
     });
-    // In production: send code via SMS/email for non-TOTP
+    if (!device) return res.status(400).json({ error: 'Device not verified' });
+
+    // randomInt is drawn from the CSPRNG; Math.random is predictable.
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const challenge = await prisma.mfaChallenge.create({
+      data: { userId: decoded.sub, deviceId, code, expiresAt: new Date(Date.now() + 300000) },
+    });
+    // Delivery over SMS/email is not implemented; the code is stored for
+    // /api/auth/mfa/verify to check once a transport exists.
     res.json({ challengeId: challenge.id, expiresIn: 300 });
   } catch (err) { next(err); }
 });

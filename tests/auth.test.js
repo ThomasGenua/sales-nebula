@@ -25,7 +25,7 @@ describe('POST /api/auth/register', () => {
       .post('/api/auth/register')
       .send({
         email: 'new@test.com',
-        password: 'securepass123',
+        password: 'SecurePass123!',
         firstName: 'New',
         lastName: 'User',
         roleId: role.id,
@@ -46,9 +46,9 @@ describe('POST /api/auth/register', () => {
 
     const res = await request(app)
       .post('/api/auth/register')
-      .send({ email: 'dupe@test.com', password: 'test', firstName: 'C', lastName: 'D', roleId: role.id });
+      .send({ email: 'dupe@test.com', password: 'SecurePass123!', firstName: 'C', lastName: 'D', roleId: role.id });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(409);   // Conflict, as the API reference documents for a duplicate email
     expect(res.body.error).toMatch(/exists/i);
   });
 

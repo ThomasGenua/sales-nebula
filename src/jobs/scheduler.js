@@ -10,6 +10,7 @@
  */
 
 const { logger } = require('../services/logger');
+const graphMailbox = require('../services/graphMailbox');
 
 let Queue, cron;
 try { Queue = require('bull'); } catch (e) { Queue = null; }
@@ -80,7 +81,140 @@ async function withRetry(jobName, fn, maxRetries = 3) {
 
 // ─── JOB HANDLERS ───
 
+/** A scheduled rule sweeps its whole module; do not let one run the table. */
+const SCHEDULED_WORKFLOW_LIMIT = 500;
+
+function modelHasDeletedAt(modelName) {
+  const { modelHasField } = require('../utils/modelFields');
+  return modelHasField(modelName, 'deletedAt');
+}
+
 const handlers = {
+  /**
+   * Deliver reminders that have come due.
+   *
+   * Reminder rows were created by the calendar and read by nothing: a CRM
+   * whose reminders never remind. A snoozed reminder becomes due again when
+   * its snooze expires.
+   */
+  async deliverReminders() {
+    const now = new Date();
+    const due = await prisma.reminder.findMany({
+      where: {
+        OR: [
+          { status: 'Pending', triggerAt: { lte: now } },
+          { status: 'Snoozed', snoozedUntil: { lte: now } },
+        ],
+      },
+      orderBy: { triggerAt: 'asc' },
+      take: 200,
+    });
+
+    let delivered = 0, failed = 0;
+
+    for (const reminder of due) {
+      try {
+        // Fall back to whatever the reminder is about, so the notification
+        // says something more useful than "Reminder".
+        let message = reminder.message;
+        if (!message && reminder.eventId) {
+          const event = await prisma.calendarEvent.findUnique({
+            where: { id: reminder.eventId }, select: { title: true },
+          }).catch(() => null);
+          message = event?.title ? `Starting soon: ${event.title}` : null;
+        }
+        if (!message && reminder.activityId) {
+          const activity = await prisma.activity.findUnique({
+            where: { id: reminder.activityId }, select: { subject: true },
+          }).catch(() => null);
+          message = activity?.subject ? `Due soon: ${activity.subject}` : null;
+        }
+        message = message || 'You asked to be reminded.';
+
+        if (reminder.method === 'Email') {
+          const user = await prisma.user.findUnique({
+            where: { id: reminder.userId }, select: { email: true },
+          });
+          if (!user?.email) throw new Error('No address for this user');
+          const { sendEmail } = require('../services/mailer');
+          const result = await sendEmail(prisma, { to: user.email, subject: 'Reminder', body: message });
+          if (result.status === 'failed') throw new Error(result.error || 'Send failed');
+        } else {
+          // Popup, Push and SMS all land in the notification feed for now;
+          // SMS has no transport and silently dropping it would be worse.
+          await prisma.notification.create({
+            data: {
+              title: 'Reminder',
+              message,
+              userId: reminder.userId,
+              recordModule: reminder.eventId ? 'calendar' : 'activities',
+              recordId: reminder.eventId || reminder.activityId || null,
+            },
+          });
+        }
+
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { status: 'Sent', sentAt: new Date() },
+        });
+        delivered++;
+      } catch (err) {
+        failed++;
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { status: 'Failed' },
+        }).catch(() => {});
+        log.warn({ reminderId: reminder.id, err: err.message }, 'reminder delivery failed');
+      }
+    }
+
+    return { due: due.length, delivered, failed };
+  },
+
+  /**
+   * Fetch new mail for every connected Microsoft mailbox that is due.
+   *
+   * This is the piece the inbound pipeline was always missing: the poll
+   * endpoint expected an external worker to hand it messages, and no such
+   * worker existed, so a configured mailbox was never actually read.
+   *
+   * Each account carries its own interval, so this runs often and mostly
+   * decides there is nothing to do. One mailbox failing must not stop the
+   * others, and throttling is left on the account rather than thrown.
+   */
+  async pollInboundMailboxes() {
+    const accounts = await prisma.inboundEmailAccount.findMany({
+      where: {
+        provider: 'microsoft',
+        active: true,
+        deletedAt: null,
+        oauthRefreshToken: { not: null },
+      },
+    });
+
+    const now = Date.now();
+    let polled = 0, processed = 0, casesCreated = 0, failed = 0, throttled = 0;
+
+    for (const account of accounts) {
+      const dueAt = account.lastPolledAt
+        ? new Date(account.lastPolledAt).getTime() + (account.pollIntervalMinutes || 5) * 60_000
+        : 0;
+      if (dueAt > now) continue;
+
+      try {
+        const result = await graphMailbox.pollAccount(prisma, account);
+        polled++;
+        processed += result.processed;
+        casesCreated += result.casesCreated;
+      } catch (err) {
+        if (err?.isThrottled) throttled++; else failed++;
+        log.warn({ accountId: account.id, err: err.message }, 'mailbox poll failed');
+      }
+    }
+
+    return { accounts: accounts.length, polled, processed, casesCreated, failed, throttled };
+  },
+
   async checkOverdueInvoices() {
     const overdue = await prisma.invoice.updateMany({
       where: { status: 'Sent', dueDate: { lt: new Date() } },
@@ -124,26 +258,72 @@ const handlers = {
     return { recalculated: forecasts.length };
   },
 
+  /**
+   * Run scheduled workflows against the records that match them.
+   *
+   * This used to write a WorkflowLog saying "Scheduled execution" with
+   * success: true and increment runCount, without evaluating a single
+   * condition or running a single action — a green audit trail for work that
+   * never happened, which is worse than no automation at all.
+   */
   async runScheduledWorkflows() {
+    const { resolveModel, evaluateConditions, runActions } = require('../services/workflowEngine');
     const workflows = await prisma.workflow.findMany({ where: { active: true, trigger: 'scheduled' } });
-    let executed = 0;
+
+    let executed = 0, matched = 0, failed = 0;
+
     for (const wf of workflows) {
-      try {
+      const modelName = resolveModel(wf.module);
+      if (!modelName) {
         await prisma.workflowLog.create({
           data: {
             workflowId: wf.id, workflowName: wf.name, module: wf.module,
-            trigger: 'scheduled', recordId: 'system', actionsRun: ['Scheduled execution'], success: true,
+            trigger: 'scheduled', recordId: 'system', actionsRun: [],
+            success: false, error: `Unknown module: ${wf.module}`,
           },
+        }).catch(() => {});
+        failed++;
+        continue;
+      }
+
+      try {
+        // A scheduled rule sweeps its module, so cap the batch: a rule with no
+        // conditions would otherwise act on the entire table every run.
+        const where = modelHasDeletedAt(modelName) ? { deletedAt: null } : {};
+        const records = await prisma[modelName].findMany({ where, take: SCHEDULED_WORKFLOW_LIMIT });
+
+        for (const record of records) {
+          if (!evaluateConditions(wf.conditions, record, null)) continue;
+          matched++;
+          const actionsRun = await runActions(prisma, wf, {
+            moduleName: wf.module, modelName, record, userId: null,
+          });
+          await prisma.workflowLog.create({
+            data: {
+              workflowId: wf.id, workflowName: wf.name, module: wf.module,
+              trigger: 'scheduled', recordId: record.id, actionsRun, success: true,
+            },
+          }).catch(() => {});
+        }
+
+        await prisma.workflow.update({
+          where: { id: wf.id },
+          data: { runCount: { increment: 1 }, lastRun: new Date() },
         });
-        await prisma.workflow.update({ where: { id: wf.id }, data: { runCount: { increment: 1 } } });
         executed++;
       } catch (e) {
+        failed++;
         await prisma.workflowLog.create({
-          data: { workflowId: wf.id, workflowName: wf.name, module: wf.module, trigger: 'scheduled', recordId: 'system', actionsRun: [], success: false, error: e.message },
-        });
+          data: {
+            workflowId: wf.id, workflowName: wf.name, module: wf.module,
+            trigger: 'scheduled', recordId: 'system', actionsRun: [],
+            success: false, error: String(e.message).slice(0, 400),
+          },
+        }).catch(() => {});
       }
     }
-    return { executed };
+
+    return { workflows: workflows.length, executed, matched, failed };
   },
 
   async cleanupAuditLogs() {
@@ -332,6 +512,10 @@ function initJobQueue(databaseClient) {
     cron.schedule('*/30 * * * *', () => withRetry('enforceSla', handlers.enforceSla).catch(() => {}));
     cron.schedule('0 4 * * *', () => withRetry('cleanupRecycleBin', handlers.cleanupRecycleBin).catch(() => {}));
     cron.schedule('*/10 * * * *', () => withRetry('processSequenceSteps', handlers.processSequenceSteps).catch(() => {}));
+    // Runs every minute; each account's own pollIntervalMinutes decides whether
+    // it is actually due, so a mailbox set to 5 minutes is polled every 5.
+    cron.schedule('* * * * *', () => withRetry('pollInboundMailboxes', handlers.pollInboundMailboxes).catch(() => {}));
+    cron.schedule('* * * * *', () => withRetry('deliverReminders', handlers.deliverReminders).catch(() => {}));
     log.info('Jobs: node-cron scheduler');
   } else {
     log.warn('Jobs: No scheduler available');
@@ -344,4 +528,14 @@ async function runJob(name) {
   throw new Error(`Unknown job: ${name}. Available: ${Object.keys(handlers).join(', ')}`);
 }
 
-module.exports = { initJobQueue, runJob, handlers, getDeadLetterQueue, clearDeadLetterQueue };
+/**
+ * Give the handlers a database without starting the schedule.
+ *
+ * initJobQueue also registers the cron entries, which a test does not want
+ * firing underneath it.
+ */
+function setDatabaseClient(databaseClient) {
+  prisma = databaseClient;
+}
+
+module.exports = { initJobQueue, setDatabaseClient, runJob, handlers, getDeadLetterQueue, clearDeadLetterQueue };
