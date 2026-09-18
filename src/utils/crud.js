@@ -6,6 +6,9 @@ const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 const { pickModelFields, modelHasField } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
+const {
+  checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
+} = require('../services/recordRules');
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -107,6 +110,33 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (beforeCreate) data = await beforeCreate(data, req);
 
+      // Validation rules describe what is not allowed. They had admin screens
+      // and a table and were read by nothing, so they validated nothing.
+      const violations = await checkValidationRules(prisma, moduleName, data);
+      if (violations.length) {
+        return res.status(400).json({
+          error: violations[0].message,
+          code: 'VALIDATION_RULE',
+          violations,
+        });
+      }
+
+      // Duplicate rules likewise: configured, never consulted. A blocking rule
+      // refuses; a warning rule lets the record through and says so.
+      const duplicates = await findDuplicates(prisma, moduleName, data);
+      const blocking = duplicates.filter(d => d.action === 'block');
+      if (blocking.length) {
+        return res.status(409).json({
+          error: `This looks like a duplicate of an existing ${moduleName.replace(/s$/, '')}.`,
+          code: 'DUPLICATE_RECORD',
+          duplicates: blocking,
+        });
+      }
+
+      // Assignment rules pick an owner when the caller did not name one.
+      const assignment = await applyAssignmentRules(prisma, moduleName, data);
+      if (assignment) data = { ...data, ...assignment.fields };
+
       // A key the model does not have used to 500 the whole request.
       const { data: createData, ignored } = pickModelFields(modelName, data);
       const record = await prisma[modelName].create({ data: createData, include });
@@ -132,7 +162,18 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         await fireWebhookEvent(prisma, `${moduleName}.created`, { id: record.id, module: moduleName, data: record });
       } catch (e) { /* Webhook is best-effort */ }
 
-      res.status(201).json(ignored.length ? { ...record, warnings: [`Ignored unknown field(s): ${ignored.join(', ')}`] } : record);
+      if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
+
+      const warnings = [];
+      if (ignored.length) warnings.push(`Ignored unknown field(s): ${ignored.join(', ')}`);
+      if (duplicates.length) warnings.push(`Possible duplicate of ${duplicates.length} existing record(s).`);
+
+      res.status(201).json({
+        ...record,
+        ...(warnings.length ? { warnings } : {}),
+        ...(duplicates.length ? { duplicates } : {}),
+        ...(assignment ? { assignedBy: assignment.rule } : {}),
+      });
     } catch (err) { next(err); }
   });
 
@@ -169,6 +210,16 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       }
 
       if (beforeUpdate) data = await beforeUpdate(data, req);
+
+      // Validate the record as it will be, not just the fields supplied.
+      const updateViolations = await checkValidationRules(prisma, moduleName, { ...oldRecord, ...data });
+      if (updateViolations.length) {
+        return res.status(400).json({
+          error: updateViolations[0].message,
+          code: 'VALIDATION_RULE',
+          violations: updateViolations,
+        });
+      }
 
       const { data: updateData } = pickModelFields(modelName, data);
       const record = await prisma[modelName].update({

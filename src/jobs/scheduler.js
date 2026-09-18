@@ -91,6 +91,87 @@ function modelHasDeletedAt(modelName) {
 
 const handlers = {
   /**
+   * Deliver reminders that have come due.
+   *
+   * Reminder rows were created by the calendar and read by nothing: a CRM
+   * whose reminders never remind. A snoozed reminder becomes due again when
+   * its snooze expires.
+   */
+  async deliverReminders() {
+    const now = new Date();
+    const due = await prisma.reminder.findMany({
+      where: {
+        OR: [
+          { status: 'Pending', triggerAt: { lte: now } },
+          { status: 'Snoozed', snoozedUntil: { lte: now } },
+        ],
+      },
+      orderBy: { triggerAt: 'asc' },
+      take: 200,
+    });
+
+    let delivered = 0, failed = 0;
+
+    for (const reminder of due) {
+      try {
+        // Fall back to whatever the reminder is about, so the notification
+        // says something more useful than "Reminder".
+        let message = reminder.message;
+        if (!message && reminder.eventId) {
+          const event = await prisma.calendarEvent.findUnique({
+            where: { id: reminder.eventId }, select: { title: true },
+          }).catch(() => null);
+          message = event?.title ? `Starting soon: ${event.title}` : null;
+        }
+        if (!message && reminder.activityId) {
+          const activity = await prisma.activity.findUnique({
+            where: { id: reminder.activityId }, select: { subject: true },
+          }).catch(() => null);
+          message = activity?.subject ? `Due soon: ${activity.subject}` : null;
+        }
+        message = message || 'You asked to be reminded.';
+
+        if (reminder.method === 'Email') {
+          const user = await prisma.user.findUnique({
+            where: { id: reminder.userId }, select: { email: true },
+          });
+          if (!user?.email) throw new Error('No address for this user');
+          const { sendEmail } = require('../services/mailer');
+          const result = await sendEmail(prisma, { to: user.email, subject: 'Reminder', body: message });
+          if (result.status === 'failed') throw new Error(result.error || 'Send failed');
+        } else {
+          // Popup, Push and SMS all land in the notification feed for now;
+          // SMS has no transport and silently dropping it would be worse.
+          await prisma.notification.create({
+            data: {
+              title: 'Reminder',
+              message,
+              userId: reminder.userId,
+              recordModule: reminder.eventId ? 'calendar' : 'activities',
+              recordId: reminder.eventId || reminder.activityId || null,
+            },
+          });
+        }
+
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { status: 'Sent', sentAt: new Date() },
+        });
+        delivered++;
+      } catch (err) {
+        failed++;
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { status: 'Failed' },
+        }).catch(() => {});
+        log.warn({ reminderId: reminder.id, err: err.message }, 'reminder delivery failed');
+      }
+    }
+
+    return { due: due.length, delivered, failed };
+  },
+
+  /**
    * Fetch new mail for every connected Microsoft mailbox that is due.
    *
    * This is the piece the inbound pipeline was always missing: the poll
@@ -434,6 +515,7 @@ function initJobQueue(databaseClient) {
     // Runs every minute; each account's own pollIntervalMinutes decides whether
     // it is actually due, so a mailbox set to 5 minutes is polled every 5.
     cron.schedule('* * * * *', () => withRetry('pollInboundMailboxes', handlers.pollInboundMailboxes).catch(() => {}));
+    cron.schedule('* * * * *', () => withRetry('deliverReminders', handlers.deliverReminders).catch(() => {}));
     log.info('Jobs: node-cron scheduler');
   } else {
     log.warn('Jobs: No scheduler available');
