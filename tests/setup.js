@@ -47,6 +47,7 @@ async function teardown() {
 async function cleanDatabase() {
   // Delete in dependency order
   const tables = [
+    'DataSubjectRequest', 'ConsentHistory', 'ConsentRecord', 'EmailSuppression',
     'DuplicateRecord', 'DuplicateRule', 'ValidationRule', 'Reminder',
     'InboundEmailAttachment', 'InboundEmailMessage', 'EmailPollLog',
     'InboundRoutingRule', 'InboundEmailAccount',
@@ -75,10 +76,16 @@ async function cleanDatabase() {
     'Email', 'EmailTemplate',
     'Activity',
     'Deal',
+    // Lead was never truncated, so contacts it pointed at survived the clean
+    // and the next suite's lookup by email could match a stale row. Anything
+    // holding a foreign key to Lead has to go first.
+    'CustomFieldValue', 'ProspectListEntry', 'ProspectList', 'Prospect',
+    'Lead',
+    'PersonAccount',
     'Contact',
     'Account',
     'Product',
-    'CustomFieldValue', 'CustomField',
+    'CustomField',
     'AuditLog', 'Notification', 'AdminConfig',
     'Permission', 'User', 'Role',
   ];

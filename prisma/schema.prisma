@@ -3033,17 +3033,50 @@ model ConsentRecord {
   email         String?
   consentType   String   // email_marketing, data_processing, data_sharing, profiling
   status        String   @default("OptIn") // OptIn, OptOut, Pending
+  channel       String?  // email, sms, phone, post, all
   source        String?  // web_form, manual, api, import
   consentDate   DateTime @default(now())
   expiryDate    DateTime?
   ipAddress     String?
   notes         String?
+  recordedById  String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
 
   @@index([contactId])
   @@index([email])
   @@index([consentType])
+}
+
+/// A GDPR/CCPA data subject request. Unlike ConsentRecord, which says what a
+/// person agreed to, this tracks what we were asked to do about their data and
+/// what we actually did: `result` holds the per-model tally the erasure run
+/// produced, so a regulator's question has an answer that is not a guess.
+model DataSubjectRequest {
+  id              String    @id @default(uuid())
+  requestType     String    // export, erasure, rectification, restriction
+  status          String    @default("pending") // pending, completed, rejected, failed
+  subjectType     String    // contact, lead, personAccount, email
+  contactId       String?
+  leadId          String?
+  personAccountId String?
+  email           String?
+  strategy        String?   // anonymize, purge
+  requestedById   String?
+  processedById   String?
+  requestedAt     DateTime  @default(now())
+  processedAt     DateTime?
+  notes           String?
+  error           String?
+  result          Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([status])
+  @@index([requestType])
+  @@index([email])
+  @@index([contactId])
 }
 
 // ── Scheduler / Appointment Booking ──

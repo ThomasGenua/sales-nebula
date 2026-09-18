@@ -23,17 +23,46 @@ try { helmet = require('helmet'); } catch (e) { helmet = null; }
 try { hpp = require('hpp'); } catch (e) { hpp = null; }
 try { compression = require('compression'); } catch (e) { compression = null; }
 
+/**
+ * Hashes of the inline <script> tags in the built shell.
+ *
+ * Helmet's default CSP is `script-src 'self'`, which blocks inline script. The
+ * shell carries one: the snippet that sets data-theme before first paint. In
+ * production it was being blocked, so every light-theme visitor got a dark
+ * flash on load. Hashing it keeps the policy strict and the script running.
+ */
+function inlineScriptHashes(spaDir) {
+  try {
+    const html = fs.readFileSync(path.join(spaDir, 'index.html'), 'utf8');
+    const hashes = [];
+    const inline = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
+    let match;
+    while ((match = inline.exec(html)) !== null) {
+      if (!match[1].trim()) continue;
+      hashes.push(`'sha256-${crypto.createHash('sha256').update(match[1], 'utf8').digest('base64')}'`);
+    }
+    return hashes;
+  } catch (err) {
+    return [];
+  }
+}
+
 function createApp(prisma) {
   const app = express();
   const isTest = process.env.NODE_ENV === 'test';
   const isProd = process.env.NODE_ENV === 'production';
+  const spaDir = path.join(__dirname, '..', 'frontend', 'dist');
 
   // ─── SECURITY HEADERS (Helmet) ───
   if (helmet && !isTest) {
-    app.use(helmet({
-      contentSecurityPolicy: isProd ? undefined : false,
-      crossOriginEmbedderPolicy: false,
-    }));
+    let contentSecurityPolicy = false;
+    if (isProd) {
+      const hashes = inlineScriptHashes(spaDir);
+      contentSecurityPolicy = hashes.length
+        ? { useDefaults: true, directives: { 'script-src': ["'self'", ...hashes] } }
+        : undefined;
+    }
+    app.use(helmet({ contentSecurityPolicy, crossOriginEmbedderPolicy: false }));
   }
 
   // ─── RESPONSE COMPRESSION ───
@@ -270,6 +299,7 @@ function createApp(prisma) {
   app.use('/api/surveys', require('./routes/surveys'));
   app.use('/api/deals', require('./routes/dealExtras'));
   app.use('/api/consent', require('./routes/consent'));
+  app.use('/api/privacy', require('./routes/privacy'));
   app.use('/api/scheduler', require('./routes/scheduler'));
   app.use('/api/calendar', require('./routes/calendar'));
   app.use('/api/projects', require('./routes/projects'));
@@ -337,7 +367,6 @@ function createApp(prisma) {
   // 404 handler so client routes like /verify, /accept-invite, /privacy,
   // /terms, and /reset-password resolve. Without the fallback, a visitor
   // who follows an emailed link lands on a JSON 404 instead of the app.
-  const spaDir = path.join(__dirname, '..', 'frontend', 'dist');
   if (fs.existsSync(path.join(spaDir, 'index.html'))) {
     app.use(express.static(spaDir, {
       index: false,
@@ -477,4 +506,4 @@ function setupGracefulShutdown(server, prisma) {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-module.exports = { createApp, setupGracefulShutdown };
+module.exports = { createApp, setupGracefulShutdown, inlineScriptHashes };

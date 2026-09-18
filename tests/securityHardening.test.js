@@ -207,3 +207,38 @@ describe('Campaign send reports only what it knows', () => {
     expect(recipients.some(r => r.openedAt || r.clickedAt)).toBe(false);
   });
 });
+
+describe('Content Security Policy', () => {
+  // Helmet's default policy is `script-src 'self'`, which silently blocked the
+  // shell's theme script in production. The hash is what lets it run without
+  // opening the policy up to every other inline script on the page.
+  const { inlineScriptHashes } = require('../src/app');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+
+  let dir;
+  beforeAll(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'csp-')); });
+  afterAll(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const write = html => { fs.writeFileSync(path.join(dir, 'index.html'), html); return dir; };
+
+  it('hashes an inline script the way a browser does', () => {
+    // sha256 of exactly `alert(1)`, base64 — the value Chromium asks for.
+    const hashes = inlineScriptHashes(write('<html><head><script>alert(1)</script></head></html>'));
+    expect(hashes).toEqual(["'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='"]);
+  });
+
+  it('ignores external scripts, which `self` already covers', () => {
+    const hashes = inlineScriptHashes(write('<html><script type="module" src="/assets/app.js"></script></html>'));
+    expect(hashes).toEqual([]);
+  });
+
+  it('ignores an empty script tag rather than emitting a useless hash', () => {
+    expect(inlineScriptHashes(write('<html><script>  </script></html>'))).toEqual([]);
+  });
+
+  it('returns nothing when there is no built shell, leaving the default policy', () => {
+    expect(inlineScriptHashes(path.join(dir, 'does-not-exist'))).toEqual([]);
+  });
+});
