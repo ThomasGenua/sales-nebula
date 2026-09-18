@@ -5,6 +5,7 @@ const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 const { pickModelFields, modelHasField } = require('./modelFields');
+const { runWorkflowsSafely } = require('../services/workflowEngine');
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -119,6 +120,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (afterCreate) await afterCreate(record, req);
 
+      // Fire the rules for this module. Nothing used to call the engine, so a
+      // workflow could be enabled and never run. Awaited so a rule's effects
+      // are in place before the caller sees the record, and swallowed so
+      // automation can never fail the write itself.
+      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'create', record, userId: req.userId });
+
       // Fire webhook
       try {
         const { fireWebhookEvent } = require('../services/webhooks');
@@ -184,6 +191,15 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       }
 
       if (afterUpdate) await afterUpdate(record, req);
+
+      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: req.userId });
+
+      // A status or stage move is its own trigger, so a rule does not have to
+      // re-derive "did this change" from conditions.
+      const movedStage = ['status', 'stage'].some(f => oldRecord[f] !== undefined && oldRecord[f] !== record[f]);
+      if (movedStage) {
+        await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: req.userId });
+      }
 
       // Fire webhook
       try {

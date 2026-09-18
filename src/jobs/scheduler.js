@@ -81,6 +81,14 @@ async function withRetry(jobName, fn, maxRetries = 3) {
 
 // ─── JOB HANDLERS ───
 
+/** A scheduled rule sweeps its whole module; do not let one run the table. */
+const SCHEDULED_WORKFLOW_LIMIT = 500;
+
+function modelHasDeletedAt(modelName) {
+  const { modelHasField } = require('../utils/modelFields');
+  return modelHasField(modelName, 'deletedAt');
+}
+
 const handlers = {
   /**
    * Fetch new mail for every connected Microsoft mailbox that is due.
@@ -169,26 +177,72 @@ const handlers = {
     return { recalculated: forecasts.length };
   },
 
+  /**
+   * Run scheduled workflows against the records that match them.
+   *
+   * This used to write a WorkflowLog saying "Scheduled execution" with
+   * success: true and increment runCount, without evaluating a single
+   * condition or running a single action — a green audit trail for work that
+   * never happened, which is worse than no automation at all.
+   */
   async runScheduledWorkflows() {
+    const { resolveModel, evaluateConditions, runActions } = require('../services/workflowEngine');
     const workflows = await prisma.workflow.findMany({ where: { active: true, trigger: 'scheduled' } });
-    let executed = 0;
+
+    let executed = 0, matched = 0, failed = 0;
+
     for (const wf of workflows) {
-      try {
+      const modelName = resolveModel(wf.module);
+      if (!modelName) {
         await prisma.workflowLog.create({
           data: {
             workflowId: wf.id, workflowName: wf.name, module: wf.module,
-            trigger: 'scheduled', recordId: 'system', actionsRun: ['Scheduled execution'], success: true,
+            trigger: 'scheduled', recordId: 'system', actionsRun: [],
+            success: false, error: `Unknown module: ${wf.module}`,
           },
+        }).catch(() => {});
+        failed++;
+        continue;
+      }
+
+      try {
+        // A scheduled rule sweeps its module, so cap the batch: a rule with no
+        // conditions would otherwise act on the entire table every run.
+        const where = modelHasDeletedAt(modelName) ? { deletedAt: null } : {};
+        const records = await prisma[modelName].findMany({ where, take: SCHEDULED_WORKFLOW_LIMIT });
+
+        for (const record of records) {
+          if (!evaluateConditions(wf.conditions, record, null)) continue;
+          matched++;
+          const actionsRun = await runActions(prisma, wf, {
+            moduleName: wf.module, modelName, record, userId: null,
+          });
+          await prisma.workflowLog.create({
+            data: {
+              workflowId: wf.id, workflowName: wf.name, module: wf.module,
+              trigger: 'scheduled', recordId: record.id, actionsRun, success: true,
+            },
+          }).catch(() => {});
+        }
+
+        await prisma.workflow.update({
+          where: { id: wf.id },
+          data: { runCount: { increment: 1 }, lastRun: new Date() },
         });
-        await prisma.workflow.update({ where: { id: wf.id }, data: { runCount: { increment: 1 } } });
         executed++;
       } catch (e) {
+        failed++;
         await prisma.workflowLog.create({
-          data: { workflowId: wf.id, workflowName: wf.name, module: wf.module, trigger: 'scheduled', recordId: 'system', actionsRun: [], success: false, error: e.message },
-        });
+          data: {
+            workflowId: wf.id, workflowName: wf.name, module: wf.module,
+            trigger: 'scheduled', recordId: 'system', actionsRun: [],
+            success: false, error: String(e.message).slice(0, 400),
+          },
+        }).catch(() => {});
       }
     }
-    return { executed };
+
+    return { workflows: workflows.length, executed, matched, failed };
   },
 
   async cleanupAuditLogs() {
@@ -392,4 +446,14 @@ async function runJob(name) {
   throw new Error(`Unknown job: ${name}. Available: ${Object.keys(handlers).join(', ')}`);
 }
 
-module.exports = { initJobQueue, runJob, handlers, getDeadLetterQueue, clearDeadLetterQueue };
+/**
+ * Give the handlers a database without starting the schedule.
+ *
+ * initJobQueue also registers the cron entries, which a test does not want
+ * firing underneath it.
+ */
+function setDatabaseClient(databaseClient) {
+  prisma = databaseClient;
+}
+
+module.exports = { initJobQueue, setDatabaseClient, runJob, handlers, getDeadLetterQueue, clearDeadLetterQueue };
