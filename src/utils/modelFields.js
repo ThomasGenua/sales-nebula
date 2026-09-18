@@ -18,12 +18,13 @@ function pickModelFields(modelName, data = {}) {
   );
   if (!model) return { data, ignored: [] };
 
-  const allowed = new Set(model.fields.map(f => f.name));
+  const byName = new Map(model.fields.map(f => [f.name, f]));
   const kept = {};
   const ignored = [];
   for (const [key, value] of Object.entries(data)) {
-    if (allowed.has(key)) kept[key] = value;
-    else ignored.push(key);
+    const field = byName.get(key);
+    if (!field) { ignored.push(key); continue; }
+    kept[key] = coerce(field, value);
   }
   return { data: kept, ignored };
 }
@@ -34,6 +35,21 @@ function modelHasField(modelName, field) {
     m => m.name.toLowerCase() === String(modelName).toLowerCase()
   );
   return !!model?.fields.some(f => f.name === field);
+}
+
+/**
+ * Nudge a value into the shape Prisma expects.
+ *
+ * Date inputs submit "2026-06-30", which Prisma rejects because it is not a
+ * full ISO-8601 DateTime — a plain date picker was enough to 500 a create.
+ * An unparseable value is passed through so Prisma still reports it.
+ */
+function coerce(field, value) {
+  if (field.type === 'DateTime' && typeof value === 'string' && value) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed;
+  }
+  return value;
 }
 
 module.exports = { pickModelFields, modelHasField };

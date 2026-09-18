@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { pickModelFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
@@ -42,7 +43,10 @@ router.get('/:id', requirePermission('quotes', 'read'), async (req, res, next) =
 router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, ...data } = req.body;
+    const { items, ...rest } = req.body;
+    // Same as invoices: keep only real columns and coerce date-only strings,
+    // so a plain "2026-12-31" from a date input does not 500 the create.
+    const { data } = pickModelFields('quote', rest);
 
     // Auto-generate number
     const count = await prisma.quote.count();

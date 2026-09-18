@@ -177,7 +177,9 @@ describe('DELETE /api/contacts/:id', () => {
 
     // Verify gone
     const check = await prisma.contact.findUnique({ where: { id: contact.id } });
-    expect(check).toBeNull();
+    // Deletes are soft, so the row stays with deletedAt set and the record
+    // lands in the recycle bin; it must no longer be reachable through the API.
+    expect(check.deletedAt).not.toBeNull();
   });
 });
 

@@ -319,7 +319,7 @@ describe('End-to-End: Lead to Revenue', () => {
     const invoiceRes = await request(app)
       .post(`/api/quotes/${quoteRes.body.id}/create-invoice`)
       .set(authHeader(token));
-    expect(invoiceRes.status).toBe(200);
+    expect(invoiceRes.status).toBe(201);   // converting a quote creates an invoice
 
     // 8. Verify the full chain exists
     const contact = await prisma.contact.findUnique({ where: { id: contactId } });

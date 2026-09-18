@@ -178,12 +178,12 @@ describe('Database error handling', () => {
     const { token } = await createTestUser({ email: 'unique@test.com' });
 
     // Try to create product with duplicate code
-    await prisma.product.create({ data: { name: 'P1', code: 'DUPE-001', price: 10 } });
+    await prisma.product.create({ data: { name: 'P1',         sku: 'DUPE-001', price: 10 } });
 
     const res = await request(app)
       .post('/api/products')
       .set(authHeader(token))
-      .send({ name: 'P2', code: 'DUPE-001', price: 20 });
+      .send({ name: 'P2',         sku: 'DUPE-001', price: 20 });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/duplicate/i);

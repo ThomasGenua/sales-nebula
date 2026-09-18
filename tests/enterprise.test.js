@@ -98,7 +98,7 @@ describe('Knowledge Base', () => {
       .send({ helpful: true });
 
     expect(res.status).toBe(200);
-    expect(res.body.helpfulCount).toBe(1);
+    expect(res.body.helpfulYes).toBe(1);   // the endpoint reports yes and no separately
   });
 });
 
@@ -129,7 +129,7 @@ describe('Chatter', () => {
       .set(authHeader(token));
 
     expect(res.status).toBe(200);
-    expect(res.body.length).toBeGreaterThanOrEqual(2);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(2);   // list endpoints return { data }
   });
 
   it('comments on a post', async () => {
@@ -217,7 +217,7 @@ describe('Cases', () => {
       .send({ body: 'Looking into this now.' });
 
     expect(commentRes.status).toBe(201);
-    expect(commentRes.body.body).toBe('Looking into this now.');
+    expect(commentRes.body.text).toBe('Looking into this now.');   // the column is text
   });
 });
 
@@ -240,7 +240,7 @@ describe('Admin', () => {
       .set(authHeader(token));
 
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);   // list endpoints return { data }
   });
 });
 
@@ -275,7 +275,7 @@ describe('Quote to Invoice pipeline', () => {
       .post(`/api/quotes/${quoteRes.body.id}/create-invoice`)
       .set(authHeader(token));
 
-    expect(invoiceRes.status).toBe(200);
+    expect(invoiceRes.status).toBe(201);   // converting a quote creates an invoice
     // Should create an invoice linked to the quote
   });
 });
