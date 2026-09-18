@@ -107,9 +107,9 @@ router.get('/stats/overview', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [total, open, completed, avgCompletion] = await Promise.all([
-      prisma.workOrder.count({ where: { deletedAt: null } }),
-      prisma.workOrder.count({ where: { status: { in: ['New', 'Scheduled', 'Dispatched', 'InProgress'] }, deletedAt: null } }),
-      prisma.workOrder.count({ where: { status: 'Completed', deletedAt: null } }),
+      prisma.workOrder.count(),
+      prisma.workOrder.count({ where: { status: { in: ['New', 'Scheduled', 'Dispatched', 'InProgress'] } } }),
+      prisma.workOrder.count({ where: { status: 'Completed' } }),
       prisma.workOrder.findMany({ where: { status: 'Completed', completedAt: { not: null } }, select: { createdAt: true, completedAt: true } }),
     ]);
     const avgDays = avgCompletion.length ? (avgCompletion.reduce((s, w) => s + (new Date(w.completedAt) - new Date(w.createdAt)), 0) / avgCompletion.length / 86400000).toFixed(1) : null;

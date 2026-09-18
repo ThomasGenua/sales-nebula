@@ -134,7 +134,7 @@ router.get('/roi', authenticate, async (req, res, next) => {
 router.get('/attribution-models', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const influences = await prisma.campaignInfluence.findMany({ where: { deletedAt: null }, include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } });
+    const influences = await prisma.campaignInfluence.findMany({ include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } });
     const wonInfluences = influences.filter(i => i.deal?.stage === 'Closed Won');
     // First-touch attribution
     const firstTouch = {};

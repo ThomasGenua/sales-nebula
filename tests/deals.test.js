@@ -150,3 +150,26 @@ describe('Deal lifecycle', () => {
     expect(res.body.probability).toBe(100);
   });
 });
+
+describe('DELETE /api/deals/:id', () => {
+  // Deal was the only core entity without a deletedAt column, so it was hard
+  // deleted while every sibling was retained. Now it retires like the rest.
+  it('retires the deal instead of destroying it, and hides it from the list', async () => {
+    const deal = await createTestDeal(userId, { name: 'Withdrawn' });
+
+    await request(app).delete(`/api/deals/${deal.id}`).set(authHeader(token)).expect(200);
+
+    const row = await prisma.deal.findUnique({ where: { id: deal.id } });
+    expect(row).not.toBeNull();
+    expect(row.deletedAt).not.toBeNull();
+
+    const list = await request(app).get('/api/deals').set(authHeader(token)).expect(200);
+    expect(list.body.data.map(d => d.id)).not.toContain(deal.id);
+  });
+
+  it('will not fetch a deal that has been retired', async () => {
+    const deal = await createTestDeal(userId);
+    await request(app).delete(`/api/deals/${deal.id}`).set(authHeader(token)).expect(200);
+    await request(app).get(`/api/deals/${deal.id}`).set(authHeader(token)).expect(404);
+  });
+});

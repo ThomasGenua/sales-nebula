@@ -33,8 +33,8 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
 
-  // Deal and Workflow have no deletedAt column, so filtering on it made their
-  // list and count queries throw. Only ask for it where it exists.
+  // Not every model has a deletedAt column, and filtering on one that does not
+  // exist makes the list and count queries throw. Only ask for it where it is.
   const softDeletes = modelHasField(modelName, 'deletedAt');
   const notDeleted = () => (softDeletes ? { deletedAt: null } : {});
 

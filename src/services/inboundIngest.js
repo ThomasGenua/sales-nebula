@@ -233,7 +233,11 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
           const lead = await prisma.lead.create({
             data: {
               firstName: first, lastName: rest.join(' ') || first,
-              email: from.email, leadSource: 'Email',
+              // `company` is required and `source` is the column's name — this
+              // create named `leadSource`, which only Contact has, and supplied
+              // no company at all, so it threw on every inbound message.
+              email: from.email, source: 'Email',
+              company: from.email.split('@')[1] || 'Unknown',
               status: 'New', description: bodyText.slice(0, 4000),
               ownerId: account.defaultOwnerId || null,
             },

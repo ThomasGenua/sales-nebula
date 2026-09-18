@@ -119,7 +119,7 @@ router.get('/:id/performance', authenticate, async (req, res, next) => {
 router.get('/models', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const models = await prisma.territoryModel.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } });
+    const models = await prisma.territoryModel.findMany({ orderBy: { name: 'asc' } });
     res.json(models);
   } catch (err) { next(err); }
 });

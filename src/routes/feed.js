@@ -94,7 +94,7 @@ router.get('/module/:module', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { limit = 30 } = req.query;
     const items = await prisma.feedItem.findMany({
-      where: { parentModule: req.params.module, deletedAt: null },
+      where: { parentModule: req.params.module },
       orderBy: { createdAt: 'desc' }, take: +limit,
     });
     res.json(items);
@@ -106,7 +106,7 @@ router.get('/mentions', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const mentions = await prisma.feedItem.findMany({
-      where: { body: { contains: req.user.id }, deletedAt: null },
+      where: { body: { contains: req.user.id } },
       orderBy: { createdAt: 'desc' }, take: 20,
     }).catch(() => []);
     res.json(mentions);
@@ -118,7 +118,7 @@ router.get('/:recordId/stats', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [total, comments, likes] = await Promise.all([
-      prisma.feedItem.count({ where: { parentId: req.params.recordId, deletedAt: null } }),
+      prisma.feedItem.count({ where: { parentId: req.params.recordId } }),
       prisma.feedComment.count({ where: { feedItem: { parentId: req.params.recordId } } }).catch(() => 0),
       prisma.feedLike.count({ where: { feedItem: { parentId: req.params.recordId } } }).catch(() => 0),
     ]);

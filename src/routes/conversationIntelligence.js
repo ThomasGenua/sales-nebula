@@ -95,7 +95,7 @@ router.get('/trends', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
     const recordings = await prisma.callRecording.findMany({
-      where: { createdAt: { gte: thirtyDaysAgo }, deletedAt: null },
+      where: { createdAt: { gte: thirtyDaysAgo } },
       orderBy: { createdAt: 'asc' },
     });
     // Group by week
