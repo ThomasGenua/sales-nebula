@@ -119,8 +119,11 @@ router.delete('/:id', requirePermission('settings', 'full'), async (req, res, ne
 // TEST a formula against a sample record
 router.post('/test', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
-    const { formula, record } = req.body;
-    const result = evaluateFormula(formula, record || {});
+    // Accept either name: this is the "test against sample data" endpoint and
+    // callers reasonably send sampleData. Reading only `record` meant the
+    // formula was evaluated against {} and every variable came back undefined.
+    const { formula, record, sampleData } = req.body;
+    const result = evaluateFormula(formula, sampleData || record || {});
     res.json({ formula, result, type: typeof result });
   } catch (err) { next(err); }
 });

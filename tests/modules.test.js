@@ -64,7 +64,7 @@ describe('Workflows', () => {
       .post(`/api/workflows/${wf.id}/duplicate`)
       .set(authHeader(token));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);   // duplicate creates a record
     expect(res.body.name).toContain('Copy');
     expect(res.body.id).not.toBe(wf.id);
   });
@@ -157,7 +157,7 @@ describe('Formula Fields', () => {
       .set(authHeader(token));
 
     expect(res.status).toBe(200);
-    expect(res.body.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);   // list endpoints return { data }
   });
 });
 
@@ -201,8 +201,8 @@ describe('Emails', () => {
         contactId: contact.id,
       });
 
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('Sent');
+    expect(res.status).toBe(201);              // /send creates the email
+    expect(res.body.status).toBe('sent');
   });
 });
 

@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
+const { pickModelFields, modelHasField } = require('./modelFields');
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -28,13 +29,18 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
 
+  // Deal and Workflow have no deletedAt column, so filtering on it made their
+  // list and count queries throw. Only ask for it where it exists.
+  const softDeletes = modelHasField(modelName, 'deletedAt');
+  const notDeleted = () => (softDeletes ? { deletedAt: null } : {});
+
   // LIST - GET /
   router.get('/', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const { search, page = 1, limit = 50, sortBy, sortDir = 'desc', ...filters } = req.query;
 
-      let where = { deletedAt: null };
+      let where = { ...notDeleted() };
 
       if (search && searchFilter) {
         where = { ...where, ...searchFilter(search) };
@@ -74,7 +80,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     try {
       const prisma = req.app.locals.prisma;
       const record = await prisma[modelName].findFirst({
-        where: { id: req.params.id, deletedAt: null },
+        where: { id: req.params.id, ...notDeleted() },
         include,
       });
       if (!record) return res.status(404).json({ error: 'Not found' });
@@ -100,7 +106,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (beforeCreate) data = await beforeCreate(data, req);
 
-      const record = await prisma[modelName].create({ data, include });
+      // A key the model does not have used to 500 the whole request.
+      const { data: createData, ignored } = pickModelFields(modelName, data);
+      const record = await prisma[modelName].create({ data: createData, include });
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
 
@@ -117,7 +125,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         await fireWebhookEvent(prisma, `${moduleName}.created`, { id: record.id, module: moduleName, data: record });
       } catch (e) { /* Webhook is best-effort */ }
 
-      res.status(201).json(record);
+      res.status(201).json(ignored.length ? { ...record, warnings: [`Ignored unknown field(s): ${ignored.join(', ')}`] } : record);
     } catch (err) { next(err); }
   });
 
@@ -155,9 +163,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (beforeUpdate) data = await beforeUpdate(data, req);
 
+      const { data: updateData } = pickModelFields(modelName, data);
       const record = await prisma[modelName].update({
         where: { id: req.params.id },
-        data,
+        data: updateData,
         include,
       });
 
@@ -198,8 +207,13 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      // Soft delete
-      await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+      // Soft delete where the model supports it; otherwise remove the row.
+      // The recycle bin snapshot below covers both cases.
+      if (softDeletes) {
+        await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+      } else {
+        await prisma[modelName].delete({ where: { id: req.params.id } });
+      }
 
       // Send to recycle bin (30-day retention)
       try {

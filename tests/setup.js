@@ -19,6 +19,10 @@ let app;
 // ─── LIFECYCLE ───
 
 async function setup() {
+  // Open registration is off by default and returns 403; the register and
+  // password-policy specs are about what happens when it is switched on.
+  process.env.ALLOW_OPEN_REGISTRATION = 'true';
+
   prisma = new PrismaClient();
   app = createApp(prisma);
 

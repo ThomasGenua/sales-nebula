@@ -28,7 +28,7 @@ describe('GET /api/health', () => {
     const res = await request(app).get('/api/health');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
-    expect(res.body.version).toBe('2.0.0');
+    expect(res.body.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
 

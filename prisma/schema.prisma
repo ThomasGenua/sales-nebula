@@ -245,7 +245,7 @@ model Activity {
   id         String    @id @default(uuid())
   type       String    // Call, Meeting, Email, Task
   subject    String
-  date       DateTime
+  date       DateTime @default(now())
   priority   String    @default("Medium") // High, Medium, Low
   status     String    @default("Scheduled") // Scheduled, Pending, Completed
   contactId  String?
@@ -293,6 +293,7 @@ model Email {
   from       String?
   to         String?
   toEmail    String?
+  toName     String?
   clicked    Boolean  @default(false)
   templateId String?
 
@@ -365,7 +366,7 @@ model CaseComment {
   author   User     @relation(fields: [authorId], references: [id])
   createdAt DateTime @default(now())
   text      String
-  isInternal Boolean
+  isInternal Boolean @default(false)
   isPublic    Boolean @default(false)
   authorEmail String?
 

@@ -5,51 +5,6 @@ const { authenticate } = require('../middleware/auth');
 const router = Router();
 router.use(authenticate);
 
-// GET notes for a record
-router.get('/:module/:recordId', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { module, recordId } = req.params;
-    const notes = await prisma.note.findMany({
-      where: { module, recordId },
-      orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
-    });
-
-    // Hydrate author names
-    const authorIds = [...new Set(notes.map(n => n.authorId))];
-    const authors = await prisma.user.findMany({
-      where: { id: { in: authorIds } },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    });
-    const authorMap = Object.fromEntries(authors.map(a => [a.id, a]));
-
-    res.json({
-      data: notes.map(n => ({ ...n, author: authorMap[n.authorId] || null })),
-    });
-  } catch (err) { next(err); }
-});
-
-// CREATE note
-router.post('/:module/:recordId', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const note = await prisma.note.create({
-      data: {
-        body: req.body.body,
-        pinned: req.body.pinned || false,
-        module: req.params.module,
-        recordId: req.params.recordId,
-        authorId: req.userId,
-      },
-    });
-    const author = await prisma.user.findUnique({
-      where: { id: req.userId },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    });
-    res.status(201).json({ ...note, author });
-  } catch (err) { next(err); }
-});
-
 // UPDATE note
 router.put('/:id', async (req, res, next) => {
   try {
@@ -96,15 +51,6 @@ router.post('/:id/pin', async (req, res, next) => {
 module.exports = router;
 
 // Pin/unpin note
-router.post('/:id/pin', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const note = await prisma.note.findUnique({ where: { id: req.params.id } });
-    if (!note) return res.status(404).json({ error: 'Not found' });
-    const updated = await prisma.note.update({ where: { id: req.params.id }, data: { pinned: !note.pinned } });
-    res.json(updated);
-  } catch (err) { next(err); }
-});
 
 // Notes for a parent record
 router.get('/parent/:module/:parentId', authenticate, async (req, res, next) => {
@@ -171,5 +117,59 @@ router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next
     }));
     await req.audit({ action: 'bulk_update', module: 'notes', details: `Bulk status update: ${ids.length} records to ${status}` });
     res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Catch-all record routes, registered last on purpose.
+ *
+ * Express matches in order, and "/:module/:recordId" is two segments — the
+ * same shape as /notes/:id/pin, /notes/bulk/delete, /notes/bulk/status and
+ * /notes/analytics/summary. While it sat at the top of this file it swallowed
+ * all four: pinning a note ran the create handler instead, which threw
+ * "Argument `body` is missing" because a pin request carries no body.
+ */
+// GET notes for a record
+router.get('/:module/:recordId', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module, recordId } = req.params;
+    const notes = await prisma.note.findMany({
+      where: { module, recordId },
+      orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    // Hydrate author names
+    const authorIds = [...new Set(notes.map(n => n.authorId))];
+    const authors = await prisma.user.findMany({
+      where: { id: { in: authorIds } },
+      select: { id: true, firstName: true, lastName: true, avatar: true },
+    });
+    const authorMap = Object.fromEntries(authors.map(a => [a.id, a]));
+
+    res.json({
+      data: notes.map(n => ({ ...n, author: authorMap[n.authorId] || null })),
+    });
+  } catch (err) { next(err); }
+});
+
+// CREATE note
+router.post('/:module/:recordId', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const note = await prisma.note.create({
+      data: {
+        body: req.body.body,
+        pinned: req.body.pinned || false,
+        module: req.params.module,
+        recordId: req.params.recordId,
+        authorId: req.userId,
+      },
+    });
+    const author = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { id: true, firstName: true, lastName: true, avatar: true },
+    });
+    res.status(201).json({ ...note, author });
   } catch (err) { next(err); }
 });

@@ -54,8 +54,11 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
 router.post('/send', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Spreading req.body straight into create let any unknown key 500 the
+    // request, and any known one (opened, openedAt, id) be set by the caller.
+    const { subject, body, from, to, toEmail, toName, contactId, dealId, templateId } = req.body || {};
     const email = await prisma.email.create({
-      data: { ...req.body, status: 'sent', sentAt: new Date() },
+      data: { subject, body, from, to, toEmail, toName, contactId, dealId, templateId, status: 'sent', sentAt: new Date() },
       include: { contact: { select: { id: true, firstName: true, lastName: true } } },
     });
     // TODO: Integrate with actual SMTP provider here
