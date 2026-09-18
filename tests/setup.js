@@ -47,6 +47,8 @@ async function teardown() {
 async function cleanDatabase() {
   // Delete in dependency order
   const tables = [
+    'InboundEmailAttachment', 'InboundEmailMessage', 'EmailPollLog',
+    'InboundRoutingRule', 'InboundEmailAccount',
     'ChatterMention', 'ChatterLike', 'ChatterComment', 'ChatterPost',
     'ApprovalStep', 'ApprovalRequest', 'ApprovalProcessStep', 'ApprovalProcess',
     'ReportSchedule', 'Report', 'ReportFolder',

@@ -4648,12 +4648,21 @@ model SearchIndexQueue {
 model InboundEmailAccount {
   id                String    @id @default(uuid())
   name              String
+  provider          String    @default("imap") // imap, pop3, microsoft
   protocol          String    @default("imap") // imap, pop3
-  host              String
+  host              String?
   port              Int       @default(993)
   useTls            Boolean   @default(true)
   username          String
-  password          String    // stored encrypted at rest
+  password          String?   // stored encrypted at rest
+
+  // Microsoft Graph mailboxes authenticate with OAuth, not a password.
+  mailboxAddress    String?   // the UPN the messages belong to
+  tenantId          String?
+  oauthRefreshToken String?   // encrypted at rest
+  oauthAccessToken  String?   // encrypted at rest, short lived
+  oauthExpiresAt    DateTime?
+  lastSyncAt        DateTime?
   mailbox           String    @default("INBOX")
   pollIntervalMinutes Int     @default(5)
   status            String    @default("Idle") // Idle, Polling, Error, Disabled
@@ -4690,6 +4699,8 @@ model InboundEmailMessage {
   accountId      String
   account        InboundEmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
   uid            Int?
+  externalId     String?   // the provider's message id (Graph), for in-thread replies
+  repliedAt      DateTime?
   messageId      String?
   inReplyTo      String?
   references     String?
@@ -4707,6 +4718,7 @@ model InboundEmailMessage {
   sizeBytes      Int       @default(0)
   flags          String?
   hasAttachments Boolean   @default(false)
+  isAutomated    Boolean   @default(false)
   attachmentCount Int      @default(0)
   status         String    @default("New") // New, Processed, Ignored, Failed, Duplicate
   matchedModule  String?

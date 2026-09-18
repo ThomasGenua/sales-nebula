@@ -10,6 +10,7 @@
  */
 
 const { logger } = require('../services/logger');
+const graphMailbox = require('../services/graphMailbox');
 
 let Queue, cron;
 try { Queue = require('bull'); } catch (e) { Queue = null; }
@@ -81,6 +82,50 @@ async function withRetry(jobName, fn, maxRetries = 3) {
 // ─── JOB HANDLERS ───
 
 const handlers = {
+  /**
+   * Fetch new mail for every connected Microsoft mailbox that is due.
+   *
+   * This is the piece the inbound pipeline was always missing: the poll
+   * endpoint expected an external worker to hand it messages, and no such
+   * worker existed, so a configured mailbox was never actually read.
+   *
+   * Each account carries its own interval, so this runs often and mostly
+   * decides there is nothing to do. One mailbox failing must not stop the
+   * others, and throttling is left on the account rather than thrown.
+   */
+  async pollInboundMailboxes() {
+    const accounts = await prisma.inboundEmailAccount.findMany({
+      where: {
+        provider: 'microsoft',
+        active: true,
+        deletedAt: null,
+        oauthRefreshToken: { not: null },
+      },
+    });
+
+    const now = Date.now();
+    let polled = 0, processed = 0, casesCreated = 0, failed = 0, throttled = 0;
+
+    for (const account of accounts) {
+      const dueAt = account.lastPolledAt
+        ? new Date(account.lastPolledAt).getTime() + (account.pollIntervalMinutes || 5) * 60_000
+        : 0;
+      if (dueAt > now) continue;
+
+      try {
+        const result = await graphMailbox.pollAccount(prisma, account);
+        polled++;
+        processed += result.processed;
+        casesCreated += result.casesCreated;
+      } catch (err) {
+        if (err?.isThrottled) throttled++; else failed++;
+        log.warn({ accountId: account.id, err: err.message }, 'mailbox poll failed');
+      }
+    }
+
+    return { accounts: accounts.length, polled, processed, casesCreated, failed, throttled };
+  },
+
   async checkOverdueInvoices() {
     const overdue = await prisma.invoice.updateMany({
       where: { status: 'Sent', dueDate: { lt: new Date() } },
@@ -332,6 +377,9 @@ function initJobQueue(databaseClient) {
     cron.schedule('*/30 * * * *', () => withRetry('enforceSla', handlers.enforceSla).catch(() => {}));
     cron.schedule('0 4 * * *', () => withRetry('cleanupRecycleBin', handlers.cleanupRecycleBin).catch(() => {}));
     cron.schedule('*/10 * * * *', () => withRetry('processSequenceSteps', handlers.processSequenceSteps).catch(() => {}));
+    // Runs every minute; each account's own pollIntervalMinutes decides whether
+    // it is actually due, so a mailbox set to 5 minutes is polled every 5.
+    cron.schedule('* * * * *', () => withRetry('pollInboundMailboxes', handlers.pollInboundMailboxes).catch(() => {}));
     log.info('Jobs: node-cron scheduler');
   } else {
     log.warn('Jobs: No scheduler available');
