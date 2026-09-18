@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
+const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -25,8 +26,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   // Apply auth + audit to all routes
   router.use(authenticate, auditMiddleware);
 
+  const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
+
   // LIST - GET /
-  router.get('/', requirePermission(moduleName, 'read'), async (req, res, next) => {
+  router.get('/', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const { search, page = 1, limit = 50, sortBy, sortDir = 'desc', ...filters } = req.query;
@@ -46,6 +49,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
       const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
+      // Restrict to what security groups allow. Without this every
+      // authenticated user reads every record in the module.
+      where = applyAccessFilter(where, req.accessFilter);
+
       const [records, total] = await Promise.all([
         prisma[modelName].findMany({
           where, include,
@@ -63,7 +70,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // GET ONE - GET /:id
-  router.get('/:id', requirePermission(moduleName, 'read'), async (req, res, next) => {
+  router.get('/:id', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const record = await prisma[modelName].findFirst({
@@ -71,6 +78,11 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         include,
       });
       if (!record) return res.status(404).json({ error: 'Not found' });
+      // 404 rather than 403: a record the caller may not see should not be
+      // distinguishable from one that does not exist.
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Read'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
       res.json(record);
     } catch (err) { next(err); }
   });
@@ -110,7 +122,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // UPDATE - PUT /:id
-  router.put('/:id', requirePermission(moduleName, 'edit'), async (req, res, next) => {
+  router.put('/:id', requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       let data = { ...req.body };
@@ -137,6 +149,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // Get old record for field-level audit
       const oldRecord = await prisma[modelName].findUnique({ where: { id: req.params.id } });
       if (!oldRecord) return res.status(404).json({ error: 'Not found' });
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Edit'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
 
       if (beforeUpdate) data = await beforeUpdate(data, req);
 
@@ -172,13 +187,16 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // DELETE - DELETE /:id
-  router.delete('/:id', requirePermission(moduleName, 'full'), async (req, res, next) => {
+  router.delete('/:id', requirePermission(moduleName, 'full'), guard({ minLevel: 'Full' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
 
       // Snapshot record before delete for recycle bin
       const record = await prisma[modelName].findUnique({ where: { id: req.params.id } });
       if (!record) return res.status(404).json({ error: 'Not found' });
+      if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Full'))) {
+        return res.status(404).json({ error: 'Not found' });
+      }
 
       // Soft delete
       await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });

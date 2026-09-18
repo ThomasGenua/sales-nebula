@@ -64,15 +64,29 @@ function invalidateGroupCache(userId) {
 function isAdmin(user) {
   if (!user) return false;
   if (user.isAdmin === true) return true;
-  const role = String(user.role || user.roleName || '').toLowerCase();
+  // requirePermission attaches the full user, where `role` is the related Role
+  // record. Stringifying that yields "[object Object]", so read .name first or
+  // no administrator ever matches and admins get filtered like everyone else.
+  const role = String(user.role?.name || user.role || user.roleName || '').toLowerCase();
   return role === 'admin' || role === 'administrator';
+}
+
+/** Ownership columns a record may carry. Not every model has both. */
+const OWNER_FIELDS = ['ownerId', 'assignedId'];
+
+/** The ownership columns this model actually declares, via Prisma metadata. */
+function ownerFieldsFor(prisma, modelName) {
+  const fields = modelName && prisma[modelName]?.fields;
+  if (!fields) return ['ownerId'];
+  const present = OWNER_FIELDS.filter(f => f in fields);
+  return present.length ? present : ['ownerId'];
 }
 
 /**
  * Build the Prisma `where` fragment restricting a module to what the
  * user may see. Returns null when no restriction applies.
  */
-async function buildAccessFilter(prisma, user, module, { minLevel = 'Read' } = {}) {
+async function buildAccessFilter(prisma, user, module, { minLevel = 'Read', modelName } = {}) {
   if (isAdmin(user)) return null;
 
   // If nothing in this module is group-controlled, leave it open
@@ -95,9 +109,10 @@ async function buildAccessFilter(prisma, user, module, { minLevel = 'Read' } = {
   const assigned = await prisma.securityGroupRecord.findMany({ where: { module }, select: { recordId: true } });
   const assignedIds = [...new Set(assigned.map(a => a.recordId))];
 
+  // Contact, Deal and Account carry ownerId only; naming assignedId for those
+  // makes Prisma throw on an unknown argument, so ask the model what it has.
   const or = [
-    { ownerId: user.id },
-    { assignedId: user.id },
+    ...ownerFieldsFor(prisma, modelName).map(field => ({ [field]: user.id })),
     { id: { in: visibleIds } },
     { id: { notIn: assignedIds } },
   ];
@@ -113,7 +128,18 @@ function rowSecurity(module, opts = {}) {
   return async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
-      if (!prisma || !req.user) return next();
+      if (!prisma) return next();
+
+      // Only requirePermission attaches req.user. Routes that authenticate
+      // without it would otherwise skip the filter entirely and silently
+      // return every record, so load the user here instead of no-opping.
+      if (!req.user && req.userId) {
+        req.user = await prisma.user.findUnique({
+          where: { id: req.userId },
+          include: { role: true },
+        });
+      }
+      if (!req.user) return next();
 
       req.accessFilter = await buildAccessFilter(prisma, req.user, module, opts);
 

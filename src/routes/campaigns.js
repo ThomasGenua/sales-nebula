@@ -11,36 +11,51 @@ const router = createCrudRouter('campaign', 'campaigns', {
     return { valid: Object.keys(errors).length === 0, errors };
   },
   customRoutes: (router) => {
-    // POST /api/campaigns/:id/send - Simulate sending
+    /**
+     * Mark a campaign as sent.
+     *
+     * This used to invent its own results: delivered, opened, clicked and
+     * converted were each derived from Math.random(), and revenue was
+     * `converted * (1000 + Math.random() * 9000)` — fabricated dollar amounts
+     * written to the database and read back by /:id/stats as if measured.
+     * Recipients were assigned random statuses the same way. Someone would
+     * eventually have made a budget decision on those numbers.
+     *
+     * It never actually stored them: Campaign has no `metrics` column, so the
+     * update threw "Unknown argument `metrics`" and this route answered 500 on
+     * every call. Engagement now comes from the CampaignRecipient rows, which
+     * is where /:id/stats already reads it from, so there is nothing to invent
+     * and no new column to add.
+     *
+     * Actual delivery is still not implemented: queueing, throttling and
+     * unsubscribe handling are a separate piece of work, so no mail is sent.
+     */
     router.post('/:id/send', requirePermission('campaigns', 'edit'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id }, include: { recipients: true } });
         if (!campaign) return res.status(404).json({ error: 'Not found' });
 
-        const sent = campaign.recipients.length;
-        const delivered = Math.round(sent * (0.92 + Math.random() * 0.06));
-        const opened = Math.round(delivered * (0.15 + Math.random() * 0.35));
-        const clicked = Math.round(opened * (0.1 + Math.random() * 0.3));
-        const converted = Math.round(clicked * (0.05 + Math.random() * 0.15));
+        const queued = campaign.recipients.length;
+        const sentAt = new Date();
 
-        await prisma.campaign.update({
-          where: { id: req.params.id },
-          data: {
-            status: 'Sent',
-            metrics: { sent, delivered, opened, clicked, converted, revenue: converted * (1000 + Math.random() * 9000) },
-          },
-        });
-
-        // Update recipient statuses randomly
-        for (const r of campaign.recipients) {
-          const rand = Math.random();
-          const status = rand < 0.05 ? 'bounced' : rand < 0.4 ? 'opened' : rand < 0.6 ? 'clicked' : 'delivered';
-          await prisma.campaignRecipient.update({ where: { id: r.id }, data: { status, sentAt: new Date() } });
-        }
+        await prisma.$transaction([
+          prisma.campaign.update({ where: { id: req.params.id }, data: { status: 'Sent' } }),
+          prisma.campaignRecipient.updateMany({
+            where: { campaignId: req.params.id },
+            data: { status: 'queued', sentAt },
+          }),
+        ]);
 
         const updated = await prisma.campaign.findUnique({ where: { id: req.params.id }, include: { recipients: true } });
-        res.json(updated);
+        res.json({
+          ...updated,
+          delivery: {
+            queued,
+            implemented: false,
+            detail: 'Recipients are queued. No mail is dispatched and no engagement is tracked yet.',
+          },
+        });
       } catch (err) { next(err); }
     });
 
