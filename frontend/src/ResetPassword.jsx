@@ -113,7 +113,7 @@ export default function ResetPasswordPage({ go }) {
               textAlign: "center",
             }}
           >
-            <p style={{ margin: "0 0 16px", color: "var(--sn-red)" }}>{message}</p>
+            <p style={{ margin: "0 0 16px", color: "var(--sn-red-ink)" }}>{message}</p>
             <button
               type="button"
               onClick={() => go("/login")}
@@ -151,7 +151,7 @@ export default function ResetPasswordPage({ go }) {
                   borderRadius: 8,
                   background: "rgba(248,113,113,0.1)",
                   border: "1px solid rgba(248,113,113,0.25)",
-                  color: "var(--sn-red)",
+                  color: "var(--sn-red-ink)",
                   fontSize: 13,
                 }}
               >

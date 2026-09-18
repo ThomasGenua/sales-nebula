@@ -833,7 +833,7 @@ function AccessForm() {
               borderRadius: 8,
               background: "rgba(248,113,113,0.1)",
               border: "1px solid rgba(248,113,113,0.25)",
-              color: "var(--sn-red)",
+              color: "var(--sn-red-ink)",
               fontFamily: body,
               fontSize: 14,
             }}
@@ -1570,7 +1570,7 @@ export function AcceptInvitePage({ go }) {
                 padding: "10px 13px",
                 marginBottom: 16,
                 fontSize: 14,
-                color: "var(--sn-red)",
+                color: "var(--sn-red-ink)",
                 fontFamily: body,
               }}
             >

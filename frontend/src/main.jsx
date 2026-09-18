@@ -4,6 +4,7 @@ import App from "./App";
 import Landing, { VerifyPage, AcceptInvitePage } from "./Landing";
 import { PrivacyPage, TermsPage } from "./Legal";
 import ResetPasswordPage from "./ResetPassword";
+import ErrorBoundary from "./ErrorBoundary";
 import { ThemeProvider } from "./theme";
 import "./index.css";
 
@@ -33,6 +34,12 @@ function Root() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // Keyed on the path so navigating away from a broken screen clears the error
+  return <ErrorBoundary resetKey={path}>{renderPage(path, go)}</ErrorBoundary>;
+}
+
+/** Path -> page. Split out so ErrorBoundary can wrap whatever it returns. */
+function renderPage(path, go) {
   if (path === "/verify") return <VerifyPage go={go} />;
   if (path === "/accept-invite") return <AcceptInvitePage go={go} />;
   if (path === "/privacy") return <PrivacyPage go={go} />;

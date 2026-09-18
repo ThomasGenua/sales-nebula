@@ -40,7 +40,7 @@ function LegalShell({ go, title, children }) {
             fontFamily: body,
             fontSize: 13,
             fontWeight: 600,
-            color: "var(--sn-amber)",
+            color: "var(--sn-amber-ink)",
             background: "none",
             border: "none",
             cursor: "pointer",
@@ -119,7 +119,7 @@ export function PrivacyPage({ go }) {
       </Section>
       <Section title="Contact">
         <p style={{ margin: 0 }}>
-          Questions about privacy: <a href="mailto:privacy@salesnebula.com" style={{ color: "var(--sn-amber)" }}>privacy@salesnebula.com</a>
+          Questions about privacy: <a href="mailto:privacy@salesnebula.com" style={{ color: "var(--sn-amber-ink)" }}>privacy@salesnebula.com</a>
         </p>
       </Section>
     </LegalShell>
@@ -171,7 +171,7 @@ export function TermsPage({ go }) {
       </Section>
       <Section title="Contact">
         <p style={{ margin: 0 }}>
-          Legal questions: <a href="mailto:legal@salesnebula.com" style={{ color: "var(--sn-amber)" }}>legal@salesnebula.com</a>
+          Legal questions: <a href="mailto:legal@salesnebula.com" style={{ color: "var(--sn-amber-ink)" }}>legal@salesnebula.com</a>
         </p>
       </Section>
     </LegalShell>

@@ -258,6 +258,19 @@ function EmptyState({ icon: Icon, title, subtitle, action, onAction }) {
   );
 }
 
+function ErrorState({ message, onRetry }) {
+  return (
+    <div className="text-center py-10 sm:py-16 px-4" role="alert">
+      <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-[#0E1630] flex items-center justify-center mx-auto mb-3">
+        <AlertTriangle size={22} className="text-[#F87171]" />
+      </div>
+      <div className="text-sm font-medium text-[#F0EDE5]">Could not load this list</div>
+      <div className="text-xs text-[#7E8598] mt-1 max-w-sm mx-auto">{message}</div>
+      {onRetry && <Button variant="secondary" size="sm" onClick={onRetry} icon={RefreshCw} className="mt-4">Try again</Button>}
+    </div>
+  );
+}
+
 function Spinner() {
   return <div className="flex items-center justify-center py-12"><div className="w-7 h-7 border-2 border-[#182550] border-t-[#F5A623] rounded-full animate-spin" /></div>;
 }
@@ -315,13 +328,16 @@ function MobileRecordCard({ row, columns, onEdit, onDelete, onRowClick }) {
   );
 }
 
-function DataTable({ columns, data = [], onRowClick, onEdit, onDelete, selected, onSelect, loading, emptyIcon, emptyTitle }) {
+function DataTable({ columns, data = [], onRowClick, onEdit, onDelete, selected, onSelect, loading, error, onRetry, emptyIcon, emptyTitle }) {
   const isMobile = useMediaQuery("(max-width: 639px)");
   const [viewMode, setViewMode] = useState("auto");
   const showCards = viewMode === "cards" || (viewMode === "auto" && isMobile);
   const allSelected = data.length > 0 && selected?.length === data.length;
 
   if (loading) return <Spinner />;
+  // A failed request is not an empty list. Showing "no records" for a 500
+  // tells the user their data is gone and invites duplicate records.
+  if (error) return <ErrorState message={error} onRetry={onRetry} />;
   if (data.length === 0) return <EmptyState icon={emptyIcon || FileText} title={emptyTitle || "No records found"} />;
 
   // Card view (mobile default)
@@ -833,6 +849,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -849,13 +866,18 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
 
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError(null);
     let qs = `?page=${page}&limit=${limit}`;
     if (search) qs += `&search=${encodeURIComponent(search)}`;
     if (sortField) qs += `&sortBy=${sortField}&sortDir=${sortDir}`;
     Object.entries(filterValues).forEach(([k, v]) => { if (v) qs += `&${k}=${encodeURIComponent(v)}`; });
     apiFetch(`${endpoint}${qs}`)
       .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.total ?? d.length ?? 0); })
-      .catch(() => setItems([]))
+      .catch(err => {
+        setItems([]);
+        setTotal(0);
+        setLoadError(err?.message || "Check your connection and try again.");
+      })
       .finally(() => setLoading(false));
   }, [page, search, endpoint, apiFetch, sortField, sortDir, filterValues]);
 
@@ -973,7 +995,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       {/* Table/Cards */}
       <div className="bg-[#0B1228] border border-[#182550] rounded-xl overflow-hidden">
         <div className="p-2 sm:p-0">
-          <DataTable columns={columns} data={items} loading={loading}
+          <DataTable columns={columns} data={items} loading={loading} error={loadError} onRetry={load}
             onRowClick={row => setDetailRecord(row)}
             onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
             onDelete={remove} selected={selected} onSelect={setSelected}
@@ -1979,8 +2001,8 @@ function LoginPage({ go }) {
           </p>
         </div>
         <form onSubmit={mode === "forgot" ? handleForgot : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
-          {error && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red)" }}>{error}</div>}
-          {info && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(52,211,153,0.10)", border: "1px solid rgba(52,211,153,0.20)", color: "var(--sn-green, #34D399)" }}>{info}</div>}
+          {error && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red-ink)" }}>{error}</div>}
+          {info && <div className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(52,211,153,0.10)", border: "1px solid rgba(52,211,153,0.20)", color: "var(--sn-green-ink)" }}>{info}</div>}
           <Input label="Email" type="email" value={email} onChange={setEmail} required placeholder="your@email.com" />
           {mode === "login" && (
             <Input label="Password" type="password" value={password} onChange={setPassword} required placeholder="Password" />
@@ -1997,7 +2019,7 @@ function LoginPage({ go }) {
                 type="button"
                 onClick={() => { setMode("forgot"); setError(""); setInfo(""); }}
                 className="w-full text-xs hover:underline"
-                style={{ color: "var(--sn-amber)", background: "none", border: "none", cursor: "pointer" }}
+                style={{ color: "var(--sn-amber-ink)", background: "none", border: "none", cursor: "pointer" }}
               >
                 Forgot password?
               </button>
@@ -2022,7 +2044,7 @@ function LoginPage({ go }) {
               type="button"
               onClick={() => { setMode("login"); setError(""); setInfo(""); }}
               className="w-full text-xs hover:underline"
-              style={{ color: "var(--sn-amber)", background: "none", border: "none", cursor: "pointer" }}
+              style={{ color: "var(--sn-amber-ink)", background: "none", border: "none", cursor: "pointer" }}
             >
               Back to sign in
             </button>
@@ -2036,7 +2058,7 @@ function LoginPage({ go }) {
           <button
             onClick={() => (go ? go("/") : (window.location.href = "/"))}
             className="text-xs hover:underline"
-            style={{ color: "var(--sn-amber)" }}
+            style={{ color: "var(--sn-amber-ink)" }}
           >
             Request access
           </button>
@@ -4308,7 +4330,7 @@ function NavLeaf({ item, page, setPage, onNavigate, depth = 0 }) {
       onClick={() => { setPage(item.id); onNavigate?.(); }}
       className={`w-full flex items-center gap-2.5 rounded-lg text-sm transition-all touch-manipulation ${pad}`}
       style={active
-        ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)", fontWeight: 600 }
+        ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber-ink)", fontWeight: 600 }
         : { color: "var(--sn-slate)" }}
     >
       <item.icon size={depth ? 16 : 18} className="shrink-0" />
@@ -4329,7 +4351,7 @@ function NavBranch({ item, page, setPage, onNavigate, depth = 0, openMap, toggle
         onClick={() => toggle(item.id)}
         className={`w-full flex items-center gap-2.5 rounded-lg text-sm transition-all touch-manipulation ${pad}`}
         style={activeBranch
-          ? { background: "rgba(245,166,35,0.08)", color: "var(--sn-amber)", fontWeight: 600 }
+          ? { background: "rgba(245,166,35,0.08)", color: "var(--sn-amber-ink)", fontWeight: 600 }
           : { color: "var(--sn-slate)" }}
       >
         <item.icon size={depth ? 16 : 18} className="shrink-0" />
@@ -4419,7 +4441,7 @@ function NavTree({ page, setPage, collapsed = false, onNavigate }) {
                 onClick={() => { setPage(firstLeaf); onNavigate?.(); }}
                 className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg"
                 style={active
-                  ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)" }
+                  ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber-ink)" }
                   : { color: "var(--sn-slate)" }}
               >
                 <item.icon size={18} />
@@ -4434,7 +4456,7 @@ function NavTree({ page, setPage, collapsed = false, onNavigate }) {
               onClick={() => { setPage(item.id); onNavigate?.(); }}
               className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg"
               style={page === item.id
-                ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber)" }
+                ? { background: "rgba(245,166,35,0.12)", color: "var(--sn-amber-ink)" }
                 : { color: "var(--sn-slate)" }}
             >
               <item.icon size={18} />
@@ -4677,7 +4699,7 @@ function DemoBanner() {
           window.location.assign("/#access");
         }}
         className="shrink-0 self-start sm:self-auto rounded-md px-3 py-1.5 text-xs font-semibold"
-        style={{ background: "var(--sn-cta-text)", color: "var(--sn-amber)" }}
+        style={{ background: "var(--sn-cta-text)", color: "var(--sn-amber-ink)" }}
       >
         Request access
       </button>
