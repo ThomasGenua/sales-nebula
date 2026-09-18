@@ -13,7 +13,7 @@ html[data-theme="dark"] {
   --sn-amber-hot: #E8961A;
   --sn-cream: #F0EDE5;
   --sn-slate: #7E8598;
-  --sn-dim: #4A5168;
+  --sn-dim: #7A82A0;   /* was #4A5168, which scored 2.27:1 on these surfaces */
   --sn-green: #34D399;
   --sn-blue: #60A5FA;
   --sn-purple: #A78BFA;
@@ -291,4 +291,78 @@ html[data-theme="light"] .border-\[\#F5A623\],
 html[data-theme="light"] .hover\:border-\[\#F5A623\]:hover,
 html[data-theme="light"] .focus\:border-\[\#F5A623\]:focus {
   border-color: var(--sn-amber-ink) !important;
+}
+
+/* ─── ACCESSIBILITY ────────────────────────────────────────────────────────
+   The app removed focus outlines in several places without putting anything
+   back, so a keyboard user lost their position entirely. A visible ring is
+   restored globally for :focus-visible, which shows for keyboard focus and
+   stays out of the way for mouse clicks. */
+
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--sn-amber-ink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Elements that opt out of the default ring still get one. */
+.focus\:outline-none:focus-visible,
+[class*="focus:outline-none"]:focus-visible {
+  outline: 2px solid var(--sn-amber-ink) !important;
+  outline-offset: 2px;
+}
+
+/* Visible to a screen reader, not to the eye. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* A skip link is hidden until it is focused, then sits above everything. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -64px;
+  z-index: 100;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--sn-amber);
+  color: var(--sn-cta-text);
+  font-weight: 600;
+  transition: top 0.15s ease-in-out;
+}
+.skip-link:focus {
+  top: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The muted colour is written as a literal in most of the app, so the token
+   change above has to reach those class names too — the mirror of what the
+   light theme already does for its surfaces. */
+:root .text-\[\#4A5168\],
+html[data-theme="dark"] .text-\[\#4A5168\] {
+  color: var(--sn-dim);
+}
+:root .placeholder-\[\#4A5168\]::placeholder,
+html[data-theme="dark"] .placeholder-\[\#4A5168\]::placeholder {
+  color: var(--sn-dim);
+}
+:root .hover\:text-\[\#4A5168\]:hover,
+html[data-theme="dark"] .hover\:text-\[\#4A5168\]:hover {
+  color: var(--sn-dim);
 }
