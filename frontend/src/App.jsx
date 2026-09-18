@@ -3388,6 +3388,241 @@ function TeamList({ projectId }) {
 // ========================================================================
 // SECURITY GROUPS PAGE
 // ========================================================================
+/**
+ * Privacy — data subject access and erasure.
+ *
+ * Erasure is irreversible, so the screen makes you look at what you are about
+ * to erase before it will let you do it: find the person, see the record
+ * counts, then confirm. The result is shown in full, including what was
+ * deliberately left behind.
+ */
+function PrivacyPage() {
+  const { apiFetch } = useAuth();
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [subject, setSubject] = useState(null);
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [strategy, setStrategy] = useState("anonymize");
+  const [erasing, setErasing] = useState(false);
+  const [outcome, setOutcome] = useState(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setListError(null);
+    apiFetch("/privacy/requests?limit=50")
+      .then(r => setRequests(Array.isArray(r?.data) ? r.data : []))
+      .catch(e => setListError(e.message || "Could not load requests"))
+      .finally(() => setLoading(false));
+  }, [apiFetch]);
+  useEffect(() => { load(); }, [load]);
+
+  // An address or an id — whichever the operator happens to have.
+  const identifier = () => (query.includes("@") ? { email: query.trim() } : { contactId: query.trim() });
+
+  const find = async () => {
+    if (!query.trim()) return;
+    setSearching(true); setSubject(null); setOutcome(null);
+    try {
+      setSubject(await apiFetch("/privacy/export", { method: "POST", body: identifier() }));
+    } catch (e) {
+      setToast({ message: e.message || "No data subject matched that identifier", type: "error" });
+    } finally { setSearching(false); }
+  };
+
+  const erase = async () => {
+    setErasing(true);
+    try {
+      const res = await apiFetch("/privacy/erase", {
+        method: "POST",
+        body: { ...identifier(), confirm: true, strategy },
+      });
+      setOutcome(res.result);
+      setConfirmOpen(false);
+      setSubject(null);
+      setToast({ message: `Erased ${res.result.rowsTouched} rows across ${res.result.modelsTouched} tables`, type: "success" });
+      load();
+    } catch (e) {
+      setToast({ message: e.message || "Erasure failed", type: "error" });
+    } finally { setErasing(false); }
+  };
+
+  const download = () => {
+    const blob = new Blob([JSON.stringify(subject, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `subject-access-${subject.subject.label.replace(/\s+/g, "-").toLowerCase()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const held = subject ? Object.entries(subject.records).sort((a, b) => b[1].length - a[1].length) : [];
+  const statusColor = { completed: "success", pending: "warning", failed: "danger" };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1">
+        <Lock size={20} style={{ color: "var(--sn-amber)" }} className="hidden sm:block" />
+        <h1 className="text-lg sm:text-xl font-bold" style={{ color: "var(--sn-cream)" }}>Privacy</h1>
+      </div>
+      <p className="text-xs mb-5" style={{ color: "var(--sn-slate)" }}>
+        Subject access and erasure requests under GDPR Articles 15, 17 and 20.
+      </p>
+
+      {/* ── Look up a data subject ── */}
+      <div className="rounded-xl p-3 sm:p-4 mb-5" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+          <Input
+            label="Find a person"
+            value={query}
+            onChange={setQuery}
+            placeholder="Email address or contact ID"
+            className="flex-1"
+            onKeyDown={e => { if (e.key === "Enter") find(); }}
+          />
+          <Button icon={Search} onClick={find} disabled={searching || !query.trim()}>
+            {searching ? "Searching" : "Look up"}
+          </Button>
+        </div>
+
+        {subject && (
+          <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--sn-rule)" }}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold truncate" style={{ color: "var(--sn-cream)" }}>{subject.subject.label}</div>
+                <div className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                  {subject.recordCount} records across {held.length} tables
+                  {subject.subject.emails.length > 0 && ` · ${subject.subject.emails.join(", ")}`}
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <Button variant="secondary" icon={Download} onClick={download}>Export</Button>
+                <Button variant="danger" icon={Trash2} onClick={() => setConfirmOpen(true)}>Erase</Button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {held.map(([model, rows]) => (
+                <span key={model} className="text-xs px-2 py-1 rounded-md"
+                  style={{ background: "var(--sn-raised)", color: "var(--sn-body)", border: "1px solid var(--sn-rule)" }}>
+                  {model} <strong style={{ color: "var(--sn-cream)" }}>{rows.length}</strong>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── What the last erasure actually did ── */}
+      {outcome && (
+        <div className="rounded-xl p-3 sm:p-4 mb-5" style={{ background: "var(--sn-panel)", border: "1px solid rgba(52,211,153,0.35)" }}>
+          <div className="flex items-center gap-2 mb-2">
+            <CheckCircle2 size={16} style={{ color: "var(--sn-green)" }} />
+            <span className="text-sm font-semibold" style={{ color: "var(--sn-cream)" }}>
+              Erased {outcome.rowsTouched} rows across {outcome.modelsTouched} tables ({outcome.strategy})
+            </span>
+          </div>
+          {outcome.suppressed?.length > 0 && (
+            <p className="text-xs mb-2" style={{ color: "var(--sn-body)" }}>
+              Suppressed so a re-import cannot restore them: {outcome.suppressed.join(", ")}
+            </p>
+          )}
+          {outcome.residual?.length > 0 && (
+            <details>
+              <summary className="text-xs cursor-pointer" style={{ color: "var(--sn-slate)" }}>
+                {outcome.residual.length} tables keep free text that was not redacted — review
+              </summary>
+              <ul className="mt-2 space-y-1">
+                {outcome.residual.map(r => (
+                  <li key={r.model} className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                    <strong style={{ color: "var(--sn-body)" }}>{r.model}</strong>: {r.fields.join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* ── Request log ── */}
+      <h2 className="text-sm font-semibold mb-2" style={{ color: "var(--sn-cream)" }}>Request log</h2>
+      {loading ? <Spinner label="Loading requests" /> : listError ? (
+        <div role="alert" className="rounded-xl p-4 text-sm"
+          style={{ background: "var(--sn-panel)", border: "1px solid rgba(248,113,113,0.35)", color: "var(--sn-body)" }}>
+          {listError}
+          <button type="button" onClick={load} className="ml-2 underline" style={{ color: "var(--sn-amber-ink)" }}>Retry</button>
+        </div>
+      ) : requests.length === 0 ? (
+        <EmptyState icon={FileText} title="No requests yet"
+          subtitle="Erasures run from this screen are logged here with a record of exactly what changed" />
+      ) : (
+        <div className="space-y-2">
+          {requests.map(r => (
+            <div key={r.id} className="rounded-xl p-3" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="text-sm capitalize truncate" style={{ color: "var(--sn-cream)" }}>
+                    {r.requestType}{r.strategy ? ` · ${r.strategy}` : ""}
+                  </div>
+                  <div className="text-xs truncate" style={{ color: "var(--sn-dim)" }}>
+                    {r.email || r.contactId || r.leadId} · {new Date(r.requestedAt).toLocaleString()}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {r.result?.rowsTouched != null && (
+                    <span className="text-xs" style={{ color: "var(--sn-slate)" }}>{r.result.rowsTouched} rows</span>
+                  )}
+                  <Badge color={statusColor[r.status] || "primary"}>{r.status}</Badge>
+                </div>
+              </div>
+              {r.error && <div className="text-xs mt-1.5" style={{ color: "var(--sn-red)" }}>{r.error}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Erase this person's data">
+        <div className="space-y-4">
+          <div className="rounded-lg p-3 flex gap-2.5"
+            style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)" }}>
+            <AlertTriangle size={16} style={{ color: "var(--sn-red)" }} className="shrink-0 mt-0.5" />
+            <p className="text-xs" style={{ color: "var(--sn-body)" }}>
+              This cannot be undone. <strong style={{ color: "var(--sn-cream)" }}>{subject?.subject.label}</strong> appears
+              in {subject?.recordCount} records. Identifiers are removed and the address is added to the suppression
+              list; invoices, orders and contracts keep their figures so the books still balance.
+            </p>
+          </div>
+
+          <Select
+            label="Strategy"
+            value={strategy}
+            onChange={setStrategy}
+            options={[
+              { value: "anonymize", label: "Anonymise — remove identifiers, keep correspondence" },
+              { value: "purge", label: "Purge — also redact emails, notes and case text" },
+            ]}
+          />
+
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={() => setConfirmOpen(false)} disabled={erasing}>Cancel</Button>
+            <Button variant="danger" icon={Trash2} onClick={erase} disabled={erasing}>
+              {erasing ? "Erasing" : "Erase permanently"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
 function SecurityGroupsPage() {
   const { apiFetch } = useAuth();
   const [tab, setTab] = useState('groups');
@@ -4580,6 +4815,7 @@ const NAV_ITEMS = [
           { id: "webhooks", label: "Webhooks", icon: Webhook },
           { id: "studio", label: "Studio", icon: Wrench },
           { id: "securityGroups", label: "Security Groups", icon: Lock },
+          { id: "privacy", label: "Privacy", icon: Shield },
         ],
       },
     ],
@@ -5064,6 +5300,7 @@ function AppShell({ go }) {
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,
     templates: TemplatesPage, studio: StudioPage, sla: SlaPage,
     prospects: ProspectsPage, bugs: BugsPage, maps: MapsPage,
+    privacy: PrivacyPage,
   };
   const PageComponent = pageMap[page] || DashboardPage;
 
