@@ -214,3 +214,81 @@ input[type="checkbox"]:checked::after {
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
+
+/* ─── ACCENT INK ───────────────────────────────────────────────────────────
+   The accent palette above sets *fills* — amber buttons, badge tints. Those
+   pair with dark text and read correctly in both themes.
+
+   Accent *text* is a different problem. #F5A623 on the light surfaces scores
+   2.03:1 and #34D399 scores 1.92:1, well under the 4.5:1 WCAG AA needs, so
+   status text, error copy and links wash out whenever the light theme is on.
+   Darkening the fill tokens is not the fix: --sn-amber also backs the primary
+   button, where a darker amber would collide with --sn-cta-text.
+
+   So accents carry a second value for use as text or an icon on a surface.
+   In dark mode ink equals the fill, leaving that theme pixel-identical. In
+   light mode it is darkened until it clears 4.5:1 against every light
+   surface (--sn-panel #FFFFFF, --sn-void #F4F1E8, --sn-raised #F7F5EF). */
+
+:root,
+html[data-theme="dark"] {
+  --sn-amber-ink: #F5A623;
+  --sn-green-ink: #34D399;
+  --sn-blue-ink: #60A5FA;
+  --sn-purple-ink: #A78BFA;
+  --sn-red-ink: #F87171;
+  --sn-cyan-ink: #22D3EE;
+  --sn-teal-ink: #2DD4BF;
+  --sn-yellow-ink: #FBBF24;
+}
+
+html[data-theme="light"] {
+  --sn-amber-ink: #96600A;  /* 4.68:1 */
+  --sn-green-ink: #047857;  /* 4.86:1 */
+  --sn-blue-ink: #2563EB;   /* 4.58:1 */
+  --sn-purple-ink: #7C3AED; /* 5.05:1 */
+  --sn-red-ink: #B91C1C;    /* 5.73:1 */
+  --sn-cyan-ink: #0E7490;   /* 4.74:1 */
+  --sn-teal-ink: #0F766E;   /* 4.85:1 */
+  --sn-yellow-ink: #854D0E; /* 6.07:1 */
+}
+
+/* Route the hardcoded accent text classes through the ink tokens. Fills
+   (bg-*, gradient from-/to-) are deliberately left alone. */
+html[data-theme="light"] .text-\[\#F5A623\],
+html[data-theme="light"] .hover\:text-\[\#F5A623\]:hover {
+  color: var(--sn-amber-ink) !important;
+}
+html[data-theme="light"] .text-\[\#34D399\],
+html[data-theme="light"] .hover\:text-\[\#34D399\]:hover {
+  color: var(--sn-green-ink) !important;
+}
+html[data-theme="light"] .text-\[\#F87171\],
+html[data-theme="light"] .hover\:text-\[\#F87171\]:hover {
+  color: var(--sn-red-ink) !important;
+}
+html[data-theme="light"] .text-\[\#60A5FA\],
+html[data-theme="light"] .hover\:text-\[\#60A5FA\]:hover,
+html[data-theme="light"] .text-\[\#4F8EF7\] {
+  color: var(--sn-blue-ink) !important;
+}
+html[data-theme="light"] .text-\[\#A78BFA\] {
+  color: var(--sn-purple-ink) !important;
+}
+html[data-theme="light"] .text-\[\#22D3EE\] {
+  color: var(--sn-cyan-ink) !important;
+}
+html[data-theme="light"] .text-\[\#2DD4BF\] {
+  color: var(--sn-teal-ink) !important;
+}
+html[data-theme="light"] .text-\[\#FBBF24\] {
+  color: var(--sn-yellow-ink) !important;
+}
+
+/* A bright amber focus ring scores 1.79:1 on the light surfaces, under the
+   3:1 that non-text UI needs. Keyboard focus has to stay visible. */
+html[data-theme="light"] .border-\[\#F5A623\],
+html[data-theme="light"] .hover\:border-\[\#F5A623\]:hover,
+html[data-theme="light"] .focus\:border-\[\#F5A623\]:focus {
+  border-color: var(--sn-amber-ink) !important;
+}
