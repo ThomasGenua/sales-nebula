@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { invalidateOrgWideDefaultCache, invalidateHierarchyCache } = require('../middleware/rowSecurity');
 
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'edit'));
@@ -99,13 +100,33 @@ router.get('/owd', async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.orgWideDefault.findMany() }); }
   catch (err) { next(err); }
 });
+const ACCESS_LEVELS = ['Private', 'ReadOnly', 'ReadWrite', 'FullAccess'];
+const GRANT_MODES = ['hierarchy', 'criteria'];
+
 router.put('/owd/:module', async (req, res, next) => {
   try {
+    const { internalAccess, externalAccess, grantAccessUsing } = req.body;
+    if (internalAccess !== undefined && !ACCESS_LEVELS.includes(internalAccess)) {
+      return res.status(400).json({ error: `internalAccess must be one of: ${ACCESS_LEVELS.join(', ')}` });
+    }
+    if (externalAccess !== undefined && !ACCESS_LEVELS.includes(externalAccess)) {
+      return res.status(400).json({ error: `externalAccess must be one of: ${ACCESS_LEVELS.join(', ')}` });
+    }
+    if (grantAccessUsing != null && !GRANT_MODES.includes(grantAccessUsing)) {
+      return res.status(400).json({ error: `grantAccessUsing must be null or one of: ${GRANT_MODES.join(', ')}` });
+    }
+    const data = {
+      ...(internalAccess !== undefined && { internalAccess }),
+      ...(externalAccess !== undefined && { externalAccess }),
+      ...(grantAccessUsing !== undefined && { grantAccessUsing }),
+    };
     const owd = await req.app.locals.prisma.orgWideDefault.upsert({
       where: { module: req.params.module },
-      update: req.body,
-      create: { module: req.params.module, ...req.body },
+      update: data,
+      create: { module: req.params.module, ...data },
     });
+    // Sharing is cached for a minute; a change should apply now.
+    invalidateOrgWideDefaultCache();
     res.json(owd);
   } catch (err) { next(err); }
 });
@@ -153,11 +174,30 @@ router.get('/role-hierarchy', async (req, res, next) => {
 });
 router.put('/role-hierarchy/:roleId', async (req, res, next) => {
   try {
-    const rh = await req.app.locals.prisma.roleHierarchy.upsert({
-      where: { roleId: req.params.roleId },
-      update: { parentId: req.body.parentId, level: req.body.level },
-      create: { roleId: req.params.roleId, parentId: req.body.parentId, level: req.body.level || 0 },
+    const prisma = req.app.locals.prisma;
+    const { roleId } = req.params;
+    const parentId = req.body.parentId || null;
+    const role = await prisma.role.findUnique({ where: { id: roleId }, select: { id: true } });
+    if (!role) return res.status(404).json({ error: 'Role not found' });
+    if (parentId) {
+      if (parentId === roleId) return res.status(400).json({ error: 'A role cannot report to itself' });
+      if (!(await prisma.role.findUnique({ where: { id: parentId }, select: { id: true } }))) {
+        return res.status(400).json({ error: 'Parent role not found' });
+      }
+      // Walk up from the new parent: meeting this role means a loop, and a
+      // loop would let two roles each see everything the other owns.
+      const rows = await prisma.roleHierarchy.findMany({ select: { roleId: true, parentId: true } });
+      const parentOf = new Map(rows.map(r => [r.roleId, r.parentId]));
+      for (let at = parentId, steps = 0; at && steps <= rows.length; at = parentOf.get(at), steps++) {
+        if (at === roleId) return res.status(400).json({ error: 'That parent would put the role above itself in the hierarchy' });
+      }
+    }
+    const rh = await prisma.roleHierarchy.upsert({
+      where: { roleId },
+      update: { parentId, ...(req.body.level !== undefined && { level: req.body.level }) },
+      create: { roleId, parentId, level: req.body.level || 0 },
     });
+    invalidateHierarchyCache();
     res.json(rh);
   } catch (err) { next(err); }
 });
