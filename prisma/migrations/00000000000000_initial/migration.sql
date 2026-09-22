@@ -169,9 +169,6 @@ CREATE TABLE IF NOT EXISTS "Activity" (
   "description" TEXT,
   "createdAt" TIMESTAMPTZ DEFAULT NOW(),
   "updatedAt" TIMESTAMPTZ DEFAULT NOW(),
-  "description" TEXT,
-  "dueDate" TIMESTAMPTZ,
-  "duration" INTEGER,
   "deletedAt" TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS "idx_activity_contactId" ON "Activity" ("contactId");

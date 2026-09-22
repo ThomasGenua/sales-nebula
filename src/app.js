@@ -115,10 +115,18 @@ function createApp(prisma) {
   app.get('/metrics', metricsRoute);
 
   // ─── STATIC FILES ───
-  app.use('/uploads', express.static(path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads')));
+  // Uploaded files are never served statically. This mount used to publish the
+  // whole directory without authentication and with the browser's own content
+  // type, so an uploaded HTML file ran as script on this origin and a data
+  // export sat at a guessable URL. Attachments and exports are served through
+  // authenticated routes that check the caller may see the record.
 
   // ─── RATE LIMITING ───
-  if (!isTest) app.use(limiters.standard);
+  // Scoped to the API. Mounted globally it also counted the SPA shell, the JS
+  // bundle, the stylesheet and every static asset, so a couple of dozen page
+  // loads — or one office behind a single NAT address — exhausted the window
+  // and the application itself started answering 429.
+  if (!isTest) app.use('/api', limiters.standard);
 
   // ─── SHARED SERVICES ───
   app.locals.prisma = prisma;

@@ -371,14 +371,30 @@ describe('WBS numbering and progress roll-up', () => {
   });
 });
 
-// Route-level tests run only when the harness provides a live app
-let request, app, token;
-try {
-  request = require('supertest');
-  ({ app, token } = require('./setup'));
-} catch (e) { /* engines above still run standalone */ }
+// The route tests below were gated on `app` being truthy at module-evaluation
+// time, but `app` is only assigned once setup() has run, and ./setup exports
+// setup/teardown rather than an app and a token. So the guard was always false
+// and every block here was skipped — they had never once run. They use the same
+// lifecycle as every other suite now.
+const request = require('supertest');
+const { setup, teardown, cleanDatabase, createTestRole, createTestUser } = require('./setup');
 
-const describeApi = app ? describe : describe.skip;
+let app, prisma, token;
+
+beforeAll(async () => {
+  ({ prisma, app } = await setup());
+  await cleanDatabase();
+  const role = await createTestRole('Admin');
+  // A seeded installation has a Sales Rep role, and the signup and invite
+  // endpoints correctly refuse to guess one when it is absent.
+  await createTestRole('Sales Rep');
+  const auth = await createTestUser({ email: `api-${Date.now()}@test.com`, roleId: role.id });
+  token = auth.token;
+});
+
+afterAll(async () => { await teardown(); });
+
+const describeApi = describe;
 
 describeApi('Calendar API', () => {
   let eventId;

@@ -97,9 +97,9 @@ router.get('/metadata/export', authenticate, requirePermission('admin', 'full'),
     const prisma = req.app.locals.prisma;
     const [customObjects, workflows, flows, validationRules] = await Promise.all([
       prisma.customObject.findMany({ where: { deletedAt: null } }),
-      prisma.workflow.findMany({ where: { deletedAt: null } }),
+      prisma.workflow.findMany(),
       prisma.flow.findMany({ where: { deletedAt: null } }),
-      prisma.validationRule.findMany({ where: { deletedAt: null } }).catch(() => []),
+      prisma.validationRule.findMany().catch(() => []),
     ]);
     res.json({ exportedAt: new Date(), metadata: { customObjects, workflows, flows, validationRules } });
   } catch (err) { next(err); }

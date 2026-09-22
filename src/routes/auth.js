@@ -14,6 +14,9 @@ const jwt = require('jsonwebtoken');
 
 const router = Router();
 
+// The role a self-registered account is given when none is named.
+const DEFAULT_SIGNUP_ROLE = process.env.DEFAULT_SIGNUP_ROLE || 'Sales Rep';
+
 /**
  * Issue the session for a fully authenticated user. Shared by password login
  * and the MFA second step so both return an identical shape.
@@ -228,10 +231,19 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
     const existing = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (existing) return res.status(409).json({ error: 'Email already exists' });
 
+    // Fall back to the configured default role, and to nothing else. Picking
+    // "any role that exists" would hand an Administrator role to a self
+    // registrant on an installation that happens to have only that one.
     let role = roleId;
     if (!role) {
-      const defaultRole = await prisma.role.findFirst({ where: { name: 'Sales Rep' } });
-      role = defaultRole?.id;
+      const defaultRole = await prisma.role.findFirst({ where: { name: DEFAULT_SIGNUP_ROLE } });
+      if (!defaultRole) {
+        return res.status(503).json({
+          error: `Self-registration is unavailable: no "${DEFAULT_SIGNUP_ROLE}" role is configured.`,
+          code: 'NO_DEFAULT_ROLE',
+        });
+      }
+      role = defaultRole.id;
     }
 
     const hash = await bcrypt.hash(password, 12); // Cost 12 for production

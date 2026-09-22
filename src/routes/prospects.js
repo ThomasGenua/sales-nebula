@@ -214,8 +214,12 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
           firstName: prospect.firstName, lastName: prospect.lastName,
           email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
           company: prospect.accountName, title: prospect.title,
-          leadSource: prospect.source || 'Prospect', status: 'New',
-          description: prospect.description, industry: prospect.industry,
+          // `leadSource` is a Contact column; on Lead it is `source`. Lead has
+          // no industry column at all, so the prospect's is carried in the
+          // description rather than silently dropped on conversion.
+          source: prospect.source || 'Prospect', status: 'New',
+          description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
+            .filter(Boolean).join('\n') || null,
           city: prospect.city, state: prospect.state, country: prospect.country,
           ownerId: req.body.ownerId || prospect.ownerId || req.user.id,
         },

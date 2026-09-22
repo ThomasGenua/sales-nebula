@@ -177,6 +177,7 @@ model Deal {
   fieldHistory    DealHistory[]
   dealCompetitors DealCompetitor[]
   type String?
+  deletedAt   DateTime?
 
   @@index([accountId])
   @@index([contactId])
@@ -1177,6 +1178,7 @@ model Tag {
   createdAt DateTime @default(now())
 
   assignments TagAssignment[]
+  deletedAt   DateTime?
 }
 
 model TagAssignment {
@@ -1786,6 +1788,7 @@ model Macro {
   sortOrder   Int     @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
 }
 
 // ═══════════════════════════════════════
@@ -2641,6 +2644,7 @@ model AiAgent {
 
   runs AiAgentRun[]
   conversations AiAgentConversation[]
+  deletedAt   DateTime?
 }
 
 model AiAgentRun {
@@ -2858,6 +2862,7 @@ model Attachment {
   isPublic    Boolean  @default(false)
   createdById String
   createdAt   DateTime @default(now())
+  deletedAt   DateTime?
 
   @@index([parentId, parentModule])
   @@index([createdById])
@@ -3008,6 +3013,7 @@ model Survey {
   updatedAt   DateTime  @updatedAt
 
   responses SurveyResponse[]
+  deletedAt   DateTime?
 }
 
 model SurveyResponse {
@@ -5145,6 +5151,8 @@ model Bug {
   comments BugComment[]
   watchers BugWatcher[]
   history  BugHistory[]
+  fixedAt     DateTime?
+  verifiedAt  DateTime?
 
   @@index([status])
   @@index([assignedToId])

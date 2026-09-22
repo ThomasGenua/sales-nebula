@@ -608,15 +608,19 @@ The data model follows Salesforce conventions with some enhancements:
 
 ## Testing
 
+> **CI is intentionally disabled** — no workflows run on push or pull requests.
+> Verify every change locally before pushing. See
+> [`.github/CI_DISABLED.md`](.github/CI_DISABLED.md) for the exact steps.
+
 ```bash
-npm test                # Run all 246 tests
+npm test                # Run every suite
 npm run test:watch      # Watch mode for development
 npm run test:coverage   # Generate coverage report
 npm run test:auth       # Auth suite only
 npm run test:reports    # Reports suite only
 ```
 
-Tests use **Jest** with **supertest** for HTTP assertions. The test database is configured via `NODE_ENV=test`. Test suites cover authentication flows (register, login, refresh, lockout), CRUD operations across modules, permission enforcement, business logic (pipeline stats, approval workflows), and error handling.
+Tests use **Jest** with **supertest** for HTTP assertions, against a PostgreSQL database built with `npx prisma migrate deploy` so the suite runs on exactly the schema production gets. Test suites cover authentication flows (register, login, refresh, lockout), CRUD operations across modules, permission enforcement, business logic (pipeline stats, approval workflows), and error handling.
 
 ---
 

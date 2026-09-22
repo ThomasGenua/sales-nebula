@@ -130,7 +130,7 @@ router.get('/:id/records/search', authenticate, async (req, res, next) => {
     const { q, limit = 25 } = req.query;
     if (!q) return res.status(400).json({ error: 'q required' });
     const records = await prisma.customObjectRecord.findMany({
-      where: { customObjectId: req.params.id, deletedAt: null, data: { string_contains: q } },
+      where: { customObjectId: req.params.id, data: { string_contains: q } },
       take: +limit, orderBy: { createdAt: 'desc' },
     });
     res.json({ query: q, results: records, count: records.length });

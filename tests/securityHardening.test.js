@@ -242,3 +242,80 @@ describe('Content Security Policy', () => {
     expect(inlineScriptHashes(path.join(dir, 'does-not-exist'))).toEqual([]);
   });
 });
+
+describe('Signing secret', () => {
+  // Four modules each fell back to their own published constant when
+  // JWT_SECRET was unset, so a production deployment that forgot to set it
+  // signed tokens anyone could forge — and the constants differed, so tokens
+  // minted by one module did not verify in another.
+  const { resolveJwtSecret, resolveMailSecret, DEV_FALLBACK } = require('../src/utils/secrets');
+
+  let savedSecret, savedMail, savedEnv;
+  beforeEach(() => {
+    savedSecret = process.env.JWT_SECRET;
+    savedMail = process.env.MAIL_SECRET;
+    savedEnv = process.env.NODE_ENV;
+  });
+  afterEach(() => {
+    if (savedSecret === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = savedSecret;
+    if (savedMail === undefined) delete process.env.MAIL_SECRET; else process.env.MAIL_SECRET = savedMail;
+    process.env.NODE_ENV = savedEnv;
+  });
+
+  it('uses the configured secret when there is one', () => {
+    process.env.JWT_SECRET = 'a-real-secret';
+    expect(resolveJwtSecret()).toBe('a-real-secret');
+  });
+
+  it('refuses to hand back a fallback in production', () => {
+    delete process.env.JWT_SECRET;
+    process.env.NODE_ENV = 'production';
+    expect(() => resolveJwtSecret({ exit: false })).toThrow(/JWT_SECRET is not set/);
+  });
+
+  it('allows a development fallback outside production', () => {
+    delete process.env.JWT_SECRET;
+    process.env.NODE_ENV = 'test';
+    expect(resolveJwtSecret()).toBe(DEV_FALLBACK);
+  });
+
+  it('prefers MAIL_SECRET for credentials at rest, and falls back to the same resolution', () => {
+    process.env.MAIL_SECRET = 'mail-only';
+    expect(resolveMailSecret()).toBe('mail-only');
+    delete process.env.MAIL_SECRET;
+    process.env.JWT_SECRET = 'shared';
+    expect(resolveMailSecret()).toBe('shared');
+  });
+
+  it('no module keeps a hardcoded fallback of its own', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '..', 'src');
+    const bad = [];
+    const walk = dir => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { if (e.name !== 'generated') walk(full); continue; }
+        if (!e.name.endsWith('.js')) continue;
+        const src = fs.readFileSync(full, 'utf8');
+        if (/process\.env\.(JWT_SECRET|MAIL_SECRET)\s*\|\|\s*['"]/.test(src)) bad.push(path.relative(root, full));
+      }
+    };
+    walk(root);
+    expect(bad).toEqual([]);
+  });
+});
+
+describe('Rate limiting scope', () => {
+  // The limiter was mounted globally, so the SPA shell and its assets counted
+  // against the same 200-request window as the API and the application itself
+  // began returning 429 after a few dozen page loads.
+  const fs = require('fs');
+  const path = require('path');
+
+  it('applies to the API rather than to every request', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'app.js'), 'utf8');
+    expect(src).toMatch(/app\.use\('\/api', limiters\.standard\)/);
+    expect(src).not.toMatch(/app\.use\(limiters\.standard\)/);
+  });
+});

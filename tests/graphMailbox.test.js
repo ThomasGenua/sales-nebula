@@ -358,6 +358,43 @@ describe('Auto-reply', () => {
     expect(JSON.parse(replyCall.body).comment).toContain(created.caseNumber);
   });
 
+  it('creates a lead from an inbound message, which never once worked', async () => {
+    // The create named `leadSource` — a Contact column, not a Lead one — and
+    // left out the required `company`, so this path threw on every message.
+    const account = await makeAccount({ autoCreateCase: false, autoCreateLead: true });
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/messages', { body: { value: [graphMessage()] } }],
+    ]);
+
+    const result = await graphMailbox.pollAccount(prisma, account);
+    expect(result.errors).toBe(0);
+    expect(result.leadsCreated).toBe(1);
+
+    const lead = await prisma.lead.findFirst({ where: { email: 'rita@contoso.com' } });
+    expect(lead).not.toBeNull();
+    expect(lead.firstName).toBe('Rita');
+    expect(lead.lastName).toBe('Okafor');
+    expect(lead.source).toBe('Email');
+    expect(lead.company).toBe('contoso.com');
+    expect(lead.status).toBe('New');
+  });
+
+  it('does not create a second lead for a sender it already has', async () => {
+    const account = await makeAccount({ autoCreateCase: false, autoCreateLead: true });
+    await prisma.lead.create({
+      data: { firstName: 'Rita', lastName: 'Okafor', email: 'rita@contoso.com', company: 'Contoso', status: 'New' },
+    });
+    stubFetch([
+      [TOKEN_URL, tokenResponse()],
+      ['/messages', { body: { value: [graphMessage()] } }],
+    ]);
+
+    const result = await graphMailbox.pollAccount(prisma, account);
+    expect(result.leadsCreated).toBe(0);
+    expect(await prisma.lead.count()).toBe(1);
+  });
+
   it('stays quiet when the account has not asked for it', async () => {
     const account = await makeAccount({ autoReply: false });
     stubFetch([

@@ -114,7 +114,7 @@ router.get('/metrics/performance', authenticate, requirePermission('admin', 'rea
 router.get('/alerts/rules', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rules = await prisma.monitoringAlertRule.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'desc' } }).catch(() => []);
+    const rules = await prisma.monitoringAlertRule.findMany({ orderBy: { createdAt: 'desc' } }).catch(() => []);
     res.json(rules);
   } catch (err) { next(err); }
 });

@@ -102,7 +102,7 @@ router.get('/record/:module/:id/unified', authenticate, async (req, res, next) =
     const [activities, notes, feedItems, emails] = await Promise.all([
       prisma.activity.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
       prisma.note.findMany({ where: { parentId: id, deletedAt: null }, select: { id: true, title: true, body: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
-      prisma.feedItem.findMany({ where: { parentId: id, deletedAt: null }, select: { id: true, body: true, type: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
+      prisma.feedItem.findMany({ where: { parentId: id }, select: { id: true, body: true, type: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
       prisma.email.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, status: true, sentAt: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
     ]);
     const timeline = [

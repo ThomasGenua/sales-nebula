@@ -7,3 +7,4 @@ src/generated/
 prisma/schema.sqlite.prisma
 uploads/
 coverage/
+private-exports/

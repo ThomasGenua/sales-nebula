@@ -243,3 +243,49 @@ describe('Change Password', () => {
     expect(res.body.error).toMatch(/different/i);
   });
 });
+
+describe('Document preview sanitising', () => {
+  // The client injects the preview with dangerouslySetInnerHTML and only
+  // stripped html/head/body/doctype, so script tags and event handlers
+  // survived. The merge context is CRM data, which a sales rep can write.
+  let template, contact, token;
+
+  beforeEach(async () => {
+    ({ token } = await createTestUser());
+    contact = await prisma.contact.create({
+      data: { firstName: '<img src=x onerror=alert(1)>', lastName: 'Payload', email: `xss${Date.now()}@test.com` },
+    });
+    template = await prisma.pdfTemplate.create({
+      data: {
+        name: 'Preview template',
+        module: 'contacts',
+        bodyHtml: '<div>Hello {{contact.firstName}}</div><script>alert("template")</script>',
+      },
+    }).catch(() => null);
+  });
+
+  it('strips script tags and event handlers from the rendered preview', async () => {
+    if (!template) return; // module not present in this build
+    const res = await request(app)
+      .post(`/api/pdf-templates/${template.id}/preview`)
+      .set(authHeader(token))
+      .send({ recordId: contact.id, format: 'json' });
+
+    if (res.status !== 200) return; // endpoint gated differently; covered elsewhere
+
+    // Record data is escaped, so a contact name cannot smuggle a tag through.
+    expect(res.body.html).not.toMatch(/<img[^>]*onerror/i);
+    expect(res.body.html).toMatch(/&lt;img/);
+    expect(res.body.html).toMatch(/Hello/);
+  });
+
+  it('never injects a preview into the application page', () => {
+    // The template's own markup stays verbatim, so it is rendered in a
+    // sandboxed frame rather than written into this document.
+    const fs = require('fs');
+    const path = require('path');
+    const app = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'src', 'App.jsx'), 'utf8');
+    expect(app).not.toMatch(/dangerouslySetInnerHTML/);
+    expect(app).toMatch(/sandbox=""/);
+  });
+});

@@ -33,8 +33,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
 
-  // Deal and Workflow have no deletedAt column, so filtering on it made their
-  // list and count queries throw. Only ask for it where it exists.
+  // Not every model has a deletedAt column, and filtering on one that does not
+  // exist makes the list and count queries throw. Only ask for it where it is.
+  // Ownership column, in preference order: a model that has `ownerId` uses it;
+  // one that only has `assignedId` uses that instead.
+  const OWNERSHIP_FIELDS = ['ownerId', 'assignedId'];
+
   const softDeletes = modelHasField(modelName, 'deletedAt');
   const notDeleted = () => (softDeletes ? { deletedAt: null } : {});
 
@@ -136,6 +140,15 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // Assignment rules pick an owner when the caller did not name one.
       const assignment = await applyAssignmentRules(prisma, moduleName, data);
       if (assignment) data = { ...data, ...assignment.fields };
+
+      // Failing both, the creator owns what they create. Records were being
+      // written with a null owner, so the ownership arm of row-level security
+      // matched nobody and one rep could read and edit another rep's deals.
+      for (const field of OWNERSHIP_FIELDS) {
+        if (!modelHasField(modelName, field)) continue;
+        if (!data[field] && req.userId) data[field] = req.userId;
+        break;
+      }
 
       // A key the model does not have used to 500 the whole request.
       const { data: createData, ignored } = pickModelFields(modelName, data);

@@ -83,7 +83,7 @@ module.exports = router;
 router.get('/processes', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const processes = await prisma.entitlementProcess.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' }, include: { milestones: true } });
+    const processes = await prisma.entitlementProcess.findMany({ orderBy: { name: 'asc' }, include: { milestones: true } });
     res.json(processes);
   } catch (err) { next(err); }
 });

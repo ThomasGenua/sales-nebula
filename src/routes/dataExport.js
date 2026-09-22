@@ -2,6 +2,22 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
+const fs = require('fs');
+const path = require('path');
+const { v4: uuid } = require('uuid');
+const { modelHasField } = require('../utils/modelFields');
+const { buildAccessFilter, applyAccessFilter, isAdmin } = require('../middleware/rowSecurity');
+
+// Never under a served path.
+const EXPORT_DIR = path.resolve(process.env.EXPORT_DIR || path.join(process.env.UPLOAD_DIR || './uploads', '..', 'private-exports'));
+
+/** Whether the caller's role grants at least read on a module. */
+function canRead(user, module) {
+  if (isAdmin(user)) return true;
+  const perm = user?.role?.permissions?.find(p => p.module === module);
+  return !!perm && ['read', 'edit', 'full'].includes(perm.level);
+}
+
 const router = Router();
 router.use(authenticate);
 
@@ -30,6 +46,11 @@ router.post('/', async (req, res, next) => {
     const { module, format = 'csv', filters, fields } = req.body;
     const modelName = MODEL_MAP[module];
     if (!modelName) return res.status(400).json({ error: 'Invalid module' });
+    if (!['csv', 'json'].includes(format)) return res.status(400).json({ error: 'format must be csv or json' });
+
+    // Exporting a module is reading it, in bulk. Any authenticated user could
+    // previously export every row of any module whatever their role allowed.
+    if (!canRead(req.user, module)) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
 
     const exportReq = await prisma.dataExport.create({
       data: { module, format, filters: filters || {}, fields: fields || [], requestedById: req.userId },
@@ -38,10 +59,15 @@ router.post('/', async (req, res, next) => {
     // Process immediately (in production this would be a background job)
     try {
       const where = {};
-      if (filters) {
-        Object.entries(filters).forEach(([k, v]) => { where[k] = v; });
+      if (filters && typeof filters === 'object') {
+        for (const [k, v] of Object.entries(filters)) {
+          // Plain equality on real columns only; no operators, no relations.
+          if (modelHasField(modelName, k) && (v === null || ['string', 'number', 'boolean'].includes(typeof v))) where[k] = v;
+        }
       }
-      const records = await prisma[modelName].findMany({ where, take: 50000 });
+      if (modelHasField(modelName, 'deletedAt')) where.deletedAt = null;
+      const accessFilter = await buildAccessFilter(prisma, req.user, module, { modelName });
+      const records = await prisma[modelName].findMany({ where: applyAccessFilter(where, accessFilter), take: 50000 });
 
       let content;
       if (format === 'json') {
@@ -50,7 +76,8 @@ router.post('/', async (req, res, next) => {
         // CSV
         if (records.length === 0) { content = ''; }
         else {
-          const cols = fields.length > 0 ? fields : Object.keys(records[0]).filter(k => typeof records[0][k] !== 'object');
+          const requested = Array.isArray(fields) ? fields.filter(f => modelHasField(modelName, f)) : [];
+          const cols = requested.length ? requested : Object.keys(records[0]).filter(k => typeof records[0][k] !== 'object');
           const header = cols.join(',');
           const rows = records.map(r => cols.map(c => {
             const val = r[c];
@@ -62,20 +89,19 @@ router.post('/', async (req, res, next) => {
         }
       }
 
-      const fs = require('fs');
-      const path = require('path');
-      const dir = process.env.UPLOAD_DIR || './uploads';
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const filename = `export_${module}_${Date.now()}.${format}`;
-      const filepath = path.join(dir, filename);
-      fs.writeFileSync(filepath, content);
+      // Written outside anything served, under a name nobody can guess. It
+      // used to be export_<module>_<Date.now()> in a publicly served folder.
+      fs.mkdirSync(EXPORT_DIR, { recursive: true });
+      const filename = `${uuid()}.${format}`;
+      fs.writeFileSync(path.join(EXPORT_DIR, filename), content);
 
+      const downloadUrl = `/api/data-export/${exportReq.id}/download`;
       await prisma.dataExport.update({
         where: { id: exportReq.id },
-        data: { status: 'completed', fileUrl: `/uploads/${filename}`, recordCount: records.length, completedAt: new Date() },
+        data: { status: 'completed', fileUrl: filename, recordCount: records.length, completedAt: new Date() },
       });
 
-      res.json({ ...exportReq, status: 'completed', fileUrl: `/uploads/${filename}`, recordCount: records.length });
+      res.json({ ...exportReq, status: 'completed', fileUrl: downloadUrl, recordCount: records.length });
     } catch (e) {
       await prisma.dataExport.update({ where: { id: exportReq.id }, data: { status: 'failed' } });
       res.json({ ...exportReq, status: 'failed', error: e.message });
@@ -89,8 +115,13 @@ router.get('/:id/download', async (req, res, next) => {
     const exp = await req.app.locals.prisma.dataExport.findUnique({ where: { id: req.params.id } });
     if (!exp || exp.requestedById !== req.userId) return res.status(404).json({ error: 'Not found' });
     if (!exp.fileUrl) return res.status(400).json({ error: 'Export not ready' });
-    const path = require('path');
-    res.download(path.resolve(exp.fileUrl.replace(/^\//, '')));
+    const name = path.basename(exp.fileUrl);
+    const full = path.join(EXPORT_DIR, name);
+    if (!/^[0-9a-f-]{36}\.(csv|json)$/i.test(name) || !fs.existsSync(full)) {
+      return res.status(404).json({ error: 'Export file is no longer available' });
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.download(full, `${exp.module}-export.${exp.format || 'csv'}`);
   } catch (err) { next(err); }
 });
 

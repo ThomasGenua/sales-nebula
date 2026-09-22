@@ -97,7 +97,10 @@ router.post('/', authenticate, requirePermission('cases', 'edit'), auditMiddlewa
     const bug = await prisma.bug.create({
       data: {
         bugNumber: await nextBugNumber(prisma),
-        title, description, stepsToReproduce, expectedResult, actualResult,
+        title, description, stepsToReproduce,
+        // The columns are expectedBehavior/actualBehavior; the request body
+        // keeps the friendlier names.
+        expectedBehavior: expectedResult, actualBehavior: actualResult,
         severity: severity || 'Major', priority: priority || 'Medium',
         type: type || 'Defect', status: assignedToId ? 'Assigned' : 'New',
         component, environment,
@@ -119,7 +122,7 @@ router.post('/', authenticate, requirePermission('cases', 'edit'), auditMiddlewa
         data: { description: { set: undefined } },
       }).catch(() => {});
       await prisma.bugComment.create({
-        data: { bugId: bug.id, userId: req.user.id, body: `Reported from case ${caseId}`, isSystem: true },
+        data: { bugId: bug.id, userId: req.user.id, body: `Reported from case ${caseId}`, isInternal: true },
       }).catch(() => {});
     }
 
@@ -250,7 +253,9 @@ router.get('/releases/all', authenticate, async (req, res, next) => {
     for (const r of releases) {
       const [fixed, open] = await Promise.all([
         prisma.bug.count({ where: { fixedInReleaseId: r.id, deletedAt: null } }),
-        prisma.bug.count({ where: { targetReleaseId: r.id, status: { in: OPEN_STATUSES }, deletedAt: null } }),
+        // Bug has no targetRelease; outstanding work against a release is
+        // what was found in it and is not yet closed.
+        prisma.bug.count({ where: { foundInReleaseId: r.id, status: { in: OPEN_STATUSES }, deletedAt: null } }),
       ]);
       enriched.push({ ...r, bugsFixed: fixed, bugsOutstanding: open });
     }
