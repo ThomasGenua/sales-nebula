@@ -147,7 +147,7 @@ router.post('/:id/clone', authenticate, auditMiddleware, async (req, res, next) 
     const original = await prisma.product.findUnique({ where: { id: req.params.id } });
     if (!original) return res.status(404).json({ error: 'Not found' });
     const { id, createdAt, updatedAt, code, ...data } = original;
-    const clone = await prisma.product.create({ data: { ...data, name: `${original.name} (Copy)`, code: code ? `${code}-COPY` : null, active: false } });
+    const clone = await prisma.product.create({ data: { ...data, name: `${original.name} (Copy)`, sku: code ? `${code}-COPY` : null, active: false } });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });

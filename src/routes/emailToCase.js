@@ -1,11 +1,34 @@
+const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 
+const sameSecret = (given, expected) => {
+  const a = Buffer.from(String(given || ''));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+/**
+ * The inbound endpoints open cases for whoever calls them, so only the mail
+ * provider may: it sends EMAIL_TO_CASE_SECRET as an X-Webhook-Secret header,
+ * or as the password of HTTP basic auth for providers that can only put
+ * credentials in the webhook URL. Unset, the endpoints stay closed.
+ */
+function requireInboundSecret(req, res, next) {
+  const expected = process.env.EMAIL_TO_CASE_SECRET;
+  if (!expected) return res.status(503).json({ error: 'Email-to-case is not configured' });
+  const basic = /^Basic\s+(.+)$/i.exec(req.get('authorization') || '');
+  const password = basic ? Buffer.from(basic[1], 'base64').toString('utf8').split(':').slice(1).join(':') : null;
+  if (sameSecret(req.get('x-webhook-secret'), expected) || sameSecret(password, expected)) return next();
+  return res.status(401).json({ error: 'Invalid webhook secret' });
+}
+
 // Receive inbound email (webhook endpoint)
-router.post('/inbound', async (req, res, next) => {
+router.post('/inbound', requireInboundSecret, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { from, to, subject, body, htmlBody, threadId, messageId, attachments, headers } = req.body;
@@ -15,8 +38,12 @@ router.post('/inbound', async (req, res, next) => {
     let existingCase = null;
     if (threadId) existingCase = await prisma.case.findFirst({ where: { emailThreadId: threadId } });
     if (!existingCase && subject) {
-      const caseRefMatch = subject.match(/\[Case#(\d+)\]/);
-      if (caseRefMatch) existingCase = await prisma.case.findFirst({ where: { caseNumber: caseRefMatch[1] } });
+      // Case numbers read "CS-001"; a tag may carry the whole number or just its digits.
+      const caseRefMatch = subject.match(/\[Case#\s*([\w-]+)\]/i);
+      if (caseRefMatch) {
+        const ref = caseRefMatch[1];
+        existingCase = await prisma.case.findFirst({ where: { caseNumber: { in: [ref, `${CASE_NUMBER.prefix}${ref}`] } } });
+      }
     }
     if (!existingCase && messageId) {
       existingCase = await prisma.case.findFirst({ where: { lastEmailMessageId: messageId } });
@@ -33,6 +60,7 @@ router.post('/inbound', async (req, res, next) => {
     if (existingCase) {
       await prisma.caseComment.create({
         // CaseComment stores the message in "text"; "body" is not a column.
+        // The customer wrote it, so there is no internal author to name.
         data: { caseId: existingCase.id, text: body || htmlBody || subject, isPublic: true, authorEmail: emailAddr },
       });
       await prisma.case.update({
@@ -47,10 +75,15 @@ router.post('/inbound', async (req, res, next) => {
       if (subjectLower.includes('urgent') || subjectLower.includes('critical') || subjectLower.includes('emergency')) priority = 'Critical';
       else if (subjectLower.includes('important') || subjectLower.includes('asap')) priority = 'High';
 
-      const newCase = await prisma.case.create({
+      // The webhook carries attachment metadata only, never the file, so
+      // there is nothing to store as an Attachment. Say what arrived instead.
+      const attachmentNote = attachments?.length
+        ? `\n\nAttachments received but not stored: ${attachments.map(a => a.filename).filter(Boolean).join(', ')}`
+        : '';
+      const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
         data: {
           subject: subject.replace(/^(Re:|Fwd?:|FW:)\s*/gi, '').trim(),
-          description: body || htmlBody || '', origin: 'Email',
+          description: (body || htmlBody || '') + attachmentNote, origin: 'Email',
           status: config.defaultStatus || 'New', priority,
           contactEmail: emailAddr, emailThreadId: threadId || null,
           lastEmailMessageId: messageId || null, emailCount: 1,
@@ -58,22 +91,13 @@ router.post('/inbound', async (req, res, next) => {
         },
       });
 
-      // Process attachments
-      if (attachments?.length) {
-        for (const att of attachments) {
-          await prisma.attachment.create({
-            data: { name: att.filename, parentModule: 'cases', parentId: newCase.id, mimeType: att.contentType, fileSize: att.size || 0 },
-          }).catch(() => {});
-        }
-      }
-
       res.status(201).json({ action: 'case_created', caseId: newCase.id, caseNumber: newCase.caseNumber });
     }
   } catch (err) { next(err); }
 });
 
 // Bulk inbound (batch processing)
-router.post('/inbound/bulk', async (req, res, next) => {
+router.post('/inbound/bulk', requireInboundSecret, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { emails } = req.body;
@@ -82,7 +106,7 @@ router.post('/inbound/bulk', async (req, res, next) => {
     for (const email of emails.slice(0, 50)) {
       try {
         const contact = await prisma.contact.findFirst({ where: { email: { equals: email.from, mode: 'insensitive' } } });
-        const c = await prisma.case.create({
+        const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
           data: { subject: email.subject || 'No Subject', description: email.body || '', origin: 'Email', status: 'New', priority: 'Medium', contactEmail: email.from, ...(contact && { contactId: contact.id }) },
         });
         results.push({ email: email.from, action: 'created', caseId: c.id });

@@ -185,7 +185,7 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Module | Endpoint | Description |
 |--------|----------|-------------|
 | Cases | `/api/cases` | Case management with comments, escalation, priority routing |
-| Email-to-Case | `/api/public/email-to-case` | Inbound email auto-creates cases (public, no auth) |
+| Email-to-Case | `/api/public/email-to-case` | Inbound email auto-creates cases (webhook; requires `EMAIL_TO_CASE_SECRET`) |
 | Web-to-Case | `/api/public/web-to-case` | Web form submission creates cases (public, no auth) |
 | Knowledge | `/api/knowledge` | Articles with categories, versioning, attachments, search |
 | Entitlements | `/api/entitlements` | Service entitlements with milestones |

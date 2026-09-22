@@ -74,14 +74,16 @@ router.post('/discount-schedules', requirePermission('products', 'edit'), async 
 router.post('/discount-schedules/calculate', async (req, res, next) => {
   try {
     const { productId, quantity } = req.body;
-    const schedule = await req.app.locals.prisma.discountSchedule.findFirst({ where: { productId, active: true } });
+    // A schedule reaches its products through ProductDiscountSchedule, and a
+    // tier's columns are minQuantity / maxQuantity / discountPercent. minQty,
+    // maxQty and discount were never set, so no quantity earned a discount.
+    const schedule = await req.app.locals.prisma.discountSchedule.findFirst({
+      where: { active: true, products: { some: { productId } } },
+      include: { tiers: { orderBy: { minQuantity: 'asc' } } },
+    });
     if (!schedule) return res.json({ discount: 0, type: 'none' });
-    const tiers = schedule.tiers || [];
-    let discount = 0;
-    for (const tier of tiers) {
-      if (quantity >= tier.minQty && (!tier.maxQty || quantity <= tier.maxQty)) { discount = tier.discount; break; }
-    }
-    res.json({ discount, type: schedule.type, tier: tiers.find(t => quantity >= t.minQty && (!t.maxQty || quantity <= t.maxQty)) });
+    const tier = schedule.tiers.find(t => quantity >= t.minQuantity && (t.maxQuantity == null || quantity <= t.maxQuantity));
+    res.json({ discount: tier?.discountPercent || 0, type: schedule.type, tier });
   } catch (err) { next(err); }
 });
 

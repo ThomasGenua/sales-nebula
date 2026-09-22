@@ -4,8 +4,9 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
-const { pickModelFields, modelHasField } = require('./modelFields');
+const { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
+const { createNumbered } = require('./numbering');
 const {
   checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
 } = require('../services/recordRules');
@@ -17,7 +18,7 @@ const {
 function createCrudRouter(modelName, moduleName, options = {}) {
   const router = Router();
   const {
-    include = {},
+    include: requestedInclude = {},
     searchFilter,
     beforeCreate,
     afterCreate,
@@ -26,7 +27,17 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     validate,
     orderBy = { createdAt: 'desc' },
     customRoutes,
+    // { field, prefix, width }: the record's human-readable number, which the
+    // server assigns on create (see utils/numbering).
+    numbering,
   } = options;
+
+  // Relations the model really has go to Prisma; `account` on a model with only
+  // `accountId` is loaded separately, so the response keeps its shape.
+  const { prismaInclude: include, manual: manualIncludes } = resolveInclude(modelName, requestedInclude);
+
+  // Hand a non-id segment on to the module's own routes (`/count`, `/stats`).
+  const idParam = (req, res, next) => (looksLikeId(modelName, req.params.id) ? next() : next('route'));
 
   // Apply auth + audit to all routes
   router.use(authenticate, auditMiddleware);
@@ -76,6 +87,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         prisma[modelName].count({ where }),
       ]);
 
+      await hydrateIncludes(prisma, records, manualIncludes);
       res.json({
         data: records,
         meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) },
@@ -84,7 +96,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // GET ONE - GET /:id
-  router.get('/:id', requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
+  router.get('/:id', idParam, requirePermission(moduleName, 'read'), guard(), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const record = await prisma[modelName].findFirst({
@@ -97,6 +109,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Read'))) {
         return res.status(404).json({ error: 'Not found' });
       }
+      await hydrateIncludes(prisma, record, manualIncludes);
       res.json(record);
     } catch (err) { next(err); }
   });
@@ -152,7 +165,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       // A key the model does not have used to 500 the whole request.
       const { data: createData, ignored } = pickModelFields(modelName, data);
-      const record = await prisma[modelName].create({ data: createData, include });
+      const record = numbering
+        ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
+        : await prisma[modelName].create({ data: createData, include });
+      await hydrateIncludes(prisma, record, manualIncludes);
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
 
@@ -191,7 +207,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // UPDATE - PUT /:id
-  router.put('/:id', requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
+  router.put('/:id', idParam, requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       let data = { ...req.body };
@@ -240,6 +256,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         data: updateData,
         include,
       });
+      await hydrateIncludes(prisma, record, manualIncludes);
 
       // Field-level audit
       const changes = diffFields(oldRecord, data);
@@ -276,7 +293,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // DELETE - DELETE /:id
-  router.delete('/:id', requirePermission(moduleName, 'full'), guard({ minLevel: 'Full' }), async (req, res, next) => {
+  router.delete('/:id', idParam, requirePermission(moduleName, 'full'), guard({ minLevel: 'Full' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
 

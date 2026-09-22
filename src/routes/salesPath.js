@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -16,7 +17,7 @@ router.get('/', authenticate, async (req, res, next) => {
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const path = await prisma.salesPath.findUnique({ where: { id: req.params.id }, include: { stages: { orderBy: { order: 'asc' } } } });
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Sales path not found' });
     res.json(path);
   } catch (err) { next(err); }
@@ -27,30 +28,35 @@ router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddlewa
     const prisma = req.app.locals.prisma;
     const { name, module, stages } = req.body;
     if (!name || !module) return res.status(400).json({ error: 'name and module required' });
-    const path = await prisma.salesPath.create({
-      data: {
-        name, module, active: true, createdById: req.user.id,
-        ...(stages?.length && {
-          stages: { create: stages.map((s, i) => ({ name: s.name, guidance: s.guidance || '', fields: s.fields || [], successCriteria: s.successCriteria || '', order: i + 1 })) },
-        }),
-      },
-      include: { stages: true },
-    });
+    // A path declares no relation to its stages, so they cannot be created
+    // nested inside it; that threw whenever stages were given.
+    const created = await prisma.salesPath.create({ data: { name, module, active: true, createdById: req.user.id } });
+    if (stages?.length) {
+      await prisma.salesPathStage.createMany({
+        data: stages.map((s, i) => ({ salesPathId: created.id, name: s.name, guidance: s.guidance || '', fields: s.fields || [], successCriteria: s.successCriteria ?? undefined, position: i + 1 })),
+      });
+    }
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: created.id }, include: { stages: true } });
     res.status(201).json(path);
   } catch (err) { next(err); }
 });
 
 router.put('/:id', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const path = await prisma.salesPath.update({ where: { id: req.params.id }, data: req.body }); res.json(path); } catch (err) { next(err); }
+  try {
+    const prisma = req.app.locals.prisma;
+    const { id, createdById, createdAt, updatedAt, deletedAt, stages, ...body } = req.body;
+    const path = await prisma.salesPath.update({ where: { id: req.params.id }, data: pickModelFields('salesPath', body).data });
+    res.json(path);
+  } catch (err) { next(err); }
 });
 
 // Get guidance for current stage
 router.get('/:module/current/:stage', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const path = await prisma.salesPath.findFirst({
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findFirst', {
       where: { module: req.params.module, active: true, deletedAt: null },
-      include: { stages: { orderBy: { order: 'asc' } } },
+      include: { stages: { orderBy: { position: 'asc' } } },
     });
     if (!path) return res.json({ guidance: null });
     const currentStage = path.stages.find(s => s.name === req.params.stage);
@@ -71,9 +77,9 @@ router.post('/:id/stages', authenticate, requirePermission('admin', 'edit'), asy
     const prisma = req.app.locals.prisma;
     const { name, guidance, fields, successCriteria, order } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const maxOrder = await prisma.salesPathStage.aggregate({ where: { salesPathId: req.params.id }, _max: { order: true } });
+    const last = await prisma.salesPathStage.aggregate({ where: { salesPathId: req.params.id }, _max: { position: true } });
     const stage = await prisma.salesPathStage.create({
-      data: { salesPathId: req.params.id, name, guidance, fields: fields || [], successCriteria, order: order || (maxOrder._max.order || 0) + 1 },
+      data: { salesPathId: req.params.id, name, guidance, fields: fields || [], successCriteria, position: order || (last._max.position || 0) + 1 },
     });
     res.status(201).json(stage);
   } catch (err) { next(err); }
@@ -89,7 +95,7 @@ module.exports = router;
 router.get('/:pathId/deal/:dealId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const path = await prisma.salesPath.findUnique({ where: { id: req.params.pathId }, include: { stages: { orderBy: { order: 'asc' } } } });
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.pathId }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Path not found' });
     const deal = await prisma.deal.findUnique({ where: { id: req.params.dealId } });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
@@ -107,7 +113,17 @@ router.post('/:pathId/stages/:stageId/coaching', authenticate, requirePermission
   try {
     const prisma = req.app.locals.prisma;
     const { tips, requiredFields, keyActions, successCriteria } = req.body;
-    const stage = await prisma.salesPathStage.update({ where: { id: req.params.stageId }, data: { coachingTips: tips, requiredFields: requiredFields || [], keyActions: keyActions || [], successCriteria: successCriteria || [] } });
+    // A stage's coaching text is its guidance and its required fields are its
+    // fields; only what the caller sends is changed.
+    const stage = await prisma.salesPathStage.update({
+      where: { id: req.params.stageId },
+      data: {
+        ...(tips !== undefined && { guidance: Array.isArray(tips) ? tips.join('\n') : tips }),
+        ...(requiredFields !== undefined && { fields: requiredFields }),
+        ...(keyActions !== undefined && { keyActions }),
+        ...(successCriteria !== undefined && { successCriteria }),
+      },
+    });
     res.json(stage);
   } catch (err) { next(err); }
 });
@@ -116,7 +132,7 @@ router.post('/:pathId/stages/:stageId/coaching', authenticate, requirePermission
 router.get('/:id/analytics', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const path = await prisma.salesPath.findUnique({ where: { id: req.params.id }, include: { stages: { orderBy: { order: 'asc' } } } });
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Not found' });
     const stageNames = path.stages.map(s => s.name);
     const stageStats = [];
@@ -126,8 +142,9 @@ router.get('/:id/analytics', authenticate, async (req, res, next) => {
         prisma.deal.count({ where: { stage: 'Closed Won', deletedAt: null } }),
         prisma.deal.count({ where: { stage: 'Closed Lost', deletedAt: null } }),
       ]);
-      const history = await prisma.dealStageHistory.findMany({ where: { stage: stageName }, select: { daysInStage: true } });
-      const avgDays = history.length ? history.reduce((s, h) => s + (h.daysInStage || 0), 0) / history.length : 0;
+      // A history row's duration is the days the deal spent in fromStage.
+      const history = await prisma.dealStageHistory.findMany({ where: { fromStage: stageName, duration: { not: null } }, select: { duration: true } });
+      const avgDays = history.length ? history.reduce((s, h) => s + h.duration, 0) / history.length : 0;
       stageStats.push({ stage: stageName, activeDeals: count, avgDaysInStage: Math.round(avgDays * 10) / 10 });
     }
     res.json({ pathId: path.id, pathName: path.name, stages: stageStats, totalActiveDeals: stageStats.reduce((s, st) => s + st.activeDeals, 0) });
@@ -141,9 +158,9 @@ router.put('/:id/reorder', authenticate, requirePermission('admin', 'full'), asy
     const { stageIds } = req.body;
     if (!stageIds?.length) return res.status(400).json({ error: 'stageIds array required' });
     for (let i = 0; i < stageIds.length; i++) {
-      await prisma.salesPathStage.update({ where: { id: stageIds[i] }, data: { order: i } });
+      await prisma.salesPathStage.update({ where: { id: stageIds[i] }, data: { position: i } });
     }
-    const path = await prisma.salesPath.findUnique({ where: { id: req.params.id }, include: { stages: { orderBy: { order: 'asc' } } } });
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
     res.json(path);
   } catch (err) { next(err); }
 });

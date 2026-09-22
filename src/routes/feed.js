@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -13,7 +14,7 @@ router.get('/:module/:id', authenticate, async (req, res, next) => {
     const where = { parentModule: mod, parentId: id };
     if (before) where.createdAt = { lt: new Date(before) };
     
-    const entries = await prisma.feedItem.findMany({
+    const entries = await queryWithIncludes(prisma, 'feedItem', 'findMany', {
       where, orderBy: { createdAt: 'desc' }, take: +limit,
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
@@ -28,12 +29,12 @@ router.post('/:module/:id', authenticate, auditMiddleware, async (req, res, next
     const { module: mod, id } = req.params;
     const { type, body, visibility } = req.body;
     if (!body?.trim()) return res.status(400).json({ error: 'body required' });
-    const entry = await prisma.feedItem.create({
+    const entry = await queryWithIncludes(prisma, 'feedItem', 'create', {
       data: {
         parentModule: mod, parentId: id,
         type: type || 'TextPost', body: body.trim(),
         visibility: visibility || 'AllUsers',
-        userId: req.user.id,
+        authorId: req.user.id,
       },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
@@ -51,8 +52,8 @@ router.post('/:entryId/comment', authenticate, async (req, res, next) => {
     if (!body?.trim()) return res.status(400).json({ error: 'body required' });
     const parent = await prisma.feedItem.findUnique({ where: { id: req.params.entryId } });
     if (!parent) return res.status(404).json({ error: 'Feed entry not found' });
-    const comment = await prisma.feedComment.create({
-      data: { feedItemId: req.params.entryId, body: body.trim(), userId: req.user.id },
+    const comment = await queryWithIncludes(prisma, 'feedComment', 'create', {
+      data: { feedItemId: req.params.entryId, body: body.trim(), authorId: req.user.id },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
     res.status(201).json(comment);

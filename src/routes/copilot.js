@@ -173,7 +173,8 @@ router.get('/suggestions', authenticate, async (req, res, next) => {
     if (overdueTasks > 0) suggestions.push({ priority: 'high', action: 'Complete overdue tasks', details: `${overdueTasks} tasks are past due`, link: '/activities' });
     const stalledDeals = await prisma.deal.findMany({ where: { ownerId: userId, stage: { notIn: ['Closed Won', 'Closed Lost'] }, updatedAt: { lt: new Date(Date.now() - 7 * 86400000) }, deletedAt: null }, take: 5 });
     stalledDeals.forEach(d => suggestions.push({ priority: 'medium', action: `Follow up on "${d.name}"`, details: `No updates in ${Math.floor((Date.now() - new Date(d.updatedAt)) / 86400000)} days`, link: `/deals/${d.id}` }));
-    const pendingApprovals = await prisma.approvalRequest.count({ where: { approverId: userId, status: 'Pending' } }).catch(() => 0);
+    // Approvers are named on the steps, not on the request.
+    const pendingApprovals = await prisma.approvalStep.count({ where: { approverId: userId, status: 'Pending', request: { status: 'Pending' } } });
     if (pendingApprovals > 0) suggestions.push({ priority: 'high', action: 'Review pending approvals', details: `${pendingApprovals} awaiting your approval`, link: '/approvals' });
     const newLeads = await prisma.lead.count({ where: { ownerId: userId, status: 'New', deletedAt: null } });
     if (newLeads > 0) suggestions.push({ priority: 'medium', action: 'Qualify new leads', details: `${newLeads} uncontacted leads`, link: '/leads' });

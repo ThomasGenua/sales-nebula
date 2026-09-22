@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
@@ -104,7 +105,7 @@ router.get('/:id/executions', authenticate, async (req, res, next) => {
 router.post('/:id/test', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const flow = await prisma.flowDefinition.findUnique({ where: { id: req.params.id }, include: { elements: { orderBy: { order: 'asc' } } } });
+    const flow = await queryWithIncludes(prisma, 'flowDefinition', 'findUnique', { where: { id: req.params.id }, include: { elements: { orderBy: { order: 'asc' } } } });
     if (!flow) return res.status(404).json({ error: 'Not found' });
     const { testData } = req.body;
     const results = [];

@@ -42,7 +42,7 @@ router.post('/:id/deploy', authenticate, requirePermission('admin', 'full'), aud
     const { components, description } = req.body;
     if (!components?.length) return res.status(400).json({ error: 'components required' });
     const deployment = await prisma.deployment.create({
-      data: { environmentId: req.params.id, components, description, status: 'Pending', deployedById: req.user.id },
+      data: { environmentId: req.params.id, components, description, status: 'Pending', userId: req.user.id },
     });
     // Simulate deployment
     setTimeout(async () => {
@@ -85,7 +85,7 @@ router.post('/change-sets', authenticate, requirePermission('admin', 'full'), au
     const prisma = req.app.locals.prisma;
     const { name, components, sourceEnvironmentId, targetEnvironmentId } = req.body;
     const cs = await prisma.deployment.create({
-      data: { name, components, environmentId: targetEnvironmentId, sourceEnvironmentId, status: 'Draft', deployedById: req.user.id },
+      data: { name, components, environmentId: targetEnvironmentId, sourceEnvironmentId, status: 'Draft', userId: req.user.id },
     });
     res.status(201).json(cs);
   } catch (err) { next(err); }

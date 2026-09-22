@@ -71,12 +71,13 @@ router.get('/:id/warranty', authenticate, async (req, res, next) => {
     const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!asset) return res.status(404).json({ error: 'Asset not found' });
     const now = new Date();
-    const warrantyEnd = asset.warrantyEnd ? new Date(asset.warrantyEnd) : null;
+    // warrantyEnd/warrantyStart were never columns, so every asset read as
+    // out of warranty. warrantyEndDate is the column the asset form writes.
+    const warrantyEnd = asset.warrantyEndDate ? new Date(asset.warrantyEndDate) : null;
     res.json({
       assetId: asset.id,
       name: asset.name,
-      warrantyStart: asset.warrantyStart,
-      warrantyEnd: asset.warrantyEnd,
+      warrantyEnd: asset.warrantyEndDate,
       underWarranty: warrantyEnd ? warrantyEnd > now : false,
       daysRemaining: warrantyEnd ? Math.max(0, Math.ceil((warrantyEnd - now) / 86400000)) : null,
     });

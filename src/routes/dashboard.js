@@ -140,7 +140,7 @@ router.get('/widgets', authenticate, async (req, res, next) => {
     const staleDeals = await prisma.deal.findMany({ where: { ownerId: userId, stage: { notIn: ['Closed Won','Closed Lost'] }, updatedAt: { lt: new Date(Date.now() - 7*86400000) }, deletedAt: null }, take: 5, orderBy: { updatedAt: 'asc' } });
 
     // Overdue cases
-    const overdueCases = await prisma.case.findMany({ where: { ownerId: userId, status: { notIn: ['Closed','Resolved'] }, slaDeadline: { lt: new Date() }, deletedAt: null }, take: 5 }).catch(() => []);
+    const overdueCases = await prisma.case.findMany({ where: { ownerId: userId, status: { notIn: ['Closed','Resolved'] }, slaDueAt: { lt: new Date() }, deletedAt: null }, take: 5 });
 
     res.json({ myTasks, staleDeals, overdueCases, taskCount: myTasks.length, staleDealCount: staleDeals.length, overdueCount: overdueCases.length });
   } catch (err) { next(err); }
@@ -156,7 +156,8 @@ router.get('/leaderboard', authenticate, async (req, res, next) => {
     const leaderboard = [];
     for (const u of users) {
       const [won, activities] = await Promise.all([
-        prisma.deal.aggregate({ where: { ownerId: u.id, stage: 'Closed Won', closedAt: { gte: since }, deletedAt: null }, _sum: { value: true }, _count: true }),
+        // A won deal's closeDate is when it closed; there is no closedAt.
+        prisma.deal.aggregate({ where: { ownerId: u.id, stage: 'Closed Won', closeDate: { gte: since }, deletedAt: null }, _sum: { value: true }, _count: true }),
         prisma.activity.count({ where: { ownerId: u.id, status: 'Completed', createdAt: { gte: since }, deletedAt: null } }),
       ]);
       if ((won._count || 0) > 0 || activities > 0) {

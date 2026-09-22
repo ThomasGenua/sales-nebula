@@ -5,6 +5,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
+const { queryWithIncludes } = require('../utils/modelFields');
 const router = Router();
 
 // ─── SSO CONFIG ───
@@ -191,7 +192,7 @@ router.get('/threats', authenticate, requirePermission('admin', 'read'), async (
 router.get('/sessions', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const recentLogins = await prisma.loginHistory.findMany({ where: { status: 'Success', loginTime: { gte: new Date(Date.now() - 8 * 3600000) } }, include: { user: { select: { firstName: true, lastName: true, email: true } } }, orderBy: { loginTime: 'desc' }, take: 50 });
+    const recentLogins = await queryWithIncludes(prisma, 'loginHistory', 'findMany', { where: { status: 'Success', loginTime: { gte: new Date(Date.now() - 8 * 3600000) } }, include: { user: { select: { firstName: true, lastName: true, email: true } } }, orderBy: { loginTime: 'desc' }, take: 50 });
     const sessions = recentLogins.map(l => ({ userId: l.userId, user: l.user, ip: l.sourceIp, browser: l.browser, loginTime: l.loginTime }));
     res.json({ activeSessions: sessions.length, sessions });
   } catch (err) { next(err); }

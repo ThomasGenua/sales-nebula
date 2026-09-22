@@ -911,18 +911,17 @@ async function main() {
   }
 
   // ─── SALES PATH ───
-  await prisma.salesPath.create({ data: {
-    module: 'deals',
-    active: true,
-    steps: { create: [
-      { stageName: 'Prospecting', stepOrder: 0, guidance: 'Research the company and identify key stakeholders. Prepare a compelling value proposition.', keyFields: ['name', 'accountId', 'value'], successCriteria: 'Initial meeting scheduled' },
-      { stageName: 'Qualification', stepOrder: 1, guidance: 'Confirm budget, authority, need, and timeline (BANT). Understand their pain points deeply.', keyFields: ['value', 'closeDate', 'probability'], successCriteria: 'BANT criteria confirmed' },
-      { stageName: 'Proposal', stepOrder: 2, guidance: 'Build a tailored proposal addressing their specific needs. Include ROI analysis and competitive differentiators.', keyFields: ['value', 'closeDate'], successCriteria: 'Proposal delivered and reviewed' },
-      { stageName: 'Negotiation', stepOrder: 3, guidance: 'Address objections, negotiate terms. Involve legal for contract review. Prepare for close.', keyFields: ['value', 'closeDate', 'probability'], successCriteria: 'Terms agreed upon' },
-      { stageName: 'Closed Won', stepOrder: 4, guidance: 'Execute contract, schedule onboarding, introduce customer success team.', successCriteria: 'Contract signed' },
-    ]},
-  }});
-  console.log('  1 sales path with 5 steps');
+  // The API reads a path's stages from SalesPathStage; the SalesPathStep rows
+  // this used to write were never shown anywhere.
+  const dealPath = await prisma.salesPath.create({ data: { name: 'Deal Path', module: 'deals', active: true } });
+  await prisma.salesPathStage.createMany({ data: [
+    { salesPathId: dealPath.id, name: 'Prospecting', position: 0, guidance: 'Research the company and identify key stakeholders. Prepare a compelling value proposition.', fields: ['name', 'accountId', 'value'], successCriteria: 'Initial meeting scheduled' },
+    { salesPathId: dealPath.id, name: 'Qualification', position: 1, guidance: 'Confirm budget, authority, need, and timeline (BANT). Understand their pain points deeply.', fields: ['value', 'closeDate', 'probability'], successCriteria: 'BANT criteria confirmed' },
+    { salesPathId: dealPath.id, name: 'Proposal', position: 2, guidance: 'Build a tailored proposal addressing their specific needs. Include ROI analysis and competitive differentiators.', fields: ['value', 'closeDate'], successCriteria: 'Proposal delivered and reviewed' },
+    { salesPathId: dealPath.id, name: 'Negotiation', position: 3, guidance: 'Address objections, negotiate terms. Involve legal for contract review. Prepare for close.', fields: ['value', 'closeDate', 'probability'], successCriteria: 'Terms agreed upon' },
+    { salesPathId: dealPath.id, name: 'Closed Won', position: 4, guidance: 'Execute contract, schedule onboarding, introduce customer success team.', successCriteria: 'Contract signed' },
+  ]});
+  console.log('  1 sales path with 5 stages');
 
   // ─── MACROS ───
   await Promise.all([

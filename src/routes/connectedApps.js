@@ -12,7 +12,7 @@ const router = Router();
 router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const apps = await req.app.locals.prisma.connectedApp.findMany({ orderBy: { createdAt: 'desc' } });
-    res.json({ data: apps.map(a => ({ ...a, clientSecret: a.clientSecret.slice(0, 8) + '...' })) });
+    res.json({ data: apps.map(({ apiTokenHash, ...a }) => ({ ...a, clientSecret: a.clientSecret.slice(0, 8) + '...' })) });
   } catch (err) { next(err); }
 });
 
@@ -100,7 +100,7 @@ router.get('/:id/usage', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const app = await prisma.connectedApp.findUnique({ where: { id: req.params.id } });
     if (!app) return res.status(404).json({ error: 'Not found' });
-    const logs = await prisma.connectedAppLog.findMany({ where: { appId: req.params.id }, orderBy: { createdAt: 'desc' }, take: 50 }).catch(() => []);
+    const logs = await prisma.connectedAppLog.findMany({ where: { connectedAppId: req.params.id }, orderBy: { createdAt: 'desc' }, take: 50 });
     res.json({ appId: app.id, name: app.name, totalCalls: logs.length, lastUsed: logs[0]?.createdAt, logs: logs.slice(0, 10) });
   } catch (err) { next(err); }
 });
@@ -115,12 +115,15 @@ router.post('/:id/revoke', authenticate, requirePermission('admin', 'full'), asy
 });
 
 // Refresh app token
-router.post('/:id/refresh-token', authenticate, async (req, res, next) => {
+// Any signed-in user could do this before, and the token was stored in the
+// clear. It now takes the same admin rights as revoking the app.
+router.post('/:id/refresh-token', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const crypto = require('crypto');
     const newToken = crypto.randomBytes(32).toString('hex');
-    const updated = await prisma.connectedApp.update({ where: { id: req.params.id }, data: { apiToken: newToken, tokenRefreshedAt: new Date() } });
+    const apiTokenHash = crypto.createHash('sha256').update(newToken).digest('hex');
+    await prisma.connectedApp.update({ where: { id: req.params.id }, data: { apiTokenHash, tokenRefreshedAt: new Date() } });
     res.json({ message: 'Token refreshed', token: newToken });
   } catch (err) { next(err); }
 });

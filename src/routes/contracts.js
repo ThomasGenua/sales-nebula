@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { createNumbered, CONTRACT_NUMBER } = require('../utils/numbering');
 
 const router = createCrudRouter('contract', 'contracts', {
   include: {
@@ -14,6 +15,7 @@ const router = createCrudRouter('contract', 'contracts', {
       { name: { contains: q, mode: 'insensitive' } },
     ],
   }),
+  numbering: CONTRACT_NUMBER,
 });
 
 // Activate contract
@@ -49,7 +51,7 @@ router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), 
     const original = await prisma.contract.findUnique({ where: { id: req.params.id } });
     if (!original) return res.status(404).json({ error: 'Contract not found' });
     const { id, createdAt, updatedAt, contractNumber, ...contractData } = original;
-    const amendment = await prisma.contract.create({
+    const amendment = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
         ...contractData, ...req.body,
         name: `${original.name} (Amendment)`,
@@ -71,7 +73,7 @@ router.post('/:id/renew', authenticate, requirePermission('contracts', 'edit'), 
     const { months = 12, priceAdjustment } = req.body;
     const newStart = original.endDate ? new Date(original.endDate) : new Date();
     const newEnd = new Date(newStart); newEnd.setMonth(newEnd.getMonth() + months);
-    const renewed = await prisma.contract.create({
+    const renewed = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
         name: `${original.name} (Renewal)`, accountId: original.accountId, dealId: original.dealId,
         startDate: newStart, endDate: newEnd, status: 'Draft', parentContractId: original.id,

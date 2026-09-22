@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -97,7 +98,7 @@ router.post('/:id/attendees', authenticate, async (req, res, next) => {
 router.get('/:id/attendees', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const attendees = await prisma.eventAttendee.findMany({ where: { eventId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } } });
+    const attendees = await queryWithIncludes(prisma, 'eventAttendee', 'findMany', { where: { eventId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } } });
     res.json(attendees);
   } catch (err) { next(err); }
 });
@@ -124,12 +125,12 @@ router.post('/:id/recurrence', authenticate, async (req, res, next) => {
     const created = [];
     const intervalMs = { daily: 86400000, weekly: 604800000, monthly: 2592000000 }[frequency] * (interval || 1);
     const maxCount = Math.min(count || 12, 52);
-    let startTime = new Date(parent.startDateTime).getTime();
+    let startTime = new Date(parent.startDate).getTime();
     for (let i = 0; i < maxCount; i++) {
       startTime += intervalMs;
       if (endDate && startTime > new Date(endDate).getTime()) break;
-      const dur = parent.endDateTime ? new Date(parent.endDateTime) - new Date(parent.startDateTime) : 3600000;
-      const ev = await prisma.event.create({ data: { subject: parent.subject, description: parent.description, location: parent.location, startDateTime: new Date(startTime), endDateTime: new Date(startTime + dur), type: parent.type, ownerId: parent.ownerId, recurrenceParentId: parent.id } });
+      const dur = parent.endDate ? new Date(parent.endDate) - new Date(parent.startDate) : 3600000;
+      const ev = await prisma.event.create({ data: { name: parent.name, description: parent.description, location: parent.location, startDate: new Date(startTime), endDate: new Date(startTime + dur), type: parent.type, ownerId: parent.ownerId, recurrenceParentId: parent.id } });
       created.push(ev.id);
     }
     res.json({ parentId: parent.id, createdEvents: created.length, eventIds: created });
@@ -142,9 +143,9 @@ router.get('/calendar/range', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end dates required' });
-    const events = await prisma.event.findMany({ where: { startDateTime: { gte: new Date(start) }, endDateTime: { lte: new Date(end) }, deletedAt: null }, orderBy: { startDateTime: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
+    const events = await queryWithIncludes(prisma, 'event', 'findMany', { where: { startDate: { gte: new Date(start) }, endDate: { lte: new Date(end) }, deletedAt: null }, orderBy: { startDate: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
     const grouped = {};
-    events.forEach(e => { const day = new Date(e.startDateTime).toISOString().split('T')[0]; (grouped[day] = grouped[day] || []).push(e); });
+    events.forEach(e => { const day = new Date(e.startDate).toISOString().split('T')[0]; (grouped[day] = grouped[day] || []).push(e); });
     res.json({ range: { start, end }, totalEvents: events.length, byDate: grouped });
   } catch (err) { next(err); }
 });
@@ -156,7 +157,7 @@ router.post('/:id/reminder', authenticate, async (req, res, next) => {
     const { minutesBefore } = req.body;
     const event = await prisma.event.findUnique({ where: { id: req.params.id } });
     if (!event) return res.status(404).json({ error: 'Not found' });
-    const reminderTime = new Date(new Date(event.startDateTime).getTime() - (minutesBefore || 15) * 60000);
+    const reminderTime = new Date(new Date(event.startDate).getTime() - (minutesBefore || 15) * 60000);
     await prisma.event.update({ where: { id: req.params.id }, data: { reminderMinutes: minutesBefore || 15, reminderAt: reminderTime } });
     res.json({ eventId: event.id, reminderAt: reminderTime, minutesBefore: minutesBefore || 15 });
   } catch (err) { next(err); }

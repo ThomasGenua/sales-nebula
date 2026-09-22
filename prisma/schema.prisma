@@ -40,6 +40,9 @@ model User {
   ownedCampaigns     Campaign[]         @relation("CampaignOwner")
   knowledgeArticles  KnowledgeArticle[] @relation("ArticleAuthor")
   reports            Report[]           @relation("ReportsCreated")
+  // Written by the routes, never migrated until now.
+  contactId String?
+  isPortalUser Boolean   @default(false)
   @@index([roleId])
   teamMemberships TeamMember[] @relation("TeamMembers")
   deployments    Deployment[]      @relation
@@ -104,6 +107,8 @@ model Contact {
   customValues CustomFieldValue[]
   campaignRecipients CampaignRecipient[]
   contracts    Contract[]  @relation("ContractContact")
+  // Written by the routes, never migrated until now.
+  mergedIntoId String?
   @@index([accountId])
   @@index([ownerId])
 }
@@ -178,6 +183,8 @@ model Deal {
   dealCompetitors DealCompetitor[]
   type String?
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  partnerId String?
 
   @@index([accountId])
   @@index([contactId])
@@ -237,6 +244,8 @@ model Account {
   entitlements  Entitlement[]
   accountTeams  AccountTeam[]
   subscriptions Subscription[]
+  // Written by the routes, never migrated until now.
+  createdById String?
   @@index([ownerId])
   deletedAt   DateTime?
 
@@ -266,6 +275,8 @@ model Activity {
   updatedAt    DateTime  @updatedAt
 
   customValues CustomFieldValue[]
+  // Written by the routes, never migrated until now.
+  result String?
 
   @@index([contactId])
   @@index([dealId])
@@ -351,10 +362,24 @@ model Case {
   product            String?
   customFields       Json?
   ownerId            String?
+  // Written by the routes, never migrated until now.
+  escalatedAt DateTime?
+  escalationReason String?
+  isEscalated Boolean   @default(false)
+  satisfactionComment String?
+  satisfactionRating Int?
+  slaBreached Boolean   @default(false)
+  slaDueAt DateTime?
+  slaStatus String?
+  // The asset's service history and the entitlement's usage count cases by these.
+  assetId       String?
+  entitlementId String?
 
   @@index([accountId])
   @@index([contactId])
   @@index([assignedId])
+  @@index([assetId])
+  @@index([entitlementId])
   deletedAt   DateTime?
 
 }
@@ -363,8 +388,9 @@ model CaseComment {
   id       String   @id @default(uuid())
   caseId   String
   case     Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  authorId String
-  author   User     @relation(fields: [authorId], references: [id])
+  // Null when a customer wrote it by email; authorEmail says who.
+  authorId String?
+  author   User?    @relation(fields: [authorId], references: [id], onDelete: Restrict)
   createdAt DateTime @default(now())
   text      String
   isInternal Boolean @default(false)
@@ -400,6 +426,12 @@ model Document {
   case          Case?    @relation(fields: [caseId], references: [id], onDelete: SetNull)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  accessLevel String?
+  createdById String?
+  downloadCount Int       @default(0)
+  isTemplate Boolean   @default(false)
+  sharedWith Json?
 
   @@index([contactId])
   @@index([dealId])
@@ -429,6 +461,8 @@ model Campaign {
 
   recipients CampaignRecipient[]
   targetLists TargetList[]
+  // Written by the routes, never migrated until now.
+  createdById String?
 
   @@index([ownerId])
   deletedAt   DateTime?
@@ -519,6 +553,10 @@ model Quote {
   invoices Invoice[]
   subtotal   Float    @default(0)
   terms      String?
+  // Written by the routes, never migrated until now.
+  discountReason String?
+  orderId String?
+  submittedAt DateTime?
 
   @@index([dealId])
   @@index([accountId])
@@ -665,6 +703,8 @@ model CustomFieldValue {
   activity   Activity? @relation(fields: [activityId], references: [id], onDelete: Cascade)
   caseId     String?
   case       Case?     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  // Written by the routes, never migrated until now.
+  module String?
 
   @@index([customFieldId])
   @@index([recordId])
@@ -903,6 +943,9 @@ model ApprovalRequest {
 
   steps ApprovalStep[]
   recordModule String?
+  // Written by the routes, never migrated until now.
+  comments String?
+  completedAt DateTime?
 
   @@index([processId])
   @@index([recordId])
@@ -1013,6 +1056,8 @@ model KnowledgeArticle {
   categoryId      String?
   helpfulYes      Int @default(0)
   helpfulNo       Int @default(0)
+  // Written by the routes, never migrated until now.
+  publishedAt DateTime?
 
   @@index([categoryId])
   @@index([authorId])
@@ -1312,6 +1357,12 @@ model SavedView {
   userId    String   // Creator
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  lastViewedAt DateTime?
+  sharedWith Json?
+  sharedWithTeams Json?
+  viewCount Int       @default(0)
+  visibility String?
 }
 
 // ═══════════════════════════════════════
@@ -1470,6 +1521,14 @@ model Contract {
 
   orders Order[]
   entitlements Entitlement[]
+  // Written by the routes, never migrated until now.
+  activatedAt DateTime?
+  activatedById String?
+  name String?
+  parentContractId String?
+  terminationDate DateTime?
+  terminationReason String?
+  version Int?
 
   @@index([accountId])
   @@index([contactId])
@@ -1517,6 +1576,17 @@ model Order {
   updatedAt     DateTime @updatedAt
 
   items OrderItem[]
+  // Written by the routes, never migrated until now.
+  cancelledAt DateTime?
+  cancelReason String?
+  carrier String?
+  createdById String?
+  dealId String?
+  fulfilledAt DateTime?
+  fulfillmentNotes String?
+  name String?
+  shippedDate DateTime?
+  trackingNumber String?
 
   @@index([accountId])
   @@index([contactId])
@@ -1567,6 +1637,8 @@ model Entitlement {
   updatedAt     DateTime  @updatedAt
 
   milestones EntitlementMilestone[]
+  // Written by the routes, never migrated until now.
+  createdById String?
 
   @@index([accountId])
   @@index([contractId])
@@ -1757,6 +1829,9 @@ model SalesPath {
 
   steps SalesPathStep[]
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  createdById String?
+  name String?
 
 }
 
@@ -1789,6 +1864,14 @@ model Macro {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  executionCount Int       @default(0)
+  lastExecutedAt DateTime?
+  scheduleCron String?
+  scheduled Boolean   @default(false)
+  scheduleModule String?
+  scheduleTargetQuery String?
+  category String?
 }
 
 // ═══════════════════════════════════════
@@ -1837,6 +1920,13 @@ model ConnectedApp {
   logoUrl       String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  // Written by the routes, never migrated until now. Only a SHA-256 of the
+  // app's API token is kept; the token itself is shown once, when issued.
+  apiTokenHash String?
+  revokedAt DateTime?
+  revokedById String?
+  secretRotatedAt DateTime?
+  tokenRefreshedAt DateTime?
 }
 
 model OAuthToken {
@@ -1901,6 +1991,9 @@ model Subscription {
   updatedAt       DateTime  @updatedAt
 
   revenueSchedules RevenueSchedule[]
+  // Written by the routes, never migrated until now.
+  changeEffectiveDate DateTime?
+  renewalCount Int       @default(0)
 
   @@index([accountId])
   @@index([contractId])
@@ -1928,6 +2021,10 @@ model RevenueSchedule {
   updatedAt       DateTime  @updatedAt
 
   entries RevenueScheduleEntry[]
+  // Written by the routes, never migrated until now.
+  contractId String?
+  method String?
+  periods Int?
 
   @@index([subscriptionId])
   @@index([dealId])
@@ -1966,6 +2063,9 @@ model FlowDefinition {
 
   versions FlowVersion[]
   runs     FlowRun[]
+  // Written by the routes, never migrated until now.
+  publishedAt DateTime?
+  publishedById String?
 
   @@index([module])
   @@index([status])
@@ -2084,6 +2184,12 @@ model CallRecording {
   talkRatio   Float?    // rep talk time percentage
   callDate    DateTime  @default(now())
   createdAt   DateTime  @default(now())
+  // Written by the routes, never migrated until now.
+  // The analysis endpoint stores an object (topics, sentiment, questions).
+  analysis Json?
+  participants Json?
+  status String?
+  title String?
 
   @@index([dealId])
   @@index([contactId])
@@ -2200,9 +2306,22 @@ model WorkOrder {
 
   lineItems   WorkOrderLineItem[]
   appointments ServiceAppointment[]
+  // Written by the routes, never migrated until now.
+  assignedToId String?
+  cancelReason String?
+  completedAt DateTime?
+  customerSignature String?
+  dispatchedAt DateTime?
+  laborHours Int?
+  partsUsed Json?
+  resolution String?
+  schedulingNotes String?
+  // Service history and the field-service screens link a job to its asset.
+  assetId String?
 
   @@index([accountId])
   @@index([status])
+  @@index([assetId])
 }
 
 model WorkOrderLineItem {
@@ -2339,6 +2458,8 @@ model Environment {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  url String?
 
 }
 
@@ -2455,6 +2576,7 @@ model AppListing {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  features         Json?
 
 }
 
@@ -2511,6 +2633,9 @@ model CustomComponent {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  targetModules Json?
+  version String?
 
 }
 
@@ -2645,6 +2770,14 @@ model AiAgent {
   runs AiAgentRun[]
   conversations AiAgentConversation[]
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  examples Json?
+  lastRunAt DateTime?
+  lastTrainedAt DateTime?
+  runCount Int       @default(0)
+  systemPrompt String?
+  tools Json?
+  trainingData Json?
 }
 
 model AiAgentRun {
@@ -2660,6 +2793,9 @@ model AiAgentRun {
   startedAt   DateTime  @default(now())
   completedAt DateTime?
   error       String?
+  // Written by the routes, never migrated until now.
+  context Json?
+  triggeredById String?
 
   @@index([agentId])
 }
@@ -2693,6 +2829,8 @@ model MobileDevice {
   appVersion  String?
   lastActiveAt DateTime?
   createdAt   DateTime  @default(now())
+  // Written by the routes, never migrated until now.
+  deviceName String?
 
   @@index([userId])
   deletedAt   DateTime?
@@ -2910,6 +3048,12 @@ model PersonAccount {
   customFields Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  convertedAccountId String?
+  convertedContactId String?
+  createdById String?
+  householdId String?
+  status String?
 
   @@index([ownerId])
   @@index([email])
@@ -2966,6 +3110,11 @@ model Asset {
   parentAssetId String?   // for hierarchical assets
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+  // Written by the routes, never migrated until now.
+  decommissionDate DateTime?
+  decommissionReason String?
+  // The asset form and the warranty reports both use it.
+  warrantyEndDate DateTime?
 
   @@index([accountId])
   @@index([contactId])
@@ -3014,6 +3163,10 @@ model Survey {
 
   responses SurveyResponse[]
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  closedAt DateTime?
+  publishedAt DateTime?
+  responseCount Int       @default(0)
 }
 
 model SurveyResponse {
@@ -3238,6 +3391,12 @@ model PortalConfig {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  customCss String?
+  footerText String?
+  headerText String?
+  logo String?
+  primaryColor String?
 
 }
 
@@ -3254,6 +3413,12 @@ model PortalUser {
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  // Written by the routes, never migrated until now.
+  firstName String?
+  language String?
+  lastName String?
+  phone String?
+  timezone String?
 
   @@index([portalId])
   @@index([contactId])
@@ -3351,6 +3516,11 @@ model Appointment {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  assignedToId String?
+  cancelReason String?
+  notes String?
+  type String?
   @@index([ownerId])
   @@index([startTime])
   @@index([status])
@@ -3437,6 +3607,8 @@ model ContractMilestone {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   contract    Contract  @relation(fields: [contractId], references: [id])
+  // Written by the routes, never migrated until now.
+  description String?
   @@index([contractId])
 }
 
@@ -3487,6 +3659,11 @@ model CustomCode {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
   versions    CustomCodeVersion[]
+  // Written by the routes, never migrated until now.
+  schedule String?
+  scheduleEnabled Boolean   @default(false)
+  triggerEvent String?
+  version Int?
   @@index([active])
 }
 
@@ -3554,6 +3731,8 @@ model DealCompetitor {
   status     String?
   createdAt  DateTime @default(now())
   deal       Deal     @relation(fields: [dealId], references: [id])
+  // Written by the routes, never migrated until now.
+  position Int?
   @@index([dealId])
 }
 
@@ -3568,6 +3747,12 @@ model Deployment {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   user          User?    @relation(fields: [userId], references: [id])
+  // Written by the routes, never migrated until now.
+  completedAt DateTime?
+  components Json?
+  description String?
+  name String?
+  sourceEnvironmentId String?
   @@index([environmentId])
 }
 
@@ -3606,6 +3791,8 @@ model EntitlementProcess {
   active        Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  description String?
   @@index([entitlementId])
 }
 
@@ -3619,6 +3806,9 @@ model EventAttendee {
   name      String?
   status    String   @default("Invited")
   createdAt DateTime @default(now())
+  // Written by the routes, never migrated until now.
+  respondedAt DateTime?
+  userId String?
   @@index([eventId])
 }
 
@@ -3655,6 +3845,9 @@ model FlowElement {
   connections      Json?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  nextElementId String?
+  order Int?
   @@index([flowDefinitionId])
 }
 
@@ -3679,6 +3872,8 @@ model InstalledApp {
   status    String   @default("Active")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  version String?
   @@unique([appId, userId])
   @@index([userId])
 }
@@ -3691,6 +3886,8 @@ model IntegrationFieldMapping {
   targetField   String
   transform     String?
   createdAt     DateTime @default(now())
+  // Written by the routes, never migrated until now.
+  direction String?
   @@index([integrationId])
 }
 
@@ -3761,6 +3958,9 @@ model MonitoringAlertRule {
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  action String?
+  createdById String?
 }
 
 model OmnichannelQueue {
@@ -3826,6 +4026,9 @@ model SalesPathStage {
   fields      Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  keyActions Json?
+  successCriteria Json?
   @@index([salesPathId])
 }
 
@@ -3841,6 +4044,9 @@ model ScheduledExport {
   lastRunAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Written by the routes, never migrated until now.
+  nextRunAt DateTime?
+  recipients Json?
   @@index([userId])
 }
 
@@ -3901,6 +4107,8 @@ model SyncLog {
   errors        Json?
   startedAt     DateTime @default(now())
   completedAt   DateTime?
+  // Written by the routes, never migrated until now.
+  triggeredById String?
   @@index([integrationId])
 }
 
@@ -3948,6 +4156,11 @@ model Event {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
   attendees   EventAttendee[]
+  // Written by the routes, never migrated until now.
+  ownerId String?
+  recurrenceParentId String?
+  reminderAt DateTime?
+  reminderMinutes Int?
   @@index([startDate])
   @@index([status])
 }
@@ -3987,6 +4200,10 @@ model Integration {
   deletedAt     DateTime?
   fieldMappings IntegrationFieldMapping[]
   syncLogs      SyncLog[]
+  // Written by the routes, never migrated until now.
+  description String?
+  nextSyncAt DateTime?
+  syncEnabled Boolean   @default(false)
   @@index([status])
 }
 
@@ -4819,6 +5036,8 @@ model InboundRoutingRule {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime?
+  // Written by the routes, never migrated until now.
+  setStatus String?
 
   @@index([accountId, priority])
   @@index([active])
@@ -5034,6 +5253,9 @@ model ProspectList {
   deletedAt     DateTime?
 
   entries ProspectListEntry[]
+  // Written by the routes, never migrated until now. A list's purpose is its
+  // type; whether it is rebuilt from filterJson is a separate switch.
+  isDynamic Boolean   @default(false)
 
   @@index([type])
   @@index([ownerId])
@@ -5073,6 +5295,8 @@ model EmailSuppression {
   notes       String?
   suppressedAt DateTime @default(now())
   expiresAt   DateTime?
+  // Written by the routes, never migrated until now.
+  addedById String?
 
   @@index([reason])
 }

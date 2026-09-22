@@ -89,7 +89,7 @@ router.post('/schedule', authenticate, requirePermission('admin', 'full'), async
     const prisma = req.app.locals.prisma;
     const { module, format, frequency, recipients } = req.body;
     if (!module || !EXPORTABLE_MODULES[module]) return res.status(400).json({ error: 'Invalid module' });
-    const schedule = await prisma.scheduledExport.create({ data: { module, format: format || 'csv', frequency: frequency || 'weekly', recipients: recipients || [], createdById: req.user.id, nextRunAt: new Date(Date.now() + 86400000) } }).catch(() => ({ module, format, frequency, status: 'scheduled' }));
+    const schedule = await prisma.scheduledExport.create({ data: { module, format: format || 'csv', schedule: frequency || 'weekly', recipients: recipients || [], userId: req.user.id, nextRunAt: new Date(Date.now() + 86400000) } }).catch(() => ({ module, format, schedule: frequency, status: 'scheduled' }));
     res.status(201).json(schedule);
   } catch (err) { next(err); }
 });

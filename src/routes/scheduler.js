@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -14,7 +15,7 @@ router.get('/', authenticate, async (req, res, next) => {
     if (status) where.status = status;
     if (from || to) { where.startTime = {}; if (from) where.startTime.gte = new Date(from); if (to) where.startTime.lte = new Date(to); }
     const [data, total] = await Promise.all([
-      prisma.appointment.findMany({ where, orderBy: { startTime: 'asc' }, take: +limit, skip: (+page - 1) * +limit, include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, contact: { select: { id: true, firstName: true, lastName: true } } } }),
+      queryWithIncludes(prisma, 'appointment', 'findMany', { where, orderBy: { startTime: 'asc' }, take: +limit, skip: (+page - 1) * +limit, include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, contact: { select: { id: true, firstName: true, lastName: true } } } }),
       prisma.appointment.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });

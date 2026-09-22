@@ -27,7 +27,7 @@ router.post('/recordings', authenticate, auditMiddleware, async (req, res, next)
     const { title, duration, dealId, contactId, participants, transcript } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
     const recording = await prisma.callRecording.create({
-      data: { title, duration: duration || 0, dealId, contactId, userId: req.user.id, participants: participants || [], transcript, status: transcript ? 'Transcribed' : 'Uploaded' },
+      data: { title, duration: duration || 0, dealId, contactId, userId: req.user.id, participants: participants || [], transcription: transcript, status: transcript ? 'Transcribed' : 'Uploaded' },
     });
     res.status(201).json(recording);
   } catch (err) { next(err); }
@@ -38,7 +38,7 @@ router.post('/analyze', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { recordingId, transcript } = req.body;
-    const text = transcript || (recordingId ? (await prisma.callRecording.findUnique({ where: { id: recordingId } }))?.transcript : null);
+    const text = transcript || (recordingId ? (await prisma.callRecording.findUnique({ where: { id: recordingId } }))?.transcription : null);
     if (!text) return res.status(400).json({ error: 'transcript or recordingId required' });
     // Basic text analysis
     const wordCount = text.split(/\s+/).length;

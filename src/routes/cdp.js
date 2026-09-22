@@ -103,7 +103,7 @@ router.get('/profiles/:contactId', authenticate, async (req, res, next) => {
       prisma.deal.findMany({ where: { contactId: contact.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true } }),
       prisma.case.count({ where: { contactId: contact.id, deletedAt: null } }),
       prisma.activity.findMany({ where: { contactId: contact.id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 10 }),
-      prisma.cdpEvent.findMany({ where: { contactId: contact.id }, orderBy: { timestamp: 'desc' }, take: 20 }).catch(() => []),
+      prisma.cdpEvent.findMany({ where: { contactId: contact.id }, orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []),
     ]);
     const lifetime = deals.filter(d => d.stage === 'Closed Won').reduce((s, d) => s + (d.value || 0), 0);
     res.json({ contact, account: contact.account, deals, caseCount: cases, recentActivities: activities, events, lifetimeValue: lifetime, engagementScore: Math.min(100, activities.length * 8 + deals.length * 15) });
@@ -116,7 +116,7 @@ router.post('/events', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { contactId, eventType, properties, source } = req.body;
     if (!contactId || !eventType) return res.status(400).json({ error: 'contactId and eventType required' });
-    const event = await prisma.cdpEvent.create({ data: { contactId, eventType, properties, source: source || 'api', timestamp: new Date() } });
+    const event = await prisma.cdpEvent.create({ data: { contactId, type: eventType, properties, source: source || 'api', createdAt: new Date() } });
     res.status(201).json(event);
   } catch (err) { next(err); }
 });
@@ -160,12 +160,14 @@ router.get('/journeys/:id/analytics', authenticate, async (req, res, next) => {
     const journey = await prisma.journey.findUnique({ where: { id: req.params.id } });
     if (!journey) return res.status(404).json({ error: 'Journey not found' });
     const steps = journey.steps || [];
+    // Progress through a journey's steps is not recorded anywhere. These
+    // counts were Math.random(), different on every request; null says
+    // "not tracked" rather than inventing a funnel.
     const analytics = steps.map((step, i) => ({
       stepIndex: i, name: step.name || `Step ${i + 1}`, type: step.type,
-      entered: Math.floor(Math.random() * 1000), completed: Math.floor(Math.random() * 800),
-      dropped: Math.floor(Math.random() * 200), avgDurationHrs: Math.floor(Math.random() * 48),
+      entered: null, completed: null, dropped: null, avgDurationHrs: null,
     }));
-    res.json({ journeyId: journey.id, name: journey.name, status: journey.status, totalEnrolled: journey.enrolledCount || 0, steps: analytics });
+    res.json({ journeyId: journey.id, name: journey.name, status: journey.status, totalEnrolled: journey.enrolledCount || 0, stepTracking: false, steps: analytics });
   } catch (err) { next(err); }
 });
 
@@ -175,12 +177,17 @@ router.post('/profiles/unify', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
-    const [contact, lead, cases, activities, campaignMembers] = await Promise.all([
+    const [contact, lead] = await Promise.all([
       prisma.contact.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null } }),
       prisma.lead.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null } }),
+    ]);
+    // A campaign member names its contact or lead by id; it has no relation
+    // to filter through, so look the person up first.
+    const memberOf = [contact && { contactId: contact.id }, lead && { leadId: lead.id }].filter(Boolean);
+    const [cases, activities, campaignMembers] = await Promise.all([
       prisma.case.findMany({ where: { contactEmail: email }, select: { id: true, subject: true, status: true } }),
-      prisma.activity.findMany({ where: { OR: [{ contact: { email } }] }, take: 10 }).catch(() => []),
-      prisma.campaignMember.findMany({ where: { contact: { email } }, include: { campaign: { select: { name: true } } } }).catch(() => []),
+      prisma.activity.findMany({ where: { OR: [{ contact: { email } }] }, take: 10 }),
+      memberOf.length ? prisma.campaignMember.findMany({ where: { OR: memberOf }, include: { campaign: { select: { name: true } } } }) : [],
     ]);
     res.json({ email, contact, lead, cases, recentActivities: activities, campaigns: campaignMembers, unifiedAt: new Date() });
   } catch (err) { next(err); }

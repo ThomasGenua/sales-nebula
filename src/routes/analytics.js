@@ -128,7 +128,7 @@ router.get('/cohort', authenticate, async (req, res, next) => {
       const end = new Date(start); end.setMonth(end.getMonth() + 1);
       const [created, converted, won] = await Promise.all([
         prisma.lead.count({ where: { createdAt: { gte: start, lt: end }, deletedAt: null } }),
-        prisma.lead.count({ where: { createdAt: { gte: start, lt: end }, isConverted: true, deletedAt: null } }),
+        prisma.lead.count({ where: { createdAt: { gte: start, lt: end }, convertedAt: { not: null }, deletedAt: null } }),
         prisma.deal.count({ where: { createdAt: { gte: start, lt: end }, stage: 'Closed Won', deletedAt: null } }),
       ]);
       cohorts.push({ month: start.toISOString().substring(0, 7), leadsCreated: created, converted, dealsWon: won, conversionRate: created ? Math.round((converted / created) * 100) : 0 });

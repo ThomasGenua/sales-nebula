@@ -158,14 +158,15 @@ router.post('/price', requirePermission('quotes', 'read'), async (req, res, next
     // Check discount schedules
     const scheduleLinks = await prisma.productDiscountSchedule.findMany({
       where: { productId },
-      include: { schedule: { include: { tiers: { orderBy: { minQty: 'asc' } } } } },
+      include: { schedule: { include: { tiers: { orderBy: { minQuantity: 'asc' } } } } },
     });
 
     let discount = 0;
     for (const link of scheduleLinks) {
       if (!link.schedule.active) continue;
-      const tier = link.schedule.tiers.find(t => quantity >= t.minQty && (!t.maxQty || quantity <= t.maxQty));
-      if (tier) { discount = Math.max(discount, tier.discount); break; }
+      // A tier's columns are minQuantity / maxQuantity / discountPercent.
+      const tier = link.schedule.tiers.find(t => quantity >= t.minQuantity && (t.maxQuantity == null || quantity <= t.maxQuantity));
+      if (tier) { discount = Math.max(discount, tier.discountPercent); break; }
     }
 
     const finalPrice = unitPrice * (1 - discount / 100);
@@ -183,7 +184,7 @@ router.get('/discount-schedules', requirePermission('products', 'read'), async (
   try {
     const prisma = req.app.locals.prisma;
     const schedules = await prisma.discountSchedule.findMany({
-      include: { tiers: { orderBy: { minQty: 'asc' } }, products: { include: { product: { select: { id: true, name: true } } } } },
+      include: { tiers: { orderBy: { minQuantity: 'asc' } }, products: { include: { product: { select: { id: true, name: true } } } } },
     });
     res.json({ data: schedules });
   } catch (err) { next(err); }
@@ -196,7 +197,14 @@ router.post('/discount-schedules', requirePermission('products', 'edit'), async 
     const schedule = await prisma.discountSchedule.create({
       data: {
         ...data,
-        tiers: { create: tiers || [] },
+        // Accept the short names callers have been sending as well.
+        tiers: {
+          create: (tiers || []).map(t => ({
+            minQuantity: t.minQuantity ?? t.minQty,
+            maxQuantity: t.maxQuantity ?? t.maxQty ?? null,
+            discountPercent: t.discountPercent ?? t.discount,
+          })),
+        },
         ...(productIds && { products: { create: productIds.map(pid => ({ productId: pid })) } }),
       },
       include: { tiers: true, products: true },
