@@ -39,7 +39,7 @@ router.post('/upload', authenticate, requirePermission('documents', 'edit'), aud
         ...(req.body.dealId && { dealId: req.body.dealId }),
         ...(req.body.accountId && { accountId: req.body.accountId }),
         ...(req.body.contactId && { contactId: req.body.contactId }),
-        uploadedById: req.user.id,
+        createdById: req.user.id,
       },
     });
     await req.audit({ action: 'create', module: 'documents', recordId: doc.id, details: `File uploaded: ${req.file.originalname}` });
@@ -57,7 +57,7 @@ router.post('/upload/bulk', authenticate, requirePermission('documents', 'edit')
         data: {
           name: file.originalname, fileName: file.filename, mimeType: file.mimetype,
           fileSize: file.size, filePath: file.path, category: req.body.category || 'General',
-          uploadedById: req.user.id,
+          createdById: req.user.id,
         },
       })
     ));

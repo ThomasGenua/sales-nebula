@@ -11,7 +11,7 @@ router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'e
     const quote = await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Pending Approval', submittedAt: new Date() } });
     // Create approval record
     await prisma.approval.create({
-      data: { module: 'quotes', recordId: quote.id, status: 'Pending', submittedById: req.user.id, approverId: req.body.approverId || null },
+      data: { module: 'quotes', recordId: quote.id, status: 'Pending', requesterId: req.user.id, approverId: req.body.approverId || null },
     });
     await req.audit({ action: 'update', module: 'quotes', recordId: quote.id, details: 'Submitted for approval' });
     res.json(quote);

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -131,7 +132,7 @@ router.get('/deferred/aging', authenticate, async (req, res, next) => {
 router.get('/by-product', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const schedules = await prisma.revenueSchedule.findMany({ include: { contract: { select: { name: true } }, entries: true } }).catch(() => []);
+    const schedules = await queryWithIncludes(prisma, 'revenueSchedule', 'findMany', { include: { contract: { select: { name: true } }, entries: true } }).catch(() => []);
     const byProduct = {};
     schedules.forEach(s => {
       const key = s.contractId;

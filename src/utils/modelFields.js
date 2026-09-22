@@ -77,25 +77,59 @@ function resolveInclude(modelName, include) {
     const field = model.fields.find(f => f.name === key);
     if (field && field.kind === 'object') { prismaInclude[key] = spec; continue; }
 
-    const fk = model.fields.find(f => f.name === `${key}Id` && f.kind === 'scalar');
-    const related = findModel(key);
-    if (fk && related) {
-      manual.push({
-        key, fkField: fk.name,
-        delegate: related.name.charAt(0).toLowerCase() + related.name.slice(1),
-        select: spec && typeof spec === 'object' && spec.select ? spec.select : undefined,
-      });
+    const override = RELATION_OVERRIDES[`${model.name}.${key}`];
+    const fkName = override?.fk || `${key}Id`;
+    const fk = model.fields.find(f => f.name === fkName && f.kind === 'scalar');
+    const related = findModel(override?.model || (USER_RELATIONS.has(key) ? 'User' : key));
+    const select = spec && typeof spec === 'object' && spec.select ? spec.select : undefined;
+
+    if (override?.many && related) {
+      // One-to-many that the schema never declared: children carry our id.
+      manual.push({ key, many: true, childFk: override.childFk, delegate: delegateOf(related), select, orderBy: override.orderBy });
+    } else if (fk && related) {
+      manual.push({ key, fkField: fk.name, delegate: delegateOf(related), select: select || (related.name === 'User' ? SAFE_USER : undefined) });
     }
   }
   return { prismaInclude: Object.keys(prismaInclude).length ? prismaInclude : undefined, manual };
 }
+
+const delegateOf = model => model.name.charAt(0).toLowerCase() + model.name.slice(1);
+
+// Relation names that point at a user whatever the column is called.
+const USER_RELATIONS = new Set(['user', 'owner', 'assignedTo', 'changedBy', 'installedBy', 'createdBy', 'author', 'requester', 'approver', 'submittedBy']);
+
+// A user loaded this way must never carry the password hash.
+const SAFE_USER = { id: true, firstName: true, lastName: true, email: true, avatar: true };
+
+// Relations whose key does not follow `<name>Id` -> model `<Name>`.
+const RELATION_OVERRIDES = {
+  'FeedItem.user': { fk: 'authorId', model: 'User' },
+  'FeedComment.user': { fk: 'authorId', model: 'User' },
+  'InstalledApp.installedBy': { fk: 'userId', model: 'User' },
+  'InstalledApp.listing': { fk: 'appId', model: 'AppListing' },
+  'MarketplaceReview.user': { fk: 'userId', model: 'User' },
+  'SalesPath.stages': { many: true, model: 'SalesPathStage', childFk: 'salesPathId', orderBy: { position: 'asc' } },
+  'FlowDefinition.elements': { many: true, model: 'FlowElement', childFk: 'flowDefinitionId' },
+};
 
 /** Attach the manually resolved relations, one query per relation. */
 async function hydrateIncludes(prisma, records, manual) {
   const rows = Array.isArray(records) ? records : records ? [records] : [];
   if (!rows.length || !manual.length) return records;
 
-  for (const { key, fkField, delegate, select } of manual) {
+  for (const { key, fkField, delegate, select, many, childFk, orderBy } of manual) {
+    if (many) {
+      const parentIds = rows.map(r => r.id).filter(Boolean);
+      const children = parentIds.length && prisma[delegate]?.findMany
+        ? await prisma[delegate].findMany({
+          where: { [childFk]: { in: parentIds } },
+          ...(orderBy ? { orderBy } : {}),
+          ...(select ? { select: { ...select, [childFk]: true } } : {}),
+        }).catch(() => [])
+        : [];
+      for (const row of rows) row[key] = children.filter(c => c[childFk] === row.id);
+      continue;
+    }
     const ids = [...new Set(rows.map(r => r[fkField]).filter(Boolean))];
     let byId = new Map();
     if (ids.length && prisma[delegate]?.findMany) {
@@ -126,4 +160,18 @@ function looksLikeId(modelName, value) {
   return true;
 }
 
-module.exports = { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId };
+/**
+ * Run a Prisma read or write whose `include` names relations the schema does
+ * not declare, resolving those from their key columns afterwards.
+ *
+ *   queryWithIncludes(prisma, 'loginHistory', 'findMany', { where, include: { user: true } })
+ */
+async function queryWithIncludes(prisma, delegate, method, args = {}) {
+  const { include, ...rest } = args;
+  const { prismaInclude, manual } = resolveInclude(delegate, include);
+  const result = await prisma[delegate][method]({ ...rest, ...(prismaInclude ? { include: prismaInclude } : {}) });
+  await hydrateIncludes(prisma, result, manual);
+  return result;
+}
+
+module.exports = { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes };

@@ -345,7 +345,7 @@ module.exports = createCrudRouter('deal', 'deals', {
             module: 'deals',
             submittedById: req.userId,
             status: 'Pending',
-            currentStepOrder: 1,
+            currentStep: 1,
             steps: {
               create: process.steps.map(step => ({
                 order: step.order,

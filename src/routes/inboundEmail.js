@@ -364,7 +364,7 @@ router.post('/messages/:id/convert', authenticate, auditMiddleware, async (req, 
     const lead = await prisma.lead.create({
       data: {
         firstName: first, lastName: rest.join(' ') || first,
-        email: message.fromEmail, leadSource: 'Email', status: 'New',
+        email: message.fromEmail, source: 'Email', status: 'New',
         description: (message.textBody || '').slice(0, 4000),
         ownerId: req.body.ownerId || req.user.id,
       },

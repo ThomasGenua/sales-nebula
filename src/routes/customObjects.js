@@ -61,7 +61,7 @@ router.post('/:id/fields', authenticate, requirePermission('admin', 'full'), asy
     if (!label) return res.status(400).json({ error: 'label required' });
     const maxOrder = await prisma.customField.aggregate({ where: { customObjectId: req.params.id }, _max: { order: true } });
     const field = await prisma.customField.create({
-      data: { customObjectId: req.params.id, label, apiName: label.replace(/\s+/g, '_') + '__c', type: type || 'Text', required: required || false, unique: unique || false, defaultValue, options, order: (maxOrder._max.order || 0) + 1 },
+      data: { customObjectId: req.params.id, label, fieldKey: label.replace(/\s+/g, '_') + '__c', type: type || 'Text', required: required || false, unique: unique || false, defaultValue, options, order: (maxOrder._max.order || 0) + 1 },
     });
     res.status(201).json(field);
   } catch (err) { next(err); }
@@ -130,7 +130,7 @@ router.get('/:id/records/search', authenticate, async (req, res, next) => {
     const { q, limit = 25 } = req.query;
     if (!q) return res.status(400).json({ error: 'q required' });
     const records = await prisma.customObjectRecord.findMany({
-      where: { customObjectId: req.params.id, data: { string_contains: q } },
+      where: { objectId: req.params.id, data: { string_contains: q } },
       take: +limit, orderBy: { createdAt: 'desc' },
     });
     res.json({ query: q, results: records, count: records.length });
@@ -173,7 +173,7 @@ router.post('/:id/records/import', authenticate, auditMiddleware, async (req, re
     let created = 0, errors = 0;
     for (const rec of records.slice(0, 500)) {
       try {
-        await prisma.customObjectRecord.create({ data: { customObjectId: req.params.id, data: rec, createdById: req.user.id } });
+        await prisma.customObjectRecord.create({ data: { objectId: req.params.id, data: rec, createdById: req.user.id } });
         created++;
       } catch (e) { errors++; }
     }

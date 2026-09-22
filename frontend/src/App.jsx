@@ -4385,7 +4385,7 @@ function ProspectsPage() {
               <div key={l.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-sm text-[#F0EDE5] truncate">{l.name}</div>
-                  <div className="text-xs text-[#4A5168]">{l.description || l.listType}</div>
+                  <div className="text-xs text-[#4A5168]">{l.description || l.type}</div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <span className="text-xs text-[#C8C2B4] font-mono">{l.entryCount || 0}</span>

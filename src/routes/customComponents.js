@@ -18,7 +18,7 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
     const { name, type, markup, script, styles, description, targetModules, properties } = req.body;
     if (!name || !type) return res.status(400).json({ error: 'name and type required' });
     const comp = await prisma.customComponent.create({
-      data: { name, type, markup, script, styles, description, targetModules: targetModules || [], properties: properties || {}, version: '1.0.0', active: false, createdById: req.user.id },
+      data: { name, type, markup, script, style: styles, description, targetModules: targetModules || [], properties: properties || {}, version: '1.0.0', active: false, createdById: req.user.id },
     });
     res.status(201).json(comp);
   } catch (err) { next(err); }
@@ -47,7 +47,7 @@ router.get('/:id/preview', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const comp = await prisma.customComponent.findUnique({ where: { id: req.params.id } });
     if (!comp) return res.status(404).json({ error: 'Not found' });
-    res.json({ id: comp.id, name: comp.name, type: comp.type, markup: comp.markup, script: comp.script, styles: comp.styles, properties: comp.properties });
+    res.json({ id: comp.id, name: comp.name, type: comp.type, markup: comp.markup, script: comp.script, styles: comp.style, properties: comp.properties });
   } catch (err) { next(err); }
 });
 
@@ -132,7 +132,7 @@ router.get('/:id/render', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const comp = await prisma.customComponent.findUnique({ where: { id: req.params.id } });
     if (!comp) return res.status(404).json({ error: 'Not found' });
-    res.json({ id: comp.id, name: comp.name, html: comp.markup || '', css: comp.styles || '', js: comp.script || '', renderedAt: new Date() });
+    res.json({ id: comp.id, name: comp.name, html: comp.markup || '', css: comp.style || '', js: comp.script || '', renderedAt: new Date() });
   } catch (err) { next(err); }
 });
 

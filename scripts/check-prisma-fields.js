@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
+const { resolveInclude } = require('../src/utils/modelFields');
 const { Prisma } = require('@prisma/client');
 
 const MODELS = new Map();           // delegate name -> model
@@ -190,11 +191,12 @@ function checkWhere(file, model, node, label) {
 }
 
 /** select / include: keys must be fields, and nested ones resolve through relations. */
-function checkProjection(file, model, node, label) {
+function checkProjection(file, model, node, label, resolvable = EMPTY) {
   if (!node || node.type !== 'ObjectExpression') return;
   const names = fieldNames(model);
   for (const k of keysOf(node)) {
     if (AGG.has(k.name)) continue;
+    if (resolvable.has(k.name)) continue;
     if (!names.has(k.name)) { record(file, k.line, model, k.name, label); continue; }
     const target = relationTarget(model, k.name);
     if (target && k.value.type === 'ObjectExpression') {
@@ -217,11 +219,19 @@ function checkOrderBy(file, model, node, label) {
   }
 }
 
-function checkCall(file, model, op, arg) {
+function checkCall(file, model, op, arg, { wrapped = false } = {}) {
   if (!arg || arg.type !== 'ObjectExpression') return;
   checkWhere(file, model, prop(arg, 'where'), 'where');
   checkProjection(file, model, prop(arg, 'select'), 'select');
-  checkProjection(file, model, prop(arg, 'include'), 'include');
+  // queryWithIncludes() resolves relations the schema never declared.
+  let resolvable = EMPTY;
+  if (wrapped) {
+    const inc = prop(arg, 'include');
+    const keys = keysOf(inc).map(k => k.name);
+    const { manual } = resolveInclude(model.name, Object.fromEntries(keys.map(k => [k, true])));
+    resolvable = new Set(manual.map(m => m.key));
+  }
+  checkProjection(file, model, prop(arg, 'include'), 'include', resolvable);
   checkOrderBy(file, model, prop(arg, 'orderBy'), 'orderBy');
   if (op === 'upsert') {
     checkData(file, model, prop(arg, 'create'), 'create', true);
@@ -254,6 +264,17 @@ function scan(file) {
   walk(ast, node => {
     if (node.type !== 'CallExpression') return;
     const callee = node.callee;
+
+    // queryWithIncludes(prisma, 'model', 'method', args)
+    if (callee.type === 'Identifier' && callee.name === 'queryWithIncludes') {
+      const [, d, m, a] = node.arguments;
+      const model = d?.type === 'StringLiteral' ? MODELS.get(d.value) : null;
+      if (model && m?.type === 'StringLiteral') {
+        checkCall(path.relative(path.join(__dirname, '..'), file), model, m.value, a, { wrapped: true });
+      }
+      return;
+    }
+
     if (!callee || callee.type !== 'MemberExpression' || callee.computed) return;
     const op = callee.property.name;
     if (!OPS.has(op)) return;

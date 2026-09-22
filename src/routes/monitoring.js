@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -12,7 +13,7 @@ router.get('/login-history', authenticate, requirePermission('admin', 'read'), a
     if (userId) where.userId = userId;
     if (status) where.status = status;
     const [data, total] = await Promise.all([
-      prisma.loginHistory.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit, skip: (+page - 1) * +limit, include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } } }),
+      queryWithIncludes(prisma, 'loginHistory', 'findMany', { where, orderBy: { createdAt: 'desc' }, take: +limit, skip: (+page - 1) * +limit, include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } } }),
       prisma.loginHistory.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
@@ -124,7 +125,7 @@ router.post('/alerts/rules', authenticate, requirePermission('admin', 'full'), a
     const prisma = req.app.locals.prisma;
     const { name, condition, threshold, action, enabled } = req.body;
     if (!name || !condition) return res.status(400).json({ error: 'name and condition required' });
-    const rule = await prisma.monitoringAlertRule.create({ data: { name, condition, threshold, action: action || 'notify', enabled: enabled !== false, createdById: req.user.id } });
+    const rule = await prisma.monitoringAlertRule.create({ data: { name, condition, threshold, action: action || 'notify', active: enabled !== false, createdById: req.user.id } });
     res.status(201).json(rule);
   } catch (err) { next(err); }
 });

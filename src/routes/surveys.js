@@ -66,7 +66,7 @@ router.post('/:id/questions', authenticate, requirePermission('surveys', 'edit')
     if (!text) return res.status(400).json({ error: 'text required' });
     const maxOrder = await prisma.surveyQuestion.aggregate({ where: { surveyId: req.params.id }, _max: { order: true } });
     const question = await prisma.surveyQuestion.create({
-      data: { surveyId: req.params.id, text, type: type || 'Rating', options, required: required !== false, order: (maxOrder._max.order || 0) + 1 },
+      data: { surveyId: req.params.id, text, type: type || 'Rating', options, required: required !== false, position: (maxOrder._max.order || 0) + 1 },
     });
     res.status(201).json(question);
   } catch (err) { next(err); }

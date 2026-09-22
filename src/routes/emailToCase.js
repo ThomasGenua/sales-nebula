@@ -62,7 +62,7 @@ router.post('/inbound', async (req, res, next) => {
       if (attachments?.length) {
         for (const att of attachments) {
           await prisma.attachment.create({
-            data: { name: att.filename, parentModule: 'cases', parentId: newCase.id, mimeType: att.contentType, fileSize: att.size || 0 },
+            data: { fileName: att.filename, parentModule: 'cases', parentId: newCase.id, mimeType: att.contentType, fileSize: att.size || 0 },
           }).catch(() => {});
         }
       }

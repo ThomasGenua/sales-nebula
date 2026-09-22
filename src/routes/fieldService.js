@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = createCrudRouter('workOrder', 'fieldService', {
   include: {
@@ -89,7 +90,7 @@ router.get('/route/optimize', authenticate, async (req, res, next) => {
     const targetDate = date ? new Date(date) : new Date();
     const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
-    const workOrders = await prisma.workOrder.findMany({
+    const workOrders = await queryWithIncludes(prisma, 'workOrder', 'findMany', {
       where: {
         assignedToId: userId || req.user.id,
         status: { in: ['Scheduled', 'Dispatched'] },

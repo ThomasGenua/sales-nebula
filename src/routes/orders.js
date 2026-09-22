@@ -130,10 +130,10 @@ router.post('/:id/items', authenticate, requirePermission('orders', 'full'), asy
     const product = await prisma.product.findUnique({ where: { id: productId } });
     const price = unitPrice || product?.price || 0;
     const qty = quantity || 1;
-    const item = await prisma.orderItem.create({ data: { orderId: req.params.id, productId, quantity: qty, unitPrice: price, discount: discount || 0, totalPrice: price * qty * (1 - (discount || 0) / 100) } });
+    const item = await prisma.orderItem.create({ data: { orderId: req.params.id, productId, quantity: qty, unitPrice: price, discount: discount || 0, total: price * qty * (1 - (discount || 0) / 100) } });
     // Recalculate order total
     const allItems = await prisma.orderItem.findMany({ where: { orderId: req.params.id } });
-    const total = allItems.reduce((s, i) => s + (i.totalPrice || 0), 0);
+    const total = allItems.reduce((s, i) => s + (i.total || 0), 0);
     await prisma.order.update({ where: { id: req.params.id }, data: { totalAmount: total } });
     res.status(201).json(item);
   } catch (err) { next(err); }

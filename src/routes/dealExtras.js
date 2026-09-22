@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -8,7 +9,7 @@ const router = Router();
 router.get('/:id/contact-roles', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const roles = await prisma.dealContactRole.findMany({
+    const roles = await queryWithIncludes(prisma, 'dealContactRole', 'findMany', {
       where: { dealId: req.params.id },
       include: { contact: { select: { id: true, firstName: true, lastName: true, email: true, title: true, phone: true } } },
     });
@@ -49,7 +50,7 @@ router.get('/:id/products', authenticate, async (req, res, next) => {
 router.get('/:id/stage-history', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const history = await prisma.dealStageHistory.findMany({
+    const history = await queryWithIncludes(prisma, 'dealStageHistory', 'findMany', {
       where: { dealId: req.params.id }, orderBy: { changedAt: 'asc' },
       include: { changedBy: { select: { id: true, firstName: true, lastName: true } } },
     });

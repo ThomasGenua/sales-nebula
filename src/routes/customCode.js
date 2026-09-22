@@ -18,7 +18,7 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
     const { name, language, code, triggerModule, triggerEvent, description } = req.body;
     if (!name || !code) return res.status(400).json({ error: 'name and code required' });
     const script = await prisma.customCode.create({
-      data: { name, language: language || 'javascript', code, triggerModule, triggerEvent, description, active: false, createdById: req.user.id },
+      data: { name, language: language || 'javascript', code, module: triggerModule, triggerEvent, description, active: false, createdById: req.user.id },
     });
     res.status(201).json(script);
   } catch (err) { next(err); }

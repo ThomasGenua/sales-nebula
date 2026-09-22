@@ -109,7 +109,7 @@ router.post('/:id/clone', authenticate, async (req, res, next) => {
     const original = await prisma.savedView.findUnique({ where: { id: req.params.id } });
     if (!original) return res.status(404).json({ error: 'View not found' });
     const { id, createdAt, updatedAt, ...data } = original;
-    const clone = await prisma.savedView.create({ data: { ...data, name: `${original.name} (Copy)`, createdById: req.user.id, isDefault: false } });
+    const clone = await prisma.savedView.create({ data: { ...data, name: `${original.name} (Copy)`, userId: req.user.id, isDefault: false } });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });
@@ -120,7 +120,7 @@ router.post('/:id/set-default', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const view = await prisma.savedView.findUnique({ where: { id: req.params.id } });
     if (!view) return res.status(404).json({ error: 'View not found' });
-    await prisma.savedView.updateMany({ where: { module: view.module, createdById: req.user.id, isDefault: true }, data: { isDefault: false } });
+    await prisma.savedView.updateMany({ where: { module: view.module, userId: req.user.id, isDefault: true }, data: { isDefault: false } });
     const updated = await prisma.savedView.update({ where: { id: req.params.id }, data: { isDefault: true } });
     res.json(updated);
   } catch (err) { next(err); }
@@ -143,7 +143,7 @@ router.post('/:id/clone', authenticate, async (req, res, next) => {
     const original = await prisma.savedView.findUnique({ where: { id: req.params.id } });
     if (!original) return res.status(404).json({ error: 'Not found' });
     const { id, createdAt, updatedAt, ...data } = original;
-    const clone = await prisma.savedView.create({ data: { ...data, name: `${original.name} (Copy)`, isDefault: false, createdById: req.user.id } });
+    const clone = await prisma.savedView.create({ data: { ...data, name: `${original.name} (Copy)`, isDefault: false, userId: req.user.id } });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });

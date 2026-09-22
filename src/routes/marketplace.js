@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -40,10 +41,10 @@ router.post('/:id/install', authenticate, requirePermission('admin', 'full'), au
     const prisma = req.app.locals.prisma;
     const listing = await prisma.marketplaceListing.findUnique({ where: { id: req.params.id } });
     if (!listing) return res.status(404).json({ error: 'Listing not found' });
-    const existing = await prisma.installedApp.findFirst({ where: { listingId: req.params.id } });
+    const existing = await prisma.installedApp.findFirst({ where: { appId: req.params.id } });
     if (existing) return res.status(409).json({ error: 'Already installed' });
     const installed = await prisma.installedApp.create({
-      data: { listingId: req.params.id, installedById: req.user.id, version: listing.version, status: 'Active' },
+      data: { appId: req.params.id, userId: req.user.id, version: listing.version, status: 'Active' },
     });
     await prisma.marketplaceListing.update({ where: { id: req.params.id }, data: { installCount: { increment: 1 } } });
     await req.audit({ action: 'create', module: 'marketplace', recordId: listing.id, details: `Installed: ${listing.name}` });
@@ -55,7 +56,7 @@ router.post('/:id/install', authenticate, requirePermission('admin', 'full'), au
 router.delete('/:id/uninstall', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const installed = await prisma.installedApp.findFirst({ where: { listingId: req.params.id } });
+    const installed = await prisma.installedApp.findFirst({ where: { appId: req.params.id } });
     if (!installed) return res.status(404).json({ error: 'Not installed' });
     await prisma.installedApp.delete({ where: { id: installed.id } });
     await req.audit({ action: 'delete', module: 'marketplace', recordId: req.params.id, details: 'App uninstalled' });
@@ -67,7 +68,7 @@ router.delete('/:id/uninstall', authenticate, requirePermission('admin', 'full')
 router.get('/installed', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const apps = await prisma.installedApp.findMany({
+    const apps = await queryWithIncludes(prisma, 'installedApp', 'findMany', {
       include: { listing: true, installedBy: { select: { id: true, firstName: true, lastName: true } } },
       orderBy: { installedAt: 'desc' },
     });
@@ -79,8 +80,8 @@ router.get('/installed', authenticate, async (req, res, next) => {
 router.get('/:id/reviews', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const reviews = await prisma.marketplaceReview.findMany({
-      where: { listingId: req.params.id },
+    const reviews = await queryWithIncludes(prisma, 'marketplaceReview', 'findMany', {
+      where: { appId: req.params.id },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -95,10 +96,10 @@ router.post('/:id/reviews', authenticate, async (req, res, next) => {
     const { rating, title, body } = req.body;
     if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'rating (1-5) required' });
     const review = await prisma.marketplaceReview.create({
-      data: { listingId: req.params.id, userId: req.user.id, rating, title, body },
+      data: { appId: req.params.id, userId: req.user.id, rating, title, body },
     });
     // Update listing avg rating
-    const reviews = await prisma.marketplaceReview.findMany({ where: { listingId: req.params.id } });
+    const reviews = await prisma.marketplaceReview.findMany({ where: { appId: req.params.id } });
     const avgRating = reviews.reduce((s, r) => s + r.rating, 0) / reviews.length;
     await prisma.marketplaceListing.update({ where: { id: req.params.id }, data: { rating: parseFloat(avgRating.toFixed(1)) } });
     res.status(201).json(review);

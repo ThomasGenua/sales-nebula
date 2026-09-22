@@ -20,9 +20,9 @@ router.post('/devices', authenticate, async (req, res, next) => {
     const { token, platform, deviceName } = req.body;
     if (!token || !platform) return res.status(400).json({ error: 'token and platform required' });
     const device = await prisma.mobileDevice.upsert({
-      where: { token },
-      update: { platform, deviceName, lastActive: new Date(), userId: req.user.id },
-      create: { token, platform, deviceName, userId: req.user.id },
+      where: { pushToken: token },
+      update: { platform, deviceName, lastActiveAt: new Date(), userId: req.user.id },
+      create: { pushToken: token, platform, deviceName, userId: req.user.id },
     });
     res.json(device);
   } catch (err) { next(err); }

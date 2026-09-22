@@ -195,7 +195,7 @@ router.put('/fields/:id', authenticate, requirePermission('admin', 'edit'), audi
 
     // Changing type after data exists would strand values in the wrong column
     if (data.fieldType && data.fieldType !== existing.fieldType) {
-      const valueCount = await prisma.customFieldValue.count({ where: { fieldId: existing.id } });
+      const valueCount = await prisma.customFieldValue.count({ where: { customFieldId: existing.id } });
       if (valueCount > 0) {
         return res.status(409).json({ error: `Cannot change field type: ${valueCount} records already hold a value. Create a new field instead.` });
       }
@@ -215,11 +215,11 @@ router.delete('/fields/:id', authenticate, requirePermission('admin', 'full'), a
     const field = await prisma.customFieldDef.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!field) return res.status(404).json({ error: 'Field not found' });
 
-    const valueCount = await prisma.customFieldValue.count({ where: { fieldId: field.id } });
+    const valueCount = await prisma.customFieldValue.count({ where: { customFieldId: field.id } });
     if (valueCount > 0 && req.query.force !== 'true') {
       return res.status(409).json({ error: `${valueCount} records hold a value for this field. Pass force=true to delete the field and its data.`, valueCount });
     }
-    if (req.query.force === 'true') await prisma.customFieldValue.deleteMany({ where: { fieldId: field.id } });
+    if (req.query.force === 'true') await prisma.customFieldValue.deleteMany({ where: { customFieldId: field.id } });
 
     await prisma.customFieldDef.update({ where: { id: field.id }, data: { deletedAt: new Date(), active: false } });
     await req.audit({ action: 'delete', module: 'studio', recordId: field.id, details: `Custom field deleted: ${field.module}.${field.name}` });
@@ -290,7 +290,7 @@ router.put('/values/:module/:recordId', authenticate, auditMiddleware, async (re
     // Required fields with no value anywhere
     for (const f of fields.filter(x => x.required)) {
       if (Object.prototype.hasOwnProperty.call(values, f.name)) continue;
-      const existing = await prisma.customFieldValue.findFirst({ where: { fieldId: f.id, recordId: req.params.recordId } });
+      const existing = await prisma.customFieldValue.findFirst({ where: { customFieldId: f.id, recordId: req.params.recordId } });
       if (!existing) errors.push(`${f.label} is required`);
     }
 
@@ -298,9 +298,9 @@ router.put('/values/:module/:recordId', authenticate, auditMiddleware, async (re
 
     for (const { field, value, column } of pending) {
       const data = { valueText: null, valueNumber: null, valueDate: null, valueBool: null, valueJson: null, [column]: value };
-      const existing = await prisma.customFieldValue.findFirst({ where: { fieldId: field.id, recordId: req.params.recordId } });
+      const existing = await prisma.customFieldValue.findFirst({ where: { customFieldId: field.id, recordId: req.params.recordId } });
       if (existing) await prisma.customFieldValue.update({ where: { id: existing.id }, data });
-      else await prisma.customFieldValue.create({ data: { ...data, fieldId: field.id, module: req.params.module, recordId: req.params.recordId } });
+      else await prisma.customFieldValue.create({ data: { ...data, customFieldId: field.id, module: req.params.module, recordId: req.params.recordId } });
       saved.push(field.name);
     }
 

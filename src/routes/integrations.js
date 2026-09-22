@@ -47,7 +47,7 @@ router.post('/:id/sync', authenticate, requirePermission('admin', 'edit'), audit
     });
     // Simulate async sync completion
     setTimeout(async () => {
-      try { await prisma.syncLog.update({ where: { id: syncLog.id }, data: { status: 'Completed', completedAt: new Date(), recordsSynced: Math.floor(Math.random() * 100) } }); } catch (e) {}
+      try { await prisma.syncLog.update({ where: { id: syncLog.id }, data: { status: 'Completed', completedAt: new Date(), recordsOk: Math.floor(Math.random() * 100) } }); } catch (e) {}
     }, 3000);
     await prisma.integration.update({ where: { id: req.params.id }, data: { lastSyncAt: new Date() } });
     res.json({ syncId: syncLog.id, status: 'Running', message: 'Sync initiated' });

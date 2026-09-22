@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -97,7 +98,7 @@ router.get('/attribution', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { model = 'linear', period = '90' } = req.query;
     const since = new Date(Date.now() - (+period) * 86400000);
-    const influences = await prisma.campaignInfluence.findMany({
+    const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', {
       where: { createdAt: { gte: since } },
       include: { campaign: { select: { name: true, type: true } }, deal: { select: { value: true, stage: true } } },
     }).catch(() => []);
@@ -120,7 +121,7 @@ router.get('/roi', authenticate, async (req, res, next) => {
     const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budgetedCost: true, actualCost: true } });
     const result = [];
     for (const c of campaigns) {
-      const influenced = await prisma.campaignInfluence.findMany({ where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []);
+      const influenced = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []);
       const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + ((i.deal?.value || 0) * (i.influencePercentage || 1)), 0);
       const cost = c.actualCost || c.budgetedCost || 0;
       result.push({ campaignId: c.id, name: c.name, cost, attributedRevenue: revenue, roi: cost ? Math.round((revenue - cost) / cost * 100) : 0, deals: influenced.length });
@@ -134,7 +135,7 @@ router.get('/roi', authenticate, async (req, res, next) => {
 router.get('/attribution-models', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const influences = await prisma.campaignInfluence.findMany({ include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } });
+    const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } });
     const wonInfluences = influences.filter(i => i.deal?.stage === 'Closed Won');
     // First-touch attribution
     const firstTouch = {};
@@ -171,7 +172,7 @@ router.get('/roi', authenticate, async (req, res, next) => {
     const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budgetedCost: true, actualCost: true, expectedRevenue: true } });
     const results = [];
     for (const c of campaigns) {
-      const influences = await prisma.campaignInfluence.findMany({ where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } });
+      const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } });
       const wonRevenue = influences.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + (i.influencePercentage || 100) / 100 * (i.deal?.value || 0), 0);
       const cost = c.actualCost || c.budgetedCost || 0;
       results.push({ campaignId: c.id, name: c.name, cost, wonRevenue: Math.round(wonRevenue), roi: cost > 0 ? ((wonRevenue - cost) / cost * 100).toFixed(1) + '%' : 'N/A', touchpoints: influences.length });

@@ -184,7 +184,7 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
         const created = await prisma.prospect.create({ data: payload });
         imported.push({ id: created.id, email: created.email });
         if (listId) {
-          await prisma.prospectListEntry.create({ data: { listId, prospectId: created.id, addedById: req.user.id } }).catch(() => {});
+          await prisma.prospectListEntry.create({ data: { listId, prospectId: created.id, addedBy: req.user.id } }).catch(() => {});
         }
       } catch (e) { invalid.push({ row: raw, reason: String(e.message).slice(0, 100) }); }
     }
@@ -265,7 +265,7 @@ router.post('/:id/merge', authenticate, requirePermission('leads', 'edit'), audi
       // Carry list memberships across before the duplicate is retired
       const entries = await prisma.prospectListEntry.findMany({ where: { prospectId: dupe.id } }).catch(() => []);
       for (const e of entries) {
-        await prisma.prospectListEntry.create({ data: { listId: e.listId, prospectId: survivor.id, addedById: req.user.id } }).catch(() => {});
+        await prisma.prospectListEntry.create({ data: { listId: e.listId, prospectId: survivor.id, addedBy: req.user.id } }).catch(() => {});
       }
       await prisma.prospect.update({ where: { id: dupe.id }, data: { deletedAt: new Date(), duplicateOfId: survivor.id } });
     }
@@ -332,7 +332,7 @@ router.post('/lists', authenticate, requirePermission('campaigns', 'edit'), audi
     if (listType && !validTypes.includes(listType)) return res.status(400).json({ error: `listType must be one of: ${validTypes.join(', ')}` });
 
     const list = await prisma.prospectList.create({
-      data: { name, description, listType: listType || 'Default', filterJson: filterJson || null, isDynamic: !!isDynamic, ownerId: req.user.id },
+      data: { name, description, type: listType || 'Default', filterJson: filterJson || null, isDynamic: !!isDynamic, ownerId: req.user.id },
     });
     await req.audit({ action: 'create', module: 'prospects', recordId: list.id, details: `Target list created: ${name}` });
     res.status(201).json(list);
@@ -373,7 +373,7 @@ router.post('/lists/:id/members', authenticate, requirePermission('campaigns', '
     let added = 0;
     for (const [ids, field] of [[prospectIds, 'prospectId'], [contactIds, 'contactId'], [leadIds, 'leadId']]) {
       for (const id of ids || []) {
-        await prisma.prospectListEntry.create({ data: { listId: list.id, [field]: id, addedById: req.user.id } })
+        await prisma.prospectListEntry.create({ data: { listId: list.id, [field]: id, addedBy: req.user.id } })
           .then(() => added++).catch(() => {});
       }
     }
@@ -416,7 +416,7 @@ router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 
     let added = 0, suppressed = 0;
     for (const p of prospects) {
       if (await isSuppressed(prisma, p.email)) { suppressed++; continue; }
-      await prisma.prospectListEntry.create({ data: { listId: list.id, prospectId: p.id, addedById: req.user.id } })
+      await prisma.prospectListEntry.create({ data: { listId: list.id, prospectId: p.id, addedBy: req.user.id } })
         .then(() => added++).catch(() => {});
     }
 
