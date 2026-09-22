@@ -45,6 +45,10 @@ model User {
   isPortalUser Boolean   @default(false)
   // Shown on the profile page; stamped at each sign-in.
   lastLoginAt DateTime?
+  // How this user reads dates and numbers: an IANA zone (Europe/Paris) and a
+  // BCP 47 locale (fr-FR). Unset means the browser's own.
+  timezone String?
+  locale   String?
   @@index([roleId])
   teamMemberships TeamMember[] @relation("TeamMembers")
   deployments    Deployment[]      @relation

@@ -154,6 +154,18 @@ router.post('/logout', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/** An IANA time zone this runtime knows, such as Europe/Paris. */
+function isTimeZone(zone) {
+  if (typeof zone !== 'string' || zone.length > 64) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
+}
+
+/** The canonical BCP 47 form of a locale (en-gb -> en-GB), or null. */
+function canonicalLocale(locale) {
+  if (typeof locale !== 'string' || locale.length > 35) return null;
+  try { return Intl.getCanonicalLocales(locale)[0] || null; } catch { return null; }
+}
+
 // GET /api/auth/me
 router.get('/me', authenticate, async (req, res, next) => {
   try {
@@ -172,12 +184,23 @@ router.get('/me', authenticate, async (req, res, next) => {
 router.put('/me', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { firstName, lastName, email, avatar } = req.body || {};
+    const { firstName, lastName, email, avatar, timezone, locale } = req.body || {};
     const data = {};
     if (typeof firstName === 'string' && firstName.trim()) data.firstName = firstName.trim();
     if (typeof lastName === 'string' && lastName.trim()) data.lastName = lastName.trim();
     if (typeof email === 'string' && email.trim()) data.email = email.trim().toLowerCase();
     if (avatar !== undefined) data.avatar = avatar || null;
+
+    // Display preferences. An empty value goes back to the browser's own.
+    if (timezone !== undefined) {
+      if (timezone && !isTimeZone(timezone)) return res.status(400).json({ error: `Unknown time zone: ${timezone}` });
+      data.timezone = timezone || null;
+    }
+    if (locale !== undefined) {
+      const canonical = locale ? canonicalLocale(locale) : null;
+      if (locale && !canonical) return res.status(400).json({ error: `Unknown locale: ${locale}` });
+      data.locale = canonical;
+    }
 
     if (Object.keys(data).length === 0) {
       return res.status(400).json({ error: 'No profile fields to update' });
