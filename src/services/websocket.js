@@ -5,7 +5,9 @@
  */
 
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
+const { resolveJwtSecret } = require('../utils/secrets');
+
+const JWT_SECRET = resolveJwtSecret();
 
 let io = null;
 const userSockets = new Map(); // userId -> Set<socketId>

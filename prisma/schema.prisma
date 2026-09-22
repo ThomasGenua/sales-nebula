@@ -5151,6 +5151,8 @@ model Bug {
   comments BugComment[]
   watchers BugWatcher[]
   history  BugHistory[]
+  fixedAt     DateTime?
+  verifiedAt  DateTime?
 
   @@index([status])
   @@index([assignedToId])

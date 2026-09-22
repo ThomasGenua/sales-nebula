@@ -61,6 +61,42 @@ function invalidateGroupCache(userId) {
   else groupCache.clear();
 }
 
+const OWD_CACHE_TTL_MS = 60000;
+let owdCache = { map: null, expires: 0 };
+
+/**
+ * The org-wide sharing default for each module.
+ *
+ * These were configurable in the admin UI, stored, seeded — and read by
+ * nothing, so a module set to Private behaved exactly like one set to
+ * ReadWrite. A sharing control that is not enforced is worse than none,
+ * because it is believed.
+ */
+async function getOrgWideDefaults(prisma) {
+  if (owdCache.map && owdCache.expires > Date.now()) return owdCache.map;
+  const map = new Map();
+  try {
+    for (const row of await prisma.orgWideDefault.findMany()) map.set(row.module, row);
+  } catch (err) { /* table absent; leave every module unrestricted */ }
+  owdCache = { map, expires: Date.now() + OWD_CACHE_TTL_MS };
+  return map;
+}
+
+function invalidateOrgWideDefaultCache() { owdCache = { map: null, expires: 0 }; }
+
+/**
+ * Whether the org-wide default restricts this operation.
+ *   Private  — only the owner (plus groups, plus admins) reads or writes.
+ *   ReadOnly — anyone may read; only the owner may write.
+ * Anything else, or no row at all, leaves the module open.
+ */
+function owdRestricts(owd, minLevel) {
+  const access = owd?.internalAccess;
+  if (access === 'Private') return true;
+  if (access === 'ReadOnly') return minLevel === 'Edit' || minLevel === 'Full';
+  return false;
+}
+
 function isAdmin(user) {
   if (!user) return false;
   if (user.isAdmin === true) return true;
@@ -89,9 +125,13 @@ function ownerFieldsFor(prisma, modelName) {
 async function buildAccessFilter(prisma, user, module, { minLevel = 'Read', modelName } = {}) {
   if (isAdmin(user)) return null;
 
-  // If nothing in this module is group-controlled, leave it open
+  const owd = (await getOrgWideDefaults(prisma)).get(module);
+  const restricted = owdRestricts(owd, minLevel);
+
+  // If nothing in this module is group-controlled and the org-wide default
+  // does not restrict it either, leave it open.
   const controlled = await prisma.securityGroupRecord.findFirst({ where: { module }, select: { id: true } });
-  if (!controlled) return null;
+  if (!controlled && !restricted) return null;
 
   const groupIds = await getUserGroupIds(prisma, user.id);
 
@@ -105,17 +145,19 @@ async function buildAccessFilter(prisma, user, module, { minLevel = 'Read', mode
     : [];
   const visibleIds = visible.map(v => v.recordId);
 
-  // Records nobody has assigned to a group stay visible
-  const assigned = await prisma.securityGroupRecord.findMany({ where: { module }, select: { recordId: true } });
-  const assignedIds = [...new Set(assigned.map(a => a.recordId))];
-
   // Contact, Deal and Account carry ownerId only; naming assignedId for those
   // makes Prisma throw on an unknown argument, so ask the model what it has.
   const or = [
     ...ownerFieldsFor(prisma, modelName).map(field => ({ [field]: user.id })),
     { id: { in: visibleIds } },
-    { id: { notIn: assignedIds } },
   ];
+
+  // Under an open org-wide default, a record nobody put in a group is nobody's
+  // secret, so it stays visible. Under Private it does not.
+  if (!restricted) {
+    const assigned = await prisma.securityGroupRecord.findMany({ where: { module }, select: { recordId: true } });
+    or.push({ id: { notIn: [...new Set(assigned.map(a => a.recordId))] } });
+  }
 
   return { OR: or };
 }
@@ -149,8 +191,21 @@ function rowSecurity(module, opts = {}) {
         const levels = level === 'Full' ? ['Full'] : level === 'Edit' ? ['Edit', 'Full'] : ['Read', 'Edit', 'Full'];
 
         const assignments = await prisma.securityGroupRecord.findMany({ where: { module, recordId }, select: { securityGroupId: true, accessLevel: true } });
-        if (!assignments.length) return true; // unrestricted record
-        return assignments.some(a => groupIds.includes(a.securityGroupId) && levels.includes(a.accessLevel));
+        if (assignments.length) {
+          return assignments.some(a => groupIds.includes(a.securityGroupId) && levels.includes(a.accessLevel));
+        }
+
+        // No group holds this record, so the org-wide default decides.
+        const owd = (await getOrgWideDefaults(prisma)).get(module);
+        if (!owdRestricts(owd, level)) return true;
+
+        const fields = ownerFieldsFor(prisma, opts.modelName);
+        if (!opts.modelName || !prisma[opts.modelName]?.findUnique) return false;
+        const record = await prisma[opts.modelName].findUnique({
+          where: { id: recordId },
+          select: Object.fromEntries(fields.map(f => [f, true])),
+        }).catch(() => null);
+        return !!record && fields.some(f => record[f] === req.user.id);
       };
 
       next();
@@ -220,6 +275,7 @@ async function autoAssignToUserGroups(prisma, userId, module, recordId) {
 }
 
 module.exports = {
+  invalidateOrgWideDefaultCache,
   rowSecurity, buildAccessFilter, applyAccessFilter,
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
   applyAutoAssignRules, autoAssignToUserGroups, isAdmin,

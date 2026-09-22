@@ -46,6 +46,24 @@ function fieldNames(model) {
   return names;
 }
 
+/**
+ * Scalars a `create` must supply: required, no default, not @updatedAt. A
+ * required foreign key counts as supplied if the relation is written instead
+ * (`deal: { connect }` in place of `dealId`).
+ */
+function requiredForCreate(model) {
+  const viaRelation = new Map();
+  for (const f of model.fields) {
+    if (f.kind !== 'object' || !f.relationFromFields) continue;
+    for (const from of f.relationFromFields) viaRelation.set(from, f.name);
+  }
+  return model.fields
+    .filter(f => f.kind === 'scalar' && f.isRequired && !f.hasDefaultValue && !f.isUpdatedAt && !f.isId)
+    .map(f => ({ name: f.name, relation: viaRelation.get(f.name) || null }));
+}
+
+const EMPTY = new Set();
+
 const relationTarget = (model, key) => {
   const f = model.fields.find(x => x.name === key);
   return f && f.kind === 'object' ? BY_NAME.get(f.type) : null;
@@ -69,16 +87,84 @@ function keysOf(node) {
 
 const prop = (node, name) => keysOf(node).find(k => k.name === name)?.value || null;
 
+// Nested relation writes: { posts: { create: {...}, connect: {...} } }.
+const NESTED_WRITE = new Set(['create', 'createMany', 'connectOrCreate', 'update', 'updateMany', 'upsert']);
+const NESTED_WHERE = new Set(['connect', 'disconnect', 'delete', 'deleteMany', 'set']);
+
 /** data / update / create payloads: top-level keys must be fields. */
-function checkData(file, model, node, label) {
+function checkData(file, model, node, label, creating = false, implied = EMPTY) {
   if (!node) return;
   if (node.type === 'ArrayExpression') {
-    for (const el of node.elements) checkData(file, model, el, label);
+    for (const el of node.elements) checkData(file, model, el, label, creating, implied);
     return;
   }
+  if (node.type !== 'ObjectExpression') return;
+
+  // A create that names a required column nowhere is as broken as one that
+  // names a column that does not exist; Prisma rejects both. A spread could
+  // supply anything, so an object containing one is not judged.
+  const spread = node.properties.some(pr => pr.type === 'SpreadElement');
+  if (creating && !spread) {
+    const present = new Set(keysOf(node).map(k => k.name));
+    for (const req of requiredForCreate(model)) {
+      if (present.has(req.name)) continue;
+      if (req.relation && present.has(req.relation)) continue;
+      // Written through a parent's relation, so Prisma supplies the key.
+      if (implied.has(req.name)) continue;
+      record(file, node.loc?.start.line, model, req.name, 'missing-required');
+    }
+  }
+
   const names = fieldNames(model);
   for (const k of keysOf(node)) {
-    if (!names.has(k.name)) record(file, k.line, model, k.name, label);
+    if (!names.has(k.name)) { record(file, k.line, model, k.name, label); continue; }
+    // A relation's payload is checked against the *related* model, which is
+    // where a seed script's nested `create: [...]` hides its bad columns.
+    const relField = model.fields.find(f => f.name === k.name && f.kind === 'object');
+    const target = relationTarget(model, k.name);
+    if (target && relField) checkNestedRelation(file, target, relField, k.value, label);
+  }
+}
+
+function checkNestedRelation(file, target, relField, node, label) {
+  if (!node || node.type !== 'ObjectExpression') return;
+
+  // The far side of this relation carries the foreign key back to the parent,
+  // and Prisma fills it in for a nested write.
+  const inverse = target.fields.find(f =>
+    f.kind === 'object' && f.relationName === relField.relationName && f.type !== target.name);
+  const implied = new Set(inverse?.relationFromFields || []);
+
+  for (const op of keysOf(node)) {
+    if (op.name === 'createMany') {
+      checkData(file, target, prop(op.value, 'data'), label, true, implied);
+    } else if (op.name === 'connectOrCreate') {
+      forEachObject(op.value, entry => {
+        checkData(file, target, prop(entry, 'create'), label, true, implied);
+        checkWhere(file, target, prop(entry, 'where'), label);
+      });
+    } else if (op.name === 'update' || op.name === 'updateMany' || op.name === 'upsert') {
+      forEachObject(op.value, entry => {
+        checkWhere(file, target, prop(entry, 'where'), label);
+        checkData(file, target, prop(entry, 'data'), label);
+        checkData(file, target, prop(entry, 'create'), label, true, implied);
+        checkData(file, target, prop(entry, 'update'), label);
+      });
+    } else if (NESTED_WRITE.has(op.name)) {
+      checkData(file, target, op.value, label, op.name === 'create', implied);
+    } else if (NESTED_WHERE.has(op.name)) {
+      forEachObject(op.value, entry => checkWhere(file, target, entry, label));
+    }
+  }
+}
+
+/** Apply fn to an object literal, or to each object in an array literal. */
+function forEachObject(node, fn) {
+  if (!node) return;
+  if (node.type === 'ArrayExpression') {
+    for (const el of node.elements) if (el && el.type === 'ObjectExpression') fn(el);
+  } else if (node.type === 'ObjectExpression') {
+    fn(node);
   }
 }
 
@@ -138,10 +224,10 @@ function checkCall(file, model, op, arg) {
   checkProjection(file, model, prop(arg, 'include'), 'include');
   checkOrderBy(file, model, prop(arg, 'orderBy'), 'orderBy');
   if (op === 'upsert') {
-    checkData(file, model, prop(arg, 'create'), 'create');
+    checkData(file, model, prop(arg, 'create'), 'create', true);
     checkData(file, model, prop(arg, 'update'), 'update');
   } else if (WRITE_OPS.has(op)) {
-    checkData(file, model, prop(arg, 'data'), 'data');
+    checkData(file, model, prop(arg, 'data'), 'data', op === 'create' || op === 'createMany');
   }
 }
 

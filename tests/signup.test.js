@@ -107,14 +107,30 @@ describe('Password policy on invite acceptance', () => {
   });
 });
 
-// Route tests run only when the harness supplies a live app
-let request, app, token;
-try {
-  request = require('supertest');
-  ({ app, token } = require('./setup'));
-} catch (e) { /* helpers above still run standalone */ }
+// The route tests below were gated on `app` being truthy at module-evaluation
+// time, but `app` is only assigned once setup() has run, and ./setup exports
+// setup/teardown rather than an app and a token. So the guard was always false
+// and every block here was skipped — they had never once run. They use the same
+// lifecycle as every other suite now.
+const request = require('supertest');
+const { setup, teardown, cleanDatabase, createTestRole, createTestUser } = require('./setup');
 
-const describeApi = app ? describe : describe.skip;
+let app, prisma, token;
+
+beforeAll(async () => {
+  ({ prisma, app } = await setup());
+  await cleanDatabase();
+  const role = await createTestRole('Admin');
+  // A seeded installation has a Sales Rep role, and the signup and invite
+  // endpoints correctly refuse to guess one when it is absent.
+  await createTestRole('Sales Rep');
+  const auth = await createTestUser({ email: `api-${Date.now()}@test.com`, roleId: role.id });
+  token = auth.token;
+});
+
+afterAll(async () => { await teardown(); });
+
+const describeApi = describe;
 
 describeApi('Public signup', () => {
   const email = `evaluator${Date.now()}@examplecorp.com`;
@@ -197,6 +213,13 @@ describeApi('Public signup', () => {
 });
 
 describeApi('Open registration is disabled', () => {
+  // The harness switches open registration on so the register and password
+  // specs can exercise it; this block is about the opposite, so it owns the
+  // flag for its own duration.
+  let previous;
+  beforeAll(() => { previous = process.env.ALLOW_OPEN_REGISTRATION; delete process.env.ALLOW_OPEN_REGISTRATION; });
+  afterAll(() => { if (previous !== undefined) process.env.ALLOW_OPEN_REGISTRATION = previous; });
+
   test('refuses self-registration by default', async () => {
     const res = await request(app).post('/api/auth/register').send({
       email: `intruder${Date.now()}@corp.com`,
@@ -274,8 +297,14 @@ describeApi('Invites', () => {
   });
 
   test('refuses to invite an existing user', async () => {
+    // This relied on a seeded account that cleanDatabase() removes, so the
+    // invite was issued and the test asserted 409 against a 201. The user it
+    // needs is created here instead.
+    const existing = `already-here-${Date.now()}@corp.com`;
+    await createTestUser({ email: existing });
+
     const res = await request(app).post('/api/signup/invites').set('Authorization', `Bearer ${token}`)
-      .send({ email: 'thomas@salesnebula.com' });
+      .send({ email: existing });
     expect(res.status).toBe(409);
   });
 

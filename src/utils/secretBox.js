@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { resolveMailSecret } = require('./secrets');
 
 /**
  * AES-256-GCM for secrets that have to be read back — mailbox passwords and
@@ -7,7 +8,7 @@ const crypto = require('crypto');
  */
 const ENC_KEY = crypto
   .createHash('sha256')
-  .update(process.env.MAIL_SECRET || process.env.JWT_SECRET || 'sales-nebula-mail-key')
+  .update(resolveMailSecret())
   .digest();
 
 function encrypt(plain) {

@@ -44,9 +44,7 @@ async function teardown() {
   if (prisma) await prisma.$disconnect();
 }
 
-async function cleanDatabase() {
-  // Delete in dependency order
-  const tables = [
+const ORDERED_TABLES = [
     'DataSubjectRequest', 'ConsentHistory', 'ConsentRecord', 'EmailSuppression',
     'DuplicateRecord', 'DuplicateRule', 'ValidationRule', 'Reminder',
     'InboundEmailAttachment', 'InboundEmailMessage', 'EmailPollLog',
@@ -90,6 +88,27 @@ async function cleanDatabase() {
     'Permission', 'User', 'Role',
   ];
 
+async function cleanDatabase() {
+  // One TRUNCATE across every table beats a hand-maintained list: the list had
+  // drifted, so Lead, CalendarEvent and others were never cleared and rows
+  // leaked between runs — a recurring-series test counted 4, then 12, then 20
+  // occurrences of the same event. CASCADE makes delete order irrelevant.
+  try {
+    const rows = await prisma.$queryRaw`
+      SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename NOT LIKE '\_prisma%'
+    `;
+    if (rows.length) {
+      const list = rows.map(r => `"${r.tablename}"`).join(', ');
+      await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
+      return;
+    }
+  } catch (err) {
+    // Not PostgreSQL, or TRUNCATE is unavailable — fall through to per-model
+    // deletes in dependency order.
+  }
+
+  const tables = ORDERED_TABLES;
   for (const table of tables) {
     const model = prisma[table.charAt(0).toLowerCase() + table.slice(1)];
     if (model) {
@@ -131,6 +150,20 @@ async function createTestRole(name = 'Admin', permissions = []) {
           { module: 'chatter', level: 'full' },
           { module: 'formulas', level: 'full' },
           { module: 'approvals', level: 'full' },
+          // Ten modules the routes guard were never granted, so every request
+          // to them answered 403 — which is why the suites covering them were
+          // skipped rather than fixed. tests/permissionCoverage.test.js keeps
+          // this list honest against what requirePermission() actually asks for.
+          { module: 'assets', level: 'full' },
+          { module: 'contracts', level: 'full' },
+          { module: 'entitlements', level: 'full' },
+          { module: 'fieldService', level: 'full' },
+          { module: 'orders', level: 'full' },
+          { module: 'partners', level: 'full' },
+          { module: 'personAccounts', level: 'full' },
+          { module: 'projects', level: 'full' },
+          { module: 'subscriptions', level: 'full' },
+          { module: 'surveys', level: 'full' },
         ],
       },
     },

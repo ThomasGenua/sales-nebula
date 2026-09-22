@@ -27,6 +27,9 @@ function compare(operator, left, right) {
     case 'isNotEmpty': return !(value === '' || value === null || value === undefined);
     case 'in': return Array.isArray(right) && right.map(String).includes(String(value));
     case 'matches': try { return new RegExp(right, 'i').test(String(value)); } catch { return false; }
+    case 'notMatches': try { return !new RegExp(right, 'i').test(String(value)); } catch { return false; }
+    case 'lengthLt': return String(value ?? '').length < Number(right);
+    case 'lengthGt': return String(value ?? '').length > Number(right);
     default: return false;
   }
 }
@@ -36,6 +39,7 @@ function evaluate(condition, record) {
   if (!condition || typeof condition !== 'object') return false;
   if (Array.isArray(condition.and)) return condition.and.every(c => evaluate(c, record));
   if (Array.isArray(condition.or)) return condition.or.some(c => evaluate(c, record));
+  if (condition.not) return !evaluate(condition.not, record);
   if (Array.isArray(condition)) return condition.every(c => evaluate(c, record));
   if (!condition.field) return false;
   return compare(condition.operator, record[condition.field], condition.value);

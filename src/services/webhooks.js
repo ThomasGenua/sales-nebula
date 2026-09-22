@@ -6,6 +6,7 @@
 
 const crypto = require('crypto');
 const { logger } = require('./logger');
+const { assertPublicHttpUrl } = require('../utils/outboundUrl');
 const log = logger.child ? logger.child({ service: 'webhooks' }) : logger;
 
 // In-memory queue for async delivery
@@ -66,6 +67,11 @@ async function deliverWebhook(prisma, { webhook, event, payload, attempt }) {
   let success = false;
 
   try {
+    // Checked again here, not only when the webhook was saved: the name can
+    // resolve somewhere else by the time it is called.
+    const verdict = await assertPublicHttpUrl(webhook.url);
+    if (!verdict.ok) throw new Error(`Refused to call webhook target: ${verdict.reason}`);
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
 

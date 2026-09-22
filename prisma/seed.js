@@ -4,10 +4,23 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
+  // Seeding twice used to die on a unique-constraint violation half way
+  // through, leaving a partly-populated database behind. `npm run setup` runs
+  // this, so a second setup on an existing install failed.
+  const existingRoles = await prisma.role.count();
+  if (existingRoles > 0) {
+    console.log('Database already seeded (%d roles present) — nothing to do.', existingRoles);
+    console.log('To reseed from scratch, drop and recreate the database first.');
+    return;
+  }
+
   console.log('Seeding Sales Nebula database...\n');
 
   // ─── ROLES ───
-  const modules = ['contacts', 'leads', 'deals', 'accounts', 'activities', 'emails', 'cases', 'documents', 'campaigns', 'products', 'quotes', 'invoices', 'workflows', 'users', 'roles', 'settings', 'admin', 'reports', 'forecasts', 'territories', 'knowledge', 'chatter', 'formulas', 'approvals'];
+  const modules = ['contacts', 'leads', 'deals', 'accounts', 'activities', 'emails', 'cases', 'documents', 'campaigns', 'products', 'quotes', 'invoices', 'workflows', 'users', 'roles', 'settings', 'admin', 'reports', 'forecasts', 'territories', 'knowledge', 'chatter', 'formulas', 'approvals',
+  // Guarded by requirePermission() but never granted, so a fresh install
+  // answered 403 on all of them however privileged the account.
+  'assets', 'contracts', 'entitlements', 'fieldService', 'orders', 'partners', 'personAccounts', 'projects', 'subscriptions', 'surveys'];
 
   const adminRole = await prisma.role.create({
     data: {
@@ -60,6 +73,10 @@ async function main() {
   const alex = await prisma.user.create({ data: { email: 'alex@salesnebula.com', password: pw, firstName: 'Alex', lastName: 'Rivera', avatar: 'AR', roleId: managerRole.id } });
   const sam = await prisma.user.create({ data: { email: 'sam@salesnebula.com', password: pw, firstName: 'Sam', lastName: 'Patel', avatar: 'SP', roleId: repRole.id } });
   const jordan = await prisma.user.create({ data: { email: 'jordan@salesnebula.com', password: pw, firstName: 'Jordan', lastName: 'Lee', avatar: 'JL', roleId: repRole.id } });
+
+  // Referenced twenty times below but never bound, so every statement that
+  // reached it threw ReferenceError. The seed never got this far to find out.
+  const users = [thomas, alex, sam, jordan];
 
   console.log('  Users created: Thomas (Admin), Alex (Manager), Sam (Rep), Jordan (Rep)');
   console.log('  Default password for staff: password123\n');
@@ -244,8 +261,7 @@ async function main() {
   const stdPricebook = await prisma.pricebook.create({
     data: {
       name: 'Standard Price Book',
-      isStandard: true,
-      currency: 'USD',
+      isDefault: true,
       entries: {
         create: products.map(p => ({ productId: p.id, unitPrice: p.price })),
       },
@@ -255,7 +271,6 @@ async function main() {
   const entPricebook = await prisma.pricebook.create({
     data: {
       name: 'Enterprise Price Book',
-      currency: 'USD',
       description: '10% discount for enterprise customers',
       entries: {
         create: products.map(p => ({ productId: p.id, unitPrice: p.price * 0.9 })),
@@ -270,9 +285,9 @@ async function main() {
       discount: 15,
       items: {
         create: [
-          { productId: products[1].id, quantity: 1, required: true, sortOrder: 1 },
-          { productId: products[2].id, quantity: 1, required: true, sortOrder: 2 },
-          { productId: products[3].id, quantity: 1, required: false, sortOrder: 3 },
+          { productId: products[1].id, quantity: 1, required: true },
+          { productId: products[2].id, quantity: 1, required: true },
+          { productId: products[3].id, quantity: 1, required: false },
         ],
       },
     },
@@ -284,10 +299,10 @@ async function main() {
       type: 'volume',
       tiers: {
         create: [
-          { minQty: 1, maxQty: 4, discount: 0, sortOrder: 1 },
-          { minQty: 5, maxQty: 9, discount: 5, sortOrder: 2 },
-          { minQty: 10, maxQty: 24, discount: 10, sortOrder: 3 },
-          { minQty: 25, maxQty: null, discount: 15, sortOrder: 4 },
+          { minQuantity: 1, maxQuantity: 4, discountPercent: 0 },
+          { minQuantity: 5, maxQuantity: 9, discountPercent: 5 },
+          { minQuantity: 10, maxQuantity: 24, discountPercent: 10 },
+          { minQuantity: 25, maxQuantity: null, discountPercent: 15 },
         ],
       },
     },
@@ -302,11 +317,10 @@ async function main() {
       module: 'deals',
       entryConditions: [{ field: 'value', operator: 'greaterThan', value: '100000' }],
       finalApprovalAction: 'updateField',
-      finalApprovalConfig: { field: 'stage', value: 'Negotiation' },
       steps: {
         create: [
-          { stepNumber: 1, name: 'Manager Review', approverType: 'user', approverId: alex.id },
-          { stepNumber: 2, name: 'VP Approval', approverType: 'user', approverId: thomas.id },
+          { stepOrder: 1, name: 'Manager Review', approverType: 'user', approverId: alex.id },
+          { stepOrder: 2, name: 'VP Approval', approverType: 'user', approverId: thomas.id },
         ],
       },
     },
@@ -320,7 +334,7 @@ async function main() {
       entryConditions: [{ field: 'discount', operator: 'greaterThan', value: '20' }],
       steps: {
         create: [
-          { stepNumber: 1, name: 'Sales Manager', approverType: 'user', approverId: alex.id },
+          { stepOrder: 1, name: 'Sales Manager', approverType: 'user', approverId: alex.id },
         ],
       },
     },
@@ -329,10 +343,10 @@ async function main() {
 
   // ─── KNOWLEDGE BASE ───
   const kbCategories = await Promise.all([
-    prisma.knowledgeCategory.create({ data: { name: 'Getting Started', description: 'Onboarding and setup guides', sortOrder: 1 } }),
-    prisma.knowledgeCategory.create({ data: { name: 'Troubleshooting', description: 'Common issues and solutions', sortOrder: 2 } }),
-    prisma.knowledgeCategory.create({ data: { name: 'Best Practices', description: 'Tips and recommendations', sortOrder: 3 } }),
-    prisma.knowledgeCategory.create({ data: { name: 'API Reference', description: 'Technical documentation', sortOrder: 4 } }),
+    prisma.knowledgeCategory.create({ data: { name: 'Getting Started', description: 'Onboarding and setup guides' } }),
+    prisma.knowledgeCategory.create({ data: { name: 'Troubleshooting', description: 'Common issues and solutions' } }),
+    prisma.knowledgeCategory.create({ data: { name: 'Best Practices', description: 'Tips and recommendations' } }),
+    prisma.knowledgeCategory.create({ data: { name: 'API Reference', description: 'Technical documentation' } }),
   ]);
 
   await Promise.all([
@@ -407,7 +421,7 @@ async function main() {
 
   const post3 = await prisma.chatterPost.create({ data: {
     body: 'Had a great discovery call with Pied Piper today. They are very interested in our integration capabilities.',
-    authorId: alex.id[4].id,
+    authorId: alex.id,
   }});
   console.log('  3 chatter posts with comments');
 
@@ -619,8 +633,8 @@ async function main() {
 
   // ─── DEAL LINE ITEMS ───
   await Promise.all([
-    prisma.dealLineItem.create({ data: { dealId: allDeals[0].id, productId: allProducts[0].id, quantity: 10, price: 3000, total: 30000 } }),
-    prisma.dealLineItem.create({ data: { dealId: allDeals[0].id, productId: allProducts[1].id, quantity: 5, price: 5000, total: 25000 } }),
+    prisma.dealLineItem.create({ data: { dealId: allDeals[0].id, productId: allProducts[0].id, name: allProducts[0].name, quantity: 10, price: 3000, total: 30000 } }),
+    prisma.dealLineItem.create({ data: { dealId: allDeals[0].id, productId: allProducts[1].id, name: allProducts[1].name, quantity: 5, price: 5000, total: 25000 } }),
   ]);
   console.log('  2 deal line items');
 
@@ -641,7 +655,7 @@ async function main() {
       { subject: 'How companies like yours use Sales Nebula', body: 'Here are 3 case studies from companies in your industry...', delayDays: 3 },
       { subject: 'Ready for a demo?', body: 'Would you like to see Sales Nebula in action? Book a 15-min demo...', delayDays: 7 },
     ],
-    active: true,
+    status: 'Active',
     createdById: users[0].id,
   }});
   console.log('  1 email sequence (3 steps)');
@@ -842,10 +856,16 @@ async function main() {
 
   // ─── VALIDATION RULES ───
   await Promise.all([
-    prisma.validationRule.create({ data: { name: 'Deal close date required', module: 'deals', condition: { field: 'closeDate', operator: 'required' }, errorMessage: 'Close date is required for all deals', errorField: 'closeDate' } }),
-    prisma.validationRule.create({ data: { name: 'Lead email format', module: 'leads', condition: { field: 'email', operator: 'regex', value: '^[^@]+@[^@]+\\.[^@]+$' }, errorMessage: 'Please enter a valid email address', errorField: 'email' } }),
-    prisma.validationRule.create({ data: { name: 'Deal value minimum', module: 'deals', condition: { field: 'value', operator: 'gt', value: 0 }, errorMessage: 'Deal value must be greater than zero', errorField: 'value' } }),
-    prisma.validationRule.create({ data: { name: 'Case subject length', module: 'cases', condition: { field: 'subject', operator: 'min_length', value: 5 }, errorMessage: 'Subject must be at least 5 characters', errorField: 'subject' } }),
+    // A rule's condition describes the VIOLATION — when it matches, the write
+    // is refused. These were written the other way round, as the thing that
+    // must be true, and three of them used operators the engine does not have
+    // ('required', 'regex', 'min_length'), so they silently never fired. The
+    // fourth, `value gt 0`, did fire: on every deal with a positive value, so
+    // a freshly seeded install could not create a deal at all.
+    prisma.validationRule.create({ data: { name: 'Deal close date required', module: 'deals', condition: { field: 'closeDate', operator: 'isEmpty' }, errorMessage: 'Close date is required for all deals', errorField: 'closeDate' } }),
+    prisma.validationRule.create({ data: { name: 'Lead email format', module: 'leads', condition: { and: [{ field: 'email', operator: 'isNotEmpty' }, { field: 'email', operator: 'notMatches', value: '^[^@]+@[^@]+\\.[^@]+$' }] }, errorMessage: 'Please enter a valid email address', errorField: 'email' } }),
+    prisma.validationRule.create({ data: { name: 'Deal value minimum', module: 'deals', condition: { field: 'value', operator: 'lte', value: 0 }, errorMessage: 'Deal value must be greater than zero', errorField: 'value' } }),
+    prisma.validationRule.create({ data: { name: 'Case subject length', module: 'cases', condition: { field: 'subject', operator: 'lengthLt', value: 5 }, errorMessage: 'Subject must be at least 5 characters', errorField: 'subject' } }),
   ]);
   console.log('  4 validation rules');
 

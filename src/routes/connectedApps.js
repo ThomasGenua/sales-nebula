@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
 const { auditMiddleware } = require('../middleware/audit');
+const { resolveJwtSecret } = require('../utils/secrets');
 
 const router = Router();
 
@@ -57,7 +58,7 @@ router.post('/oauth/token', async (req, res, next) => {
       // In a full implementation, 'code' would be validated against a stored authorization code
       // For now, code = userId (simplified)
       const userId = code;
-      const accessToken = jwt.sign({ userId, appId: app.id, scopes: app.scopes }, process.env.JWT_SECRET || 'changeme', { expiresIn: '1h' });
+      const accessToken = jwt.sign({ userId, appId: app.id, scopes: app.scopes }, resolveJwtSecret(), { expiresIn: '1h' });
       const refreshTok = crypto.randomBytes(32).toString('hex');
       await prisma.oAuthToken.create({
         data: { appId: app.id, userId, accessToken, refreshToken: refreshTok, scopes: app.scopes, expiresAt: new Date(Date.now() + 3600000) },
@@ -67,7 +68,7 @@ router.post('/oauth/token', async (req, res, next) => {
       const existing = await prisma.oAuthToken.findUnique({ where: { refreshToken: refresh_token } });
       if (!existing) return res.status(400).json({ error: 'invalid_grant' });
 
-      const newAccess = jwt.sign({ userId: existing.userId, appId: app.id, scopes: existing.scopes }, process.env.JWT_SECRET || 'changeme', { expiresIn: '1h' });
+      const newAccess = jwt.sign({ userId: existing.userId, appId: app.id, scopes: existing.scopes }, resolveJwtSecret(), { expiresIn: '1h' });
       const newRefresh = crypto.randomBytes(32).toString('hex');
       await prisma.oAuthToken.update({
         where: { id: existing.id },

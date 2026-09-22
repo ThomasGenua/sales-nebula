@@ -4,6 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate, schemas } = require('../middleware/validate');
 const { fireWebhookEvent } = require('../services/webhooks');
+const { assertPublicHttpUrl } = require('../utils/outboundUrl');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -39,6 +40,13 @@ router.get('/:id', requirePermission('settings', 'read'), async (req, res, next)
 // CREATE webhook
 router.post('/', requirePermission('settings', 'full'), validate(schemas.createWebhook), async (req, res, next) => {
   try {
+    // The server will request this URL, so it must not be able to reach
+    // the metadata endpoint or anything else behind the firewall.
+    if (req.body.url !== undefined) {
+      const verdict = await assertPublicHttpUrl(req.body.url);
+      if (!verdict.ok) return res.status(400).json({ error: `Webhook URL rejected: ${verdict.reason}`, code: 'UNSAFE_WEBHOOK_URL' });
+    }
+
     const prisma = req.app.locals.prisma;
     const { name, url, events, headers, retries } = req.body;
     const secret = crypto.randomBytes(32).toString('hex');
@@ -61,6 +69,13 @@ router.post('/', requirePermission('settings', 'full'), validate(schemas.createW
 // UPDATE webhook
 router.put('/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
+    // The server will request this URL, so it must not be able to reach
+    // the metadata endpoint or anything else behind the firewall.
+    if (req.body.url !== undefined) {
+      const verdict = await assertPublicHttpUrl(req.body.url);
+      if (!verdict.ok) return res.status(400).json({ error: `Webhook URL rejected: ${verdict.reason}`, code: 'UNSAFE_WEBHOOK_URL' });
+    }
+
     const prisma = req.app.locals.prisma;
     const { name, url, events, active, headers, retries } = req.body;
     const data = {};

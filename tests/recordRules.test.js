@@ -21,6 +21,50 @@ beforeEach(async () => {
   other = await createTestUser({ email: 'two@test.com', roleId: role.id });
 });
 
+describe('Rule condition operators', () => {
+  // A rule's condition describes the violation. The seeded rules were written
+  // the other way round and leaned on operators that did not exist, so three
+  // never fired and the fourth blocked every deal with a positive value.
+  const cases = [
+    ['lte catches a non-positive value', { field: 'value', operator: 'lte', value: 0 }, { value: 0 }, { value: 5000 }],
+    ['isEmpty catches a missing close date', { field: 'closeDate', operator: 'isEmpty' }, { closeDate: null }, { closeDate: new Date() }],
+    ['lengthLt catches a short subject', { field: 'subject', operator: 'lengthLt', value: 5 }, { subject: 'Hi' }, { subject: 'Cannot log in' }],
+    ['notMatches catches a malformed address', { field: 'email', operator: 'notMatches', value: '^[^@]+@[^@]+\\.[^@]+$' }, { email: 'nope' }, { email: 'a@b.co' }],
+  ];
+
+  it.each(cases)('%s', async (_name, condition, violating, allowed) => {
+    await prisma.validationRule.deleteMany({});
+    await prisma.validationRule.create({
+      data: { name: 'Operator check', module: 'deals', condition, errorMessage: 'Refused', active: true },
+    });
+
+    const base = { name: 'Operator deal', value: 5000, stage: 'Prospecting', closeDate: new Date() };
+    const bad = await request(app).post('/api/deals').set(authHeader(user.token)).send({ ...base, ...violating });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('VALIDATION_RULE');
+
+    const good = await request(app).post('/api/deals').set(authHeader(user.token)).send({ ...base, ...allowed });
+    expect(good.status).toBe(201);
+  });
+
+  it('negates a nested condition with not', async () => {
+    await prisma.validationRule.deleteMany({});
+    await prisma.validationRule.create({
+      data: {
+        name: 'Stage must be known',
+        module: 'deals',
+        condition: { not: { field: 'stage', operator: 'in', value: ['Prospecting', 'Qualification'] } },
+        errorMessage: 'Unknown stage',
+        active: true,
+      },
+    });
+
+    const base = { name: 'Not deal', value: 100, closeDate: new Date() };
+    expect((await request(app).post('/api/deals').set(authHeader(user.token)).send({ ...base, stage: 'Wizardry' })).status).toBe(400);
+    expect((await request(app).post('/api/deals').set(authHeader(user.token)).send({ ...base, stage: 'Prospecting' })).status).toBe(201);
+  });
+});
+
 describe('Validation rules', () => {
   it('rejects a record the rule forbids, which nothing used to check', async () => {
     await prisma.validationRule.create({
@@ -149,7 +193,11 @@ describe('Assignment rules', () => {
 
     const unmatched = await request(app).post('/api/leads').set(authHeader(user.token))
       .send(newLead({ email: 'fr@x.com', country: 'FR' }));
-    expect(unmatched.body.ownerId).toBeNull();
+    // A rule that does not match must not hand the record to its assignee. It
+    // used to leave ownerId null, which meant the record belonged to nobody and
+    // row-level security had nothing to match on; the creator owns it now.
+    expect(unmatched.body.ownerId).not.toBe(other.user.id);
+    expect(unmatched.body.ownerId).toBe(user.user.id);
   });
 });
 

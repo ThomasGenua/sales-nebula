@@ -470,6 +470,8 @@ function Toast({ message, type = "success", onClose }) {
 function MobileRecordCard({ row, columns, onEdit, onDelete, onRowClick }) {
   const primaryCol = columns[0];
   const secondaryCol = columns[1];
+  // A plain-text name for this row, for labelling its icon-only controls.
+  const rowLabel = String(row?.[primaryCol?.key] ?? 'this record');
   const restCols = columns.slice(2, 5);
   return (
     <div onClick={onRowClick ? () => onRowClick(row) : undefined}
@@ -487,8 +489,11 @@ function MobileRecordCard({ row, columns, onEdit, onDelete, onRowClick }) {
         </div>
         {(onEdit || onDelete) && (
           <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
-            {onEdit && <button onClick={() => onEdit(row)} className="p-2 rounded-lg hover:bg-[#182550] text-[#4A5168] hover:text-[#C8C2B4]"><Edit2 size={15} /></button>}
-            {onDelete && <button onClick={() => onDelete(row)} className="p-2 rounded-lg hover:bg-[rgba(248,113,113,0.10)] text-[#4A5168] hover:text-[#F87171]"><Trash2 size={15} /></button>}
+            {/* Icon-only, so each needs a name — and a name that says which row,
+                since a list of "Edit, Delete, Edit, Delete" is no use to anyone
+                who cannot see which card they are on. */}
+            {onEdit && <button type="button" aria-label={`Edit ${rowLabel}`} onClick={() => onEdit(row)} className="p-2 rounded-lg hover:bg-[#182550] text-[#4A5168] hover:text-[#C8C2B4]"><Edit2 size={15} /></button>}
+            {onDelete && <button type="button" aria-label={`Delete ${rowLabel}`} onClick={() => onDelete(row)} className="p-2 rounded-lg hover:bg-[rgba(248,113,113,0.10)] text-[#4A5168] hover:text-[#F87171]"><Trash2 size={15} /></button>}
           </div>
         )}
       </div>
@@ -1180,7 +1185,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
               className="w-full sm:w-48 lg:w-56 pl-9 pr-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] min-h-[44px]" />
           </div>
           {filterDefs && (
-            <Button variant="secondary" size="md" icon={Filter} onClick={() => setFilterOpen(true)} className="relative">
+            <Button variant="secondary" size="md" icon={Filter} onClick={() => setFilterOpen(true)} className="relative" ariaLabel="Filter">
               <span className="hidden sm:inline">Filter</span>
               {activeFilterCount > 0 && (
                 <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#F5A623] text-[9px] text-[#060B1A] font-bold flex items-center justify-center">{activeFilterCount}</span>
@@ -1188,11 +1193,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             </Button>
           )}
           {selected.length > 0 && (
-            <Button variant="danger" size="md" icon={Trash2} onClick={bulkDelete}>
-              <span className="hidden sm:inline">Delete ({selected.length})</span>
+            <Button variant="danger" size="md" icon={Trash2} onClick={bulkDelete} ariaLabel={`Delete ${selected.length} selected`}><span className="hidden sm:inline">Delete ({selected.length})</span>
             </Button>
           )}
-          <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md">
+          <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
             <span className="hidden sm:inline">New</span>
           </Button>
         </div>
@@ -2602,7 +2606,7 @@ function CopilotPage() {
         {messages.map((m,i)=>(<div key={i} className={`flex ${m.role==='user'?'justify-end':'justify-start'}`}><div className={`max-w-[85%] sm:max-w-[70%] px-4 py-3 rounded-2xl text-sm ${m.role==='user'?'bg-[#F5A623] text-[#060B1A] rounded-br-md':'bg-[#0B1228] border border-[#182550] text-[#C8C2B4] rounded-bl-md'}`}>{m.text}</div></div>))}
         {loading&&<div className="flex justify-start"><div className="bg-[#0B1228] border border-[#182550] rounded-2xl rounded-bl-md px-4 py-3 text-sm text-[#4A5168] animate-pulse">Thinking...</div></div>}
       </div>
-      <div className="flex gap-2"><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder="Ask about your CRM data..." className="flex-1 px-4 py-3 bg-[#0E1630] border border-[#182550] rounded-xl text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] min-h-[48px]" /><Button onClick={send} disabled={loading} size="lg" icon={Send}><span className="hidden sm:inline">Send</span></Button></div>
+      <div className="flex gap-2"><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder="Ask about your CRM data..." className="flex-1 px-4 py-3 bg-[#0E1630] border border-[#182550] rounded-xl text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] min-h-[48px]" /><Button onClick={send} disabled={loading} size="lg" icon={Send} ariaLabel="Send"><span className="hidden sm:inline">Send</span></Button></div>
     </div>
   );
 }
@@ -2765,7 +2769,7 @@ function CalendarPage() {
             <button onClick={() => setAnchor(new Date())} className="px-3 py-2 text-xs font-medium text-[#C8C2B4] hover:bg-[#101B3A] border-x border-[#182550] touch-manipulation">Today</button>
             <button type="button" aria-label="Next period" onClick={() => shift(1)} className="p-2.5 hover:bg-[#101B3A] text-[#7E8598] touch-manipulation"><ChevronRight size={16} aria-hidden="true" /></button>
           </div>
-          <Button icon={Plus} onClick={() => { setForm({ eventType: 'Meeting' }); setComposerOpen(true); }}>
+          <Button icon={Plus} ariaLabel="New event" onClick={() => { setForm({ eventType: 'Meeting' }); setComposerOpen(true); }}>
             <span className="hidden sm:inline">New Event</span>
           </Button>
         </div>
@@ -3854,7 +3858,7 @@ function TemplatesPage() {
             { value: "invoices", label: "Invoices" }, { value: "contracts", label: "Contracts" },
             { value: "cases", label: "Cases" },
           ]} />
-          <Button icon={Plus} onClick={() => openEditor(null)}><span className="hidden sm:inline">New</span></Button>
+          <Button icon={Plus} onClick={() => openEditor(null)} ariaLabel="New"><span className="hidden sm:inline">New</span></Button>
         </div>
       </div>
 
@@ -3941,7 +3945,16 @@ function TemplatesPage() {
             {preview && (
               <div className="bg-white rounded-lg p-3 max-h-64 overflow-auto">
                 <div className="text-xs text-gray-500 mb-2">Preview</div>
-                <div dangerouslySetInnerHTML={{ __html: preview.replace(/<\/?html[^>]*>|<\/?head>|<\/?body>|<!DOCTYPE[^>]*>/gi, "") }} />
+                {/* A template's HTML is rendered in a sandboxed frame rather
+                    than injected into this page: the preview keeps its exact
+                    markup and styling, and nothing in it can run script or
+                    reach the session. */}
+                <iframe
+                  title="Template preview"
+                  sandbox=""
+                  srcDoc={preview}
+                  className="w-full h-56 border-0 bg-white"
+                />
               </div>
             )}
 

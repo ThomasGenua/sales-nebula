@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+
 const {
   render, buildDocument, buildContext, validateTemplate,
   extractMergeFields, FORMATTERS, STARTER_TEMPLATES,
@@ -292,11 +293,17 @@ router.post('/:id/preview', authenticate, async (req, res, next) => {
       }
     }
 
+    // Merge values are HTML-escaped by render(), so record data cannot inject
+    // script here. The template's own markup is admin-authored and must stay
+    // verbatim for the preview to mean anything, so it is not filtered; the
+    // client renders it inside a sandboxed iframe, and this header covers the
+    // case where the route is opened directly.
     const html = buildDocument(template, context);
     if (req.body.format === 'json') {
       return res.json({ html, mergeFields: extractMergeFields(template.bodyHtml) });
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
     res.send(html);
   } catch (err) { next(err); }
 });

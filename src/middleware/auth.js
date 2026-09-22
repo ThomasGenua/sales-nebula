@@ -13,7 +13,9 @@
 const jwt = require('jsonwebtoken');
 const { v4: uuid } = require('uuid');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
+const { resolveJwtSecret } = require('../utils/secrets');
+
+const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
 const JWT_REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES || '7d';
 const MAX_LOGIN_ATTEMPTS = parseInt(process.env.MAX_LOGIN_ATTEMPTS) || 5;
@@ -133,11 +135,27 @@ async function authenticateApiKey(req, res, next) {
 
     req.userId = keyRecord.createdById;
     req.userRole = 'api';
+    req.user = await loadUser(req, keyRecord.createdById);
     req.isApiKey = true;
     req.apiKeyPermissions = keyRecord.permissions;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'API key validation failed' });
+  }
+}
+
+/** The authenticated user, with role and permissions, cached on the request. */
+async function loadUser(req, userId) {
+  if (req.user && req.user.id === userId) return req.user;
+  const prisma = req.app?.locals?.prisma;
+  if (!prisma || !userId) return null;
+  try {
+    return await prisma.user.findUnique({
+      where: { id: userId },
+      include: { role: { include: { permissions: true } } },
+    });
+  } catch (err) {
+    return null;
   }
 }
 
@@ -162,6 +180,17 @@ async function authenticate(req, res, next) {
     req.userId = decoded.userId;
     req.userRole = decoded.role;
     req.tokenJti = decoded.jti;
+
+    // Attach the user itself. 205 references across 50 route files read
+    // `req.user.id`, but only requirePermission() ever loaded it, so every one
+    // of those on an authenticate-only route threw "Cannot read properties of
+    // undefined". Loading it here also means a token outlives neither the
+    // account it belongs to nor that account being deactivated.
+    const user = await loadUser(req, decoded.userId);
+    if (!user) return res.status(401).json({ error: 'Account no longer exists' });
+    if (!user.active) return res.status(403).json({ error: 'Account disabled' });
+    req.user = user;
+
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -181,10 +210,7 @@ function requirePermission(module, minLevel) {
       // API keys with explicit role bypass
       if (req.isApiKey && req.userRole === 'admin') return next();
 
-      const user = await prisma.user.findUnique({
-        where: { id: req.userId },
-        include: { role: { include: { permissions: true } } },
-      });
+      const user = await loadUser(req, req.userId);
       if (!user || !user.active) {
         return res.status(403).json({ error: 'Account disabled' });
       }

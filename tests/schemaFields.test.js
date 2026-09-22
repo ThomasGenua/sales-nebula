@@ -17,8 +17,13 @@
 const path = require('path');
 const { checkPaths } = require('../scripts/check-prisma-fields');
 
+// The checker also reads nested relation writes and reports a `create` that
+// omits a required column, which is how the seed script's twelve faults were
+// found; both raised the count, so the baseline reflects more of the truth
+// rather than more breakage.
+
 // Lower this as references are fixed. Never raise it.
-const BASELINE = 436;
+const BASELINE = 444;
 
 // Files that have been audited and must stay clean.
 const CLEAN = [
@@ -30,6 +35,8 @@ const CLEAN = [
   'src/services/recordRules.js',
   'src/services/inboundIngest.js',
   'src/services/graphMailbox.js',
+  'src/routes/bugs.js',
+  'src/routes/attachments.js',
 ];
 
 const root = path.join(__dirname, '..');
@@ -103,8 +110,27 @@ describe('The checker itself', () => {
   });
 
   it('checks both sides of an upsert', () => {
-    const found = checkPaths([write('prisma.contact.upsert({ where: { id: "1" }, create: { bad1: 1 }, update: { bad2: 2 } });')]);
+    const found = checkPaths([write('prisma.contact.upsert({ where: { id: "1" }, create: { firstName: "A", lastName: "B", bad1: 1 }, update: { bad2: 2 } });')]);
     expect(found.map(f => f.key).sort()).toEqual(['bad1', 'bad2']);
+  });
+
+  it('reports a create that omits a required column', () => {
+    // How the seed script's DealLineItem.name and the inbound-mail Lead.company
+    // faults both read: nothing unknown, just something absent.
+    const found = checkPaths([write('prisma.contact.create({ data: { email: "a@b.c" } });')]);
+    expect(found.map(f => `${f.key}:${f.where}`).sort())
+      .toEqual(['firstName:missing-required', 'lastName:missing-required']);
+  });
+
+  it('does not demand a key the parent relation supplies', () => {
+    const found = checkPaths([write(
+      'prisma.role.create({ data: { name: "R", permissions: { create: [{ module: "m", level: "full" }] } } });')]);
+    expect(found).toEqual([]);
+  });
+
+  it('says nothing about a create whose data is spread from a variable', () => {
+    const found = checkPaths([write('prisma.contact.create({ data: { ...payload } });')]);
+    expect(found).toEqual([]);
   });
 
   it('ignores calls on things that are not Prisma models', () => {
