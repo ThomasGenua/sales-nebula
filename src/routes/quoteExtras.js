@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
+const { createNumbered, ORDER_NUMBER, QUOTE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 
@@ -47,8 +47,10 @@ router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), aud
     const prisma = req.app.locals.prisma;
     const original = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
     if (!original) return res.status(404).json({ error: 'Quote not found' });
-    const { id, createdAt, updatedAt, lineItems, ...quoteData } = original;
-    const clone = await prisma.quote.create({
+    // The copy gets its own number: `number` is unique, so reusing the
+    // original's failed every clone.
+    const { id, createdAt, updatedAt, lineItems, number, ...quoteData } = original;
+    const clone = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
       data: {
         ...quoteData, name: `${original.name} (Copy)`, status: 'Draft', quoteNumber: null,
         lineItems: { create: lineItems.map(({ id, quoteId, createdAt, updatedAt, ...item }) => item) },

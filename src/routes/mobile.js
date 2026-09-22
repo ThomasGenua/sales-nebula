@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
 
@@ -19,10 +20,14 @@ router.post('/devices', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { token, platform, deviceName } = req.body;
     if (!token || !platform) return res.status(400).json({ error: 'token and platform required' });
+    // deviceId is the unique key and is required; pushToken is neither, so the
+    // upsert could not run. A client that sends no deviceId is identified by
+    // its push token.
+    const deviceId = req.body.deviceId || crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 32);
     const device = await prisma.mobileDevice.upsert({
-      where: { pushToken: token },
-      update: { platform, deviceName, lastActiveAt: new Date(), userId: req.user.id },
-      create: { pushToken: token, platform, deviceName, userId: req.user.id },
+      where: { deviceId },
+      update: { pushToken: token, platform, deviceName, lastActiveAt: new Date(), userId: req.user.id },
+      create: { deviceId, pushToken: token, platform, deviceName, userId: req.user.id },
     });
     res.json(device);
   } catch (err) { next(err); }

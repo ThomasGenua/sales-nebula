@@ -43,6 +43,8 @@ model User {
   // Written by the routes, never migrated until now.
   contactId String?
   isPortalUser Boolean   @default(false)
+  // Shown on the profile page; stamped at each sign-in.
+  lastLoginAt DateTime?
   @@index([roleId])
   teamMemberships TeamMember[] @relation("TeamMembers")
   deployments    Deployment[]      @relation
@@ -527,6 +529,10 @@ model Product {
   pricebookEntries PricebookEntry[]
   dealLineItems    DealLineItem[]
   deletedAt   DateTime?
+  // Stock levels for the inventory report; unset means not tracked.
+  quantityOnHand  Int?
+  reorderPoint    Int?
+  reorderQuantity Int?
 
 }
 
@@ -616,6 +622,10 @@ model Invoice {
 
   totalAmount     Float    @default(0)
   invoiceNumber   String?
+  // The subscription this invoice bills, for its invoice history.
+  subscriptionId  String?
+
+  @@index([subscriptionId])
 }
 
 model InvoiceItem {

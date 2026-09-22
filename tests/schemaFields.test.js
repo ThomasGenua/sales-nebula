@@ -8,60 +8,25 @@
  * 500 — or, inside a `.catch(() => [])`, a silently empty list. No test caught
  * any of them because no test calls those endpoints.
  *
- * This is a ratchet, not a pass/fail gate: the count may not rise, and when it
- * falls the baseline comes down with it. Fixing the remaining backlog needs a
- * decision per column — is it a rename, or a migration nobody wrote? — so it is
- * tracked rather than blocked.
+ * This started as a ratchet over a backlog of 444 such references. The backlog
+ * is cleared, so it is now a gate: the application code, the seed script and
+ * the maintenance scripts must name only columns and relations that exist.
  */
 
 const path = require('path');
 const { checkPaths } = require('../scripts/check-prisma-fields');
 
-// The checker also reads nested relation writes and reports a `create` that
-// omits a required column, which is how the seed script's twelve faults were
-// found; both raised the count, so the baseline reflects more of the truth
-// rather than more breakage.
-
-// Lower this as references are fixed. Never raise it.
-const BASELINE = 23;
-
-// Files that have been audited and must stay clean.
-const CLEAN = [
-  'src/utils/crud.js',
-  'src/routes/consent.js',
-  'src/routes/privacy.js',
-  'src/services/dataErasure.js',
-  'src/services/workflowEngine.js',
-  'src/services/recordRules.js',
-  'src/services/inboundIngest.js',
-  'src/services/graphMailbox.js',
-  'src/routes/bugs.js',
-  'src/routes/attachments.js',
-];
-
 const root = path.join(__dirname, '..');
 let findings;
 
-beforeAll(() => { findings = checkPaths([path.join(root, 'src')]); });
+beforeAll(() => {
+  findings = checkPaths(['src', 'prisma/seed.js', 'scripts'].map(p => path.join(root, p)));
+});
 
 describe('Prisma field references', () => {
-  it('never names a column that does not exist, beyond the recorded backlog', () => {
-    const detail = findings.length > BASELINE
-      ? `\nNew bad references:\n${findings.slice(BASELINE).map(f => `  ${f.file}:${f.line} ${f.model}.${f.key} [${f.where}]`).join('\n')}`
-      : '';
-    expect(`${findings.length} unknown field references${detail}`)
-      .toBe(`${Math.min(findings.length, BASELINE)} unknown field references`);
-  });
-
-  it('keeps the baseline honest when references are fixed', () => {
-    // If this fails, the backlog shrank — lower BASELINE to the reported number.
-    expect(findings.length).toBe(BASELINE);
-  });
-
-  CLEAN.forEach(file => {
-    it(`${file} is clean`, () => {
-      expect(findings.filter(f => f.file === file || f.file === file.split('/').join(path.sep))).toEqual([]);
-    });
+  it('never names a column or relation that does not exist', () => {
+    // Listed rather than counted, so a failure says exactly what to fix.
+    expect(findings.map(f => `${f.file}:${f.line} ${f.model}.${f.key} [${f.where}]`)).toEqual([]);
   });
 });
 

@@ -25,13 +25,18 @@ async function issueSession(prisma, user, res) {
   const accessToken = signAccessToken(user.id, user.role.name);
   const { token: refreshToken } = signRefreshToken(user.id);
 
+  // The profile page shows this; nothing used to write it.
+  const lastLoginAt = new Date();
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt } });
+
   await audit(prisma, {
     action: 'login', module: 'auth',
     details: `${user.firstName} ${user.lastName} logged in`,
     userId: user.id,
   });
 
-  const { password: _pw, ...safeUser } = user;
+  const { password: _pw, ...rest } = user;
+  const safeUser = { ...rest, lastLoginAt };
   return res.json({
     token: accessToken,         // Backward compatible
     accessToken,

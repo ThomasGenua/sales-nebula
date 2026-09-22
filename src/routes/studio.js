@@ -388,7 +388,7 @@ router.delete('/picklists/values/:valueId', authenticate, requirePermission('adm
     if (!value) return res.status(404).json({ error: 'Picklist value not found' });
 
     // Deactivating rather than deleting keeps historical records readable
-    const inUse = await prisma.customFieldValue.count({ where: { valueText: value.value } });
+    const inUse = await prisma.customFieldValue.count({ where: { value: value.value } });
     if (inUse > 0 && req.query.force !== 'true') {
       await prisma.picklistValue.update({ where: { id: value.id }, data: { active: false } });
       return res.json({ deactivated: true, reason: `${inUse} records still use this value, so it was deactivated rather than deleted`, inUse });

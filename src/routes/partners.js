@@ -106,9 +106,10 @@ router.get('/:id/commissions', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const partner = await prisma.partner.findUnique({ where: { id: req.params.id } });
     if (!partner) return res.status(404).json({ error: 'Not found' });
-    const wonDeals = await prisma.deal.findMany({ where: { partnerId: req.params.id, stage: 'Closed Won', deletedAt: null }, select: { id: true, name: true, value: true, closedAt: true } });
+    // A won deal's closeDate is when it closed; there is no closedAt.
+    const wonDeals = await prisma.deal.findMany({ where: { partnerId: req.params.id, stage: 'Closed Won', deletedAt: null }, select: { id: true, name: true, value: true, closeDate: true } });
     const rate = partner.commissionRate || 0.10;
-    const commissions = wonDeals.map(d => ({ dealId: d.id, dealName: d.name, value: d.value, commission: Math.round((d.value || 0) * rate), closedAt: d.closedAt }));
+    const commissions = wonDeals.map(d => ({ dealId: d.id, dealName: d.name, value: d.value, commission: Math.round((d.value || 0) * rate), closedAt: d.closeDate }));
     res.json({ partnerId: partner.id, commissionRate: rate, totalCommission: commissions.reduce((s, c) => s + c.commission, 0), commissions });
   } catch (err) { next(err); }
 });
@@ -127,7 +128,9 @@ router.get('/count', authenticate, async (req, res, next) => {
 router.get('/:id/activities', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const activities = await prisma.activity.findMany({ where: { partnerId: req.params.id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []);
+    // Activities carry no partner; a partner's activities are those on the
+    // deals the partner brought in.
+    const activities = await prisma.activity.findMany({ where: { deal: { partnerId: req.params.id }, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 20 });
     res.json(activities);
   } catch (err) { next(err); }
 });

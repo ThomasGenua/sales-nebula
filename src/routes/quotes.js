@@ -3,6 +3,7 @@ const { pickModelFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
+const { createNumbered, QUOTE_NUMBER, INVOICE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -48,11 +49,7 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
     // so a plain "2026-12-31" from a date input does not 500 the create.
     const { data } = pickModelFields('quote', rest);
 
-    // Auto-generate number
-    const count = await prisma.quote.count();
-    data.number = `QT-${String(count + 1).padStart(3, '0')}`;
-
-    const quote = await prisma.quote.create({
+    const quote = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
       data: {
         ...data,
         items: { create: items?.map(i => ({ productId: i.productId, name: i.name, quantity: i.quantity, price: i.price, discount: i.discount || 0 })) || [] },
@@ -104,10 +101,8 @@ router.post('/:id/create-invoice', requirePermission('invoices', 'edit'), async 
     const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { items: true } });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-    const invCount = await prisma.invoice.count();
-    const invoice = await prisma.invoice.create({
+    const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
       data: {
-        number: `INV-${String(invCount + 1).padStart(3, '0')}`,
         quoteId: quote.id,
         accountId: quote.accountId,
         contactId: quote.contactId,
@@ -142,7 +137,8 @@ router.get('/:id/pdf', requirePermission('quotes', 'read'), async (req, res, nex
       where: { id: req.params.id },
       include: {
         items: { include: { product: { select: { name: true, sku: true } } } },
-        account: { select: { name: true, address: true, city: true, state: true, country: true, zip: true } },
+        // Account keeps its postcode as billingZip; asking for zip failed every PDF.
+        account: { select: { name: true, address: true, city: true, state: true, country: true, billingZip: true } },
         contact: { select: { firstName: true, lastName: true, email: true, phone: true } },
       },
     });

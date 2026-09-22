@@ -1,5 +1,5 @@
 /**
- * Human-readable record numbers: CS-001, ORD-0001, CON-0001.
+ * Human-readable record numbers: CS-001, ORD-0001, CON-0001, QT-001, INV-001.
  *
  * Every one of these columns is @unique, and they used to come from
  * count() + 1 alone. That hands out a number twice after any hard delete, and
@@ -57,8 +57,11 @@ const ORDER_NUMBER = { field: 'orderNumber', prefix: 'ORD-', width: 4 };
 const CONTRACT_NUMBER = { field: 'contractNumber', prefix: 'CON-', width: 4 };
 const SUBSCRIPTION_NUMBER = { field: 'subscriptionNumber', prefix: 'SUB-', width: 4 };
 const WORK_ORDER_NUMBER = { field: 'workOrderNumber', prefix: 'WO-', width: 4 };
+const QUOTE_NUMBER = { field: 'number', prefix: 'QT-', width: 3 };
+const INVOICE_NUMBER = { field: 'number', prefix: 'INV-', width: 3 };
 
 module.exports = {
   nextFreeNumber, createNumbered,
   CASE_NUMBER, ORDER_NUMBER, CONTRACT_NUMBER, SUBSCRIPTION_NUMBER, WORK_ORDER_NUMBER,
+  QUOTE_NUMBER, INVOICE_NUMBER,
 };

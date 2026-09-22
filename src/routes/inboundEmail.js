@@ -482,7 +482,7 @@ router.get('/analytics', authenticate, requirePermission('admin', 'read'), async
 
     const [accounts, logs, messages] = await Promise.all([
       prisma.inboundEmailAccount.findMany({ where: { deletedAt: null }, select: { id: true, name: true, status: true, lastPolledAt: true, lastError: true, active: true } }),
-      prisma.emailPollLog.findMany({ where: { createdAt: { gte: since } }, take: 5000 }),
+      prisma.emailPollLog.findMany({ where: { startedAt: { gte: since } }, take: 5000 }),
       prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since } }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
     ]);
 

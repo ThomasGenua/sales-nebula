@@ -36,7 +36,7 @@ router.get('/users', authenticate, requirePermission('admin', 'read'), async (re
     const where = { isPortalUser: true };
     if (search) where.OR = [{ firstName: { contains: search, mode: 'insensitive' } }, { lastName: { contains: search, mode: 'insensitive' } }, { email: { contains: search, mode: 'insensitive' } }];
     const [data, total] = await Promise.all([
-      prisma.user.findMany({ where, take: +limit, skip: (+page - 1) * +limit, select: { id: true, firstName: true, lastName: true, email: true, active: true, lastLogin: true, createdAt: true } }),
+      prisma.user.findMany({ where, take: +limit, skip: (+page - 1) * +limit, select: { id: true, firstName: true, lastName: true, email: true, active: true, lastLoginAt: true, createdAt: true } }),
       prisma.user.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
