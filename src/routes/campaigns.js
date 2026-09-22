@@ -2,6 +2,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
 const { requirePermission, authenticate } = require('../middleware/auth');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = createCrudRouter('campaign', 'campaigns', {
   include: { recipients: { include: { contact: { select: { id: true, firstName: true, lastName: true } }, lead: { select: { id: true, firstName: true, lastName: true } } } }, targetLists: true },
@@ -139,8 +140,9 @@ router.get('/:id/roi', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
     if (!campaign) return res.status(404).json({ error: 'Not found' });
-    const members = await queryWithIncludes(prisma, 'campaignMember', 'findMany', { where: { campaignId: req.params.id }, include: { contact: { include: { deals: { where: { stage: 'Closed Won' }, select: { value: true } } } } } });
-    const totalWonRevenue = members.reduce((s, m) => s + (m.contact?.deals?.reduce((ds, d) => ds + (d.value || 0), 0) || 0), 0);
+    const members = await queryWithIncludes(prisma, 'campaignMember', 'findMany', { where: { campaignId: req.params.id }, include: { contact: { include: { deals: { where: { stage: 'Closed Won', deletedAt: null }, select: { value: true, currency: true } } } } } });
+    const ctx = await currencyContext(prisma);
+    const totalWonRevenue = members.reduce((s, m) => s + sumInBase(m.contact?.deals || [], ctx), 0);
     const cost = campaign.budget || campaign.actualCost || 0;
     const roi = cost > 0 ? Math.round(((totalWonRevenue - cost) / cost) * 100) : 0;
     const responses = members.filter(m => m.status === 'Responded').length;

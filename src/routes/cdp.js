@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { currencyContext, sumInBase } = require('../utils/currency');
 const router = Router();
 router.use(authenticate);
 
@@ -100,13 +101,14 @@ router.get('/profiles/:contactId', authenticate, async (req, res, next) => {
     const contact = await prisma.contact.findUnique({ where: { id: req.params.contactId }, include: { account: { select: { name: true, industry: true } } } });
     if (!contact) return res.status(404).json({ error: 'Not found' });
     const [deals, cases, activities, events] = await Promise.all([
-      prisma.deal.findMany({ where: { contactId: contact.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true } }),
+      prisma.deal.findMany({ where: { contactId: contact.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true, currency: true } }),
       prisma.case.count({ where: { contactId: contact.id, deletedAt: null } }),
       prisma.activity.findMany({ where: { contactId: contact.id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 10 }),
       prisma.cdpEvent.findMany({ where: { contactId: contact.id }, orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []),
     ]);
-    const lifetime = deals.filter(d => d.stage === 'Closed Won').reduce((s, d) => s + (d.value || 0), 0);
-    res.json({ contact, account: contact.account, deals, caseCount: cases, recentActivities: activities, events, lifetimeValue: lifetime, engagementScore: Math.min(100, activities.length * 8 + deals.length * 15) });
+    const ctx = await currencyContext(prisma);
+    const lifetime = sumInBase(deals.filter(d => d.stage === 'Closed Won'), ctx);
+    res.json({ contact, account: contact.account, currency: ctx.base, deals, caseCount: cases, recentActivities: activities, events, lifetimeValue: lifetime, engagementScore: Math.min(100, activities.length * 8 + deals.length * 15) });
   } catch (err) { next(err); }
 });
 

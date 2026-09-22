@@ -36,3 +36,16 @@ export const LOCALES = [
   ["nl-NL", "Nederlands (Nederland)"], ["sv-SE", "Svenska (Sverige)"], ["pl-PL", "Polski (Polska)"],
   ["ja-JP", "日本語 (日本)"], ["zh-CN", "中文 (中国)"], ["ko-KR", "한국어 (대한민국)"],
 ];
+
+/**
+ * An amount of money in the user's format: money(1200, "EUR") -> "€1,200".
+ * Pass { notation: "compact" } for dashboard figures ("$1.2M").
+ */
+export function money(amount, currency = "USD", options = {}) {
+  const n = Number(amount) || 0;
+  try {
+    return new Intl.NumberFormat(current.locale, { style: "currency", currency, maximumFractionDigits: 0, ...options }).format(n);
+  } catch {
+    return `${currency} ${Math.round(n).toLocaleString(current.locale)}`;
+  }
+}

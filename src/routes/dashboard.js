@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
+const { currencyContext, sumInBase, dealTotalInBase } = require('../utils/currency');
 
 const router = Router();
 router.use(authenticate);
@@ -33,7 +34,7 @@ router.get('/', async (req, res, next) => {
       prisma.contact.count({ where: contacts() }),
       prisma.lead.count({ where: leads({ status: { not: 'Converted' } }) }),
       prisma.account.count({ where: accounts() }),
-      prisma.deal.findMany({ where: deals(), select: { id: true, stage: true, value: true, probability: true, closeDate: true, createdAt: true } }),
+      prisma.deal.findMany({ where: deals(), select: { id: true, stage: true, value: true, currency: true, probability: true, closeDate: true, createdAt: true } }),
       prisma.activity.count({ where: activities({ date: { gte: startOfMonth } }) }),
       prisma.case.count({ where: cases({ status: { notIn: ['Resolved', 'Closed'] } }) }),
       prisma.activity.findMany({
@@ -47,6 +48,11 @@ router.get('/', async (req, res, next) => {
         include: { account: { select: { id: true, name: true } }, owner: { select: { id: true, firstName: true, lastName: true } } },
       }),
     ]);
+
+    // Every amount below is in the default currency: each deal's value is
+    // converted before anything is added up.
+    const ctx = await currencyContext(prisma);
+    allDeals.forEach(d => { d.value = ctx.toBase(d.value, d.currency); });
 
     // Pipeline breakdown
     const openDeals = allDeals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
@@ -80,6 +86,7 @@ router.get('/', async (req, res, next) => {
     });
 
     res.json({
+      currency: ctx.base,
       counts: {
         contacts: contactCount,
         leads: leadCount,
@@ -128,21 +135,23 @@ router.get('/leaderboard', async (req, res, next) => {
       where: { active: true },
       select: { id: true, firstName: true, lastName: true, avatar: true },
     });
+    const ctx = await currencyContext(prisma);
 
     const leaderboard = await Promise.all(users.map(async (user) => {
       const [wonDeals, openDeals, activities] = await Promise.all([
-        prisma.deal.findMany({ where: { ownerId: user.id, stage: 'Closed Won' }, select: { value: true, closeDate: true } }),
-        prisma.deal.findMany({ where: { ownerId: user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] } }, select: { value: true } }),
-        prisma.activity.count({ where: { assignedId: user.id, date: { gte: startOfMonth } } }),
+        prisma.deal.findMany({ where: { ownerId: user.id, stage: 'Closed Won', deletedAt: null }, select: { value: true, currency: true, closeDate: true } }),
+        prisma.deal.findMany({ where: { ownerId: user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] }, deletedAt: null }, select: { value: true, currency: true } }),
+        prisma.activity.count({ where: { assignedId: user.id, date: { gte: startOfMonth }, deletedAt: null } }),
       ]);
 
       const wonThisMonth = wonDeals.filter(d => d.closeDate && d.closeDate >= startOfMonth);
 
+      // In the default currency, like every other total.
       return {
         user: { id: user.id, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar },
-        wonAllTime: wonDeals.reduce((s, d) => s + d.value, 0),
-        wonThisMonth: wonThisMonth.reduce((s, d) => s + d.value, 0),
-        openPipeline: openDeals.reduce((s, d) => s + d.value, 0),
+        wonAllTime: sumInBase(wonDeals, ctx),
+        wonThisMonth: sumInBase(wonThisMonth, ctx),
+        openPipeline: sumInBase(openDeals, ctx),
         activitiesThisMonth: activities,
         dealCount: wonDeals.length,
       };
@@ -187,11 +196,11 @@ router.get('/leaderboard', authenticate, async (req, res, next) => {
     for (const u of users) {
       const [won, activities] = await Promise.all([
         // A won deal's closeDate is when it closed; there is no closedAt.
-        prisma.deal.aggregate({ where: { ownerId: u.id, stage: 'Closed Won', closeDate: { gte: since }, deletedAt: null }, _sum: { value: true }, _count: true }),
+        dealTotalInBase(prisma, { ownerId: u.id, stage: 'Closed Won', closeDate: { gte: since }, deletedAt: null }),
         prisma.activity.count({ where: { ownerId: u.id, status: 'Completed', createdAt: { gte: since }, deletedAt: null } }),
       ]);
-      if ((won._count || 0) > 0 || activities > 0) {
-        leaderboard.push({ user: u, wonDeals: won._count || 0, wonRevenue: won._sum.value || 0, completedActivities: activities });
+      if (won.count > 0 || activities > 0) {
+        leaderboard.push({ user: u, wonDeals: won.count, wonRevenue: won.value, completedActivities: activities });
       }
     }
     leaderboard.sort((a, b) => b.wonRevenue - a.wonRevenue);

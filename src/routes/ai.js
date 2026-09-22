@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { complete, aiModel, isConfigured } = require('../services/claude');
 const { limiters } = require('../middleware/rateLimit');
+const { currencyContext } = require('../utils/currency');
 
 const router = Router();
 router.use(authenticate);
@@ -64,11 +65,14 @@ router.post('/pipeline-forecast', limiters.ai, requirePermission('deals', 'read'
   try {
     const prisma = req.app.locals.prisma;
     const deals = await prisma.deal.findMany({ where: await visibleDeals(req), include: { account: true } });
+    // One currency for the model to reason in: the default.
+    const ctx = await currencyContext(prisma);
+    deals.forEach(d => { d.value = Math.round(ctx.toBase(d.value, d.currency)); });
     const open = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
     const won = deals.filter(d => d.stage === 'Closed Won');
     const lost = deals.filter(d => d.stage === 'Closed Lost');
 
-    const context = `Pipeline:\nOpen: ${open.length} deals, $${open.reduce((s, d) => s + d.value, 0)}\nWon: ${won.length}, $${won.reduce((s, d) => s + d.value, 0)}\nLost: ${lost.length}\nWin Rate: ${(won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0}%\n\nDeals:\n${open.map(d => `${d.name}: $${d.value} [${d.stage}] ${d.probability}% close ${d.closeDate || 'TBD'}`).join('\n')}`;
+    const context = `Pipeline (amounts in ${ctx.base}):\nOpen: ${open.length} deals, ${open.reduce((s, d) => s + d.value, 0)}\nWon: ${won.length}, ${won.reduce((s, d) => s + d.value, 0)}\nLost: ${lost.length}\nWin Rate: ${(won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0}%\n\nDeals:\n${open.map(d => `${d.name}: ${d.value} [${d.stage}] ${d.probability}% close ${d.closeDate || 'TBD'}`).join('\n')}`;
 
     const { text, truncated } = await complete({
       system: 'You are a sales forecasting analyst. Provide: 1) 90-day forecast (conservative/expected/optimistic), 2) Stage conversion analysis, 3) Deals likely to close, 4) At-risk deals, 5) Recommendations.',

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -46,14 +47,19 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
       where: {
         stage: { notIn: ['Closed Won', 'Closed Lost'] },
         closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) },
+        deletedAt: null,
         ...(req.body.ownerId ? { ownerId: req.body.ownerId } : {}),
       },
     });
 
+    // A forecast is in the default currency, so each deal's amount is
+    // converted as it is added.
+    const ctx = await currencyContext(prisma);
+
     // Auto-categorize based on probability
     const items = deals.map(d => ({
       dealId: d.id,
-      amount: d.value,
+      amount: ctx.toBase(d.value, d.currency),
       probability: d.probability,
       closeDate: d.closeDate,
       category: d.probability >= 90 ? 'Commit' : d.probability >= 70 ? 'Best Case' : 'Pipeline',
@@ -65,9 +71,9 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
 
     // Get already closed deals in period
     const closedDeals = await prisma.deal.findMany({
-      where: { stage: 'Closed Won', closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) } },
+      where: { stage: 'Closed Won', closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) }, deletedAt: null },
     });
-    const closed = closedDeals.reduce((s, d) => s + d.value, 0);
+    const closed = sumInBase(closedDeals, ctx);
 
     const forecast = await prisma.forecast.create({
       data: {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
-import { fmt, setUserPrefs, timeZones, LOCALES } from "./prefs";
+import { fmt, money, setUserPrefs, timeZones, LOCALES } from "./prefs";
 import {
   Search, Bell, Settings, LogOut, Menu, X, Plus, Edit2, Trash2, Eye,
   ChevronDown, ChevronRight, ChevronLeft, Filter, Download, Upload,
@@ -1307,10 +1307,14 @@ function LeadsPage() {
 
 function DealsPage() {
   const stageBadge = v => { const c = { "Closed Won": "success", "Closed Lost": "danger", Negotiation: "warning", Qualification: "info", Discovery: "purple", Proposal: "cyan" }; return <Badge color={c[v] || "primary"}>{v || "-"}</Badge>; };
+  // A deal's value is in its own currency; the picker offers the active ones.
+  const { data: currencies } = useApi("/deals/currencies");
+  const base = currencies?.base || "USD";
+  const currencyOptions = (currencies?.data || []).map(c => ({ value: c.code, label: `${c.code} (${c.name})` }));
   return <ModulePage title="Deals" icon={Target} endpoint="/deals"
     columns={[
       { key: "name", label: "Deal" }, { key: "stage", label: "Stage", render: stageBadge },
-      { key: "value", label: "Value", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "value", label: "Value", render: (v, row) => <span className="font-mono">{money(v, row?.currency || base)}</span> },
       { key: "probability", label: "Prob", render: v => `${v || 0}%` },
       { key: "closeDate", label: "Close", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
@@ -1320,7 +1324,7 @@ function DealsPage() {
     ]}
     detailFields={[
       { key: "name", label: "Deal Name" }, { key: "stage", label: "Stage" },
-      { key: "value", label: "Value", render: v => `$${(v||0).toLocaleString(...fmt())}` },
+      { key: "value", label: "Value", render: (v, row) => money(v, row?.currency || base) },
       { key: "probability", label: "Probability", render: v => `${v||0}%` },
       { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "source", label: "Source" }, { key: "type", label: "Type" },
@@ -1328,6 +1332,7 @@ function DealsPage() {
     ]}
     formFields={[
       { key: "name", label: "Deal Name", required: true }, { key: "value", label: "Value", type: "number" },
+      ...(currencyOptions.length > 1 ? [{ key: "currency", label: "Currency", type: "select", options: currencyOptions }] : []),
       { key: "stage", label: "Stage", type: "select", options: ["Qualification","Discovery","Proposal","Negotiation","Closed Won","Closed Lost"] },
       { key: "probability", label: "Probability %", type: "number" },
       { key: "closeDate", label: "Close Date", type: "date" }, { key: "source", label: "Source" },
@@ -1737,8 +1742,8 @@ function DashboardPage() {
 
       {/* KPI strip - scrollable on mobile */}
       <KpiRow items={[
-        { label: "Pipeline", value: `$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`, sub: `${pipe.dealCount || 0} deals` },
-        { label: "Won MTD", value: `$${((rev.wonThisMonth?.value || 0) / 1000).toFixed(0)}K` },
+        { label: "Pipeline", value: money(pipe.totalValue, s.currency, { notation: "compact" }), sub: `${pipe.dealCount || 0} deals` },
+        { label: "Won MTD", value: money(rev.wonThisMonth?.value, s.currency, { notation: "compact" }) },
         { label: "Open Leads", value: counts.leads || 0 },
         { label: "Win Rate", value: `${s.winRate || pipe.winRate || 0}%` },
         { label: "Cases", value: counts.openCases || 0 },
@@ -1748,7 +1753,7 @@ function DashboardPage() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4 mt-4 mb-4 sm:mb-6">
         <StatCard label="Total Deals" value={pipe.dealCount || counts.openDeals || 0} icon={Target} color="primary"
           change={s.trends?.newDeals?.changePct} changeHint="New deals, last 30 days vs the 30 days before" />
-        <StatCard label="Pipeline Value" value={`$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`} icon={DollarSign} color="success"
+        <StatCard label="Pipeline Value" value={money(pipe.totalValue, s.currency, { notation: "compact" })} icon={DollarSign} color="success"
           change={s.trends?.newPipeline?.changePct} changeHint="Value of new deals, last 30 days vs the 30 days before" />
         <StatCard label="Contacts" value={counts.contacts || 0} icon={Users} color="purple" />
         <StatCard label="Accounts" value={counts.accounts || 0} icon={Building2} color="cyan" />

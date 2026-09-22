@@ -191,6 +191,9 @@ model Deal {
   deletedAt   DateTime?
   // Written by the routes, never migrated until now.
   partnerId String?
+  // ISO code of the currency `value` is in (a Currency.code); totals convert
+  // to the default currency. Null counts as the default.
+  currency  String?
 
   @@index([accountId])
   @@index([contactId])

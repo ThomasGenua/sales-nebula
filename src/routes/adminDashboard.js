@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { currencyContext, sumInBase } = require('../utils/currency');
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'read'));
 
@@ -62,13 +63,15 @@ router.get('/system', async (req, res, next) => {
     ]);
 
     // Pipeline stats
+    // In the default currency, over live deals.
     const deals_data = await prisma.deal.findMany({
-      select: { value: true, stage: true },
-      where: { stage: { notIn: ['Closed Lost'] } },
+      select: { value: true, currency: true, stage: true },
+      where: { stage: { notIn: ['Closed Lost'] }, deletedAt: null },
     });
-    const pipelineValue = deals_data.reduce((s, d) => s + (d.value || 0), 0);
+    const ctx = await currencyContext(prisma);
+    const pipelineValue = sumInBase(deals_data, ctx);
     const wonDeals = deals_data.filter(d => d.stage === 'Closed Won');
-    const wonValue = wonDeals.reduce((s, d) => s + (d.value || 0), 0);
+    const wonValue = sumInBase(wonDeals, ctx);
 
     // Automation stats
     const [activeWorkflows, activeFlows, approvalsPending] = await Promise.all([

@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = createCrudRouter('contact', 'contacts', {
   include: {
@@ -145,12 +146,13 @@ router.get('/:id/relationships', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [deals, cases, activities, account] = await Promise.all([
-      prisma.deal.findMany({ where: { contactId: req.params.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true }, take: 20 }),
+      prisma.deal.findMany({ where: { contactId: req.params.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true, currency: true }, take: 20 }),
       prisma.case.findMany({ where: { contactId: req.params.id, deletedAt: null }, select: { id: true, subject: true, status: true, priority: true }, take: 20 }),
       prisma.activity.findMany({ where: { contactId: req.params.id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true }, take: 20, orderBy: { createdAt: 'desc' } }),
       prisma.contact.findUnique({ where: { id: req.params.id }, select: { account: { select: { id: true, name: true } } } }).then(c => c?.account),
     ]);
-    res.json({ account, deals, cases, activities, summary: { dealCount: deals.length, caseCount: cases.length, activityCount: activities.length, totalDealValue: deals.reduce((s, d) => s + (d.value || 0), 0) } });
+    const ctx = await currencyContext(prisma);
+    res.json({ account, deals, cases, activities, summary: { dealCount: deals.length, caseCount: cases.length, activityCount: activities.length, currency: ctx.base, totalDealValue: sumInBase(deals, ctx) } });
   } catch (err) { next(err); }
 });
 

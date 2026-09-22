@@ -274,6 +274,18 @@ function applyAccessFilter(where, accessFilter) {
 }
 
 /**
+ * `where`, narrowed to the live records of a module the requesting user may
+ * read. For summary endpoints that query a model directly, outside the CRUD
+ * router's guards, and so used to count deleted and other people's records.
+ */
+async function visibleWhere(req, module, modelName, where = {}) {
+  const prisma = req.app.locals.prisma;
+  const filter = req.user ? await buildAccessFilter(prisma, req.user, module, { modelName }) : null;
+  const live = prisma[modelName]?.fields?.deletedAt ? { deletedAt: null } : {};
+  return applyAccessFilter({ ...where, ...live }, filter);
+}
+
+/**
  * Evaluate SecurityGroupRule conditions against a record and assign it
  * to the matching groups. Called after create/update.
  */
@@ -329,7 +341,7 @@ async function autoAssignToUserGroups(prisma, userId, module, recordId) {
 
 module.exports = {
   invalidateOrgWideDefaultCache, invalidateHierarchyCache, subordinateUserIds,
-  rowSecurity, buildAccessFilter, applyAccessFilter,
+  rowSecurity, buildAccessFilter, applyAccessFilter, visibleWhere,
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
   applyAutoAssignRules, autoAssignToUserGroups, isAdmin,
 };

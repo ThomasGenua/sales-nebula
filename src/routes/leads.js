@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { resolveDealCurrency } = require('../utils/currency');
 
 const router = createCrudRouter('lead', 'leads', {
   include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, customValues: { include: { customField: true } } },
@@ -63,6 +64,7 @@ const router = createCrudRouter('lead', 'leads', {
             data: {
               name: dealName || `${lead.company} - New Deal`,
               value: dealValue || lead.value || 0,
+              currency: await resolveDealCurrency(prisma, req.body.dealCurrency),
               stage: 'Qualification',
               contactId: result.contact.id,
               accountId,

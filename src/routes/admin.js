@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { invalidateCurrencyCache } = require('../utils/currency');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -456,20 +457,42 @@ router.get('/currencies', requirePermission('settings', 'read'), async (req, res
   } catch (err) { next(err); }
 });
 
+/** A usable exchange rate: a positive, finite number. */
+const validRate = rate => Number.isFinite(Number(rate)) && Number(rate) > 0;
+
+/**
+ * Make a currency the default. Rates count units per one unit of the default,
+ * so every rate is re-based on the new one; and deals that name no currency
+ * meant the old default, so they are stamped with it first.
+ */
+async function makeDefaultCurrency(prisma, currency) {
+  const previous = await prisma.currency.findFirst({ where: { isDefault: true } });
+  if (previous?.id === currency.id) return;
+  if (previous) await prisma.deal.updateMany({ where: { currency: null }, data: { currency: previous.code } });
+  const all = await prisma.currency.findMany();
+  await prisma.$transaction([
+    ...all.map(c => prisma.currency.update({
+      where: { id: c.id },
+      data: { exchangeRate: c.exchangeRate / currency.exchangeRate, isDefault: c.id === currency.id },
+    })),
+  ]);
+}
+
 router.post('/currencies', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { code, name, symbol, exchangeRate, isDefault } = req.body;
+    const { code, name, symbol, exchangeRate = 1.0, isDefault } = req.body;
     if (!code || !name || !symbol) return res.status(400).json({ error: 'code, name, symbol required' });
+    if (!validRate(exchangeRate)) return res.status(400).json({ error: 'exchangeRate must be a positive number' });
 
-    // If setting as default, unset existing default
-    if (isDefault) {
-      await prisma.currency.updateMany({ where: { isDefault: true }, data: { isDefault: false } });
-    }
-
-    const currency = await prisma.currency.create({
-      data: { code: code.toUpperCase(), name, symbol, exchangeRate: exchangeRate || 1.0, isDefault: isDefault || false },
+    let currency = await prisma.currency.create({
+      data: { code: code.toUpperCase(), name, symbol, exchangeRate: Number(exchangeRate), isDefault: false },
     });
+    if (isDefault) {
+      await makeDefaultCurrency(prisma, currency);
+      currency = await prisma.currency.findUnique({ where: { id: currency.id } });
+    }
+    invalidateCurrencyCache();
     res.status(201).json(currency);
   } catch (err) { next(err); }
 });
@@ -478,16 +501,25 @@ router.put('/currencies/:id', requirePermission('settings', 'full'), async (req,
   try {
     const prisma = req.app.locals.prisma;
     const { name, symbol, exchangeRate, active, isDefault } = req.body;
+    const existing = await prisma.currency.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: 'Currency not found' });
+    if (exchangeRate !== undefined && !validRate(exchangeRate)) return res.status(400).json({ error: 'exchangeRate must be a positive number' });
+    if (existing.isDefault && exchangeRate !== undefined && Number(exchangeRate) !== 1) {
+      return res.status(400).json({ error: 'The default currency\'s rate is 1 by definition; make another currency the default instead' });
+    }
+    if (existing.isDefault && active === false) return res.status(400).json({ error: 'The default currency cannot be deactivated' });
+
     const data = {};
     if (name !== undefined) data.name = name;
     if (symbol !== undefined) data.symbol = symbol;
-    if (exchangeRate !== undefined) data.exchangeRate = exchangeRate;
+    if (exchangeRate !== undefined) data.exchangeRate = Number(exchangeRate);
     if (active !== undefined) data.active = active;
-    if (isDefault) {
-      await prisma.currency.updateMany({ where: { isDefault: true }, data: { isDefault: false } });
-      data.isDefault = true;
+    let currency = await prisma.currency.update({ where: { id: req.params.id }, data });
+    if (isDefault && !existing.isDefault) {
+      await makeDefaultCurrency(prisma, currency);
+      currency = await prisma.currency.findUnique({ where: { id: currency.id } });
     }
-    const currency = await prisma.currency.update({ where: { id: req.params.id }, data });
+    invalidateCurrencyCache();
     res.json(currency);
   } catch (err) { next(err); }
 });
@@ -496,8 +528,13 @@ router.delete('/currencies/:id', requirePermission('settings', 'full'), async (r
   try {
     const prisma = req.app.locals.prisma;
     const currency = await prisma.currency.findUnique({ where: { id: req.params.id } });
-    if (currency?.isDefault) return res.status(400).json({ error: 'Cannot delete default currency' });
+    if (!currency) return res.status(404).json({ error: 'Currency not found' });
+    if (currency.isDefault) return res.status(400).json({ error: 'Cannot delete default currency' });
+    // A deal's value means nothing without its currency's rate.
+    const inUse = await prisma.deal.count({ where: { currency: currency.code } });
+    if (inUse) return res.status(409).json({ error: `${inUse} deals are in ${currency.code}; deactivate it instead`, inUse });
     await prisma.currency.delete({ where: { id: req.params.id } });
+    invalidateCurrencyCache();
     res.json({ success: true });
   } catch (err) { next(err); }
 });
