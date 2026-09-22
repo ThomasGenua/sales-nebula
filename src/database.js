@@ -12,9 +12,21 @@ function prismaLogOptions() {
   return process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'];
 }
 
-async function tryPostgres() {
-  if (!process.env.DATABASE_URL) return null;
+/**
+ * Local development may run on SQLite when PostgreSQL is missing. Production
+ * does not, unless ALLOW_SQLITE_FALLBACK=true says so: an API that lost its
+ * database for a moment used to come up on an empty SQLite file, serve an empty
+ * CRM, and take writes the real database never saw. There it waits for
+ * PostgreSQL instead, and exits if it never answers, so the supervisor
+ * restarts it.
+ */
+function sqliteFallbackAllowed() {
+  return process.env.NODE_ENV !== 'production' || process.env.ALLOW_SQLITE_FALLBACK === 'true';
+}
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function tryPostgresOnce() {
   const client = new PostgresClient({ log: prismaLogOptions() });
   try {
     await Promise.race([
@@ -27,9 +39,25 @@ async function tryPostgres() {
     logger.info('Database: PostgreSQL');
     return client;
   } catch (error) {
-    logger.warn({ error: error.message }, 'PostgreSQL unavailable; falling back to SQLite');
     await client.$disconnect().catch(() => {});
-    return null;
+    throw error;
+  }
+}
+
+/** Connect, retrying with backoff (1s, 2s, 4s, ...) up to `attempts` times. */
+async function tryPostgres({ attempts = 1 } = {}) {
+  if (!process.env.DATABASE_URL) return null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await tryPostgresOnce();
+    } catch (error) {
+      if (attempt >= attempts) {
+        logger.warn({ error: error.message, attempts }, 'PostgreSQL unavailable');
+        return null;
+      }
+      logger.warn({ error: error.message, attempt, attempts }, 'PostgreSQL unavailable; retrying');
+      await sleep(1000 * 2 ** (attempt - 1));
+    }
   }
 }
 
@@ -54,9 +82,16 @@ function prepareSqlite() {
 }
 
 async function createDatabaseClient() {
-  const postgres = await tryPostgres();
+  const fallback = sqliteFallbackAllowed();
+  const attempts = fallback ? 1 : (parseInt(process.env.DB_CONNECT_ATTEMPTS, 10) || 5);
+  const postgres = await tryPostgres({ attempts });
   if (postgres) return { prisma: postgres, provider: 'postgresql' };
 
+  if (!fallback) {
+    const reason = process.env.DATABASE_URL ? 'PostgreSQL is unreachable' : 'DATABASE_URL is not set';
+    throw new Error(`${reason}. Refusing to start on the SQLite fallback in production; set ALLOW_SQLITE_FALLBACK=true to allow it.`);
+  }
+  logger.warn('Falling back to SQLite: this database is local to this machine and separate from PostgreSQL');
   prepareSqlite();
   const { PrismaClient: SqliteClient } = require('./generated/sqlite-client');
   const prisma = new SqliteClient({
@@ -68,4 +103,4 @@ async function createDatabaseClient() {
   return { prisma, provider: 'sqlite' };
 }
 
-module.exports = { createDatabaseClient };
+module.exports = { createDatabaseClient, sqliteFallbackAllowed };

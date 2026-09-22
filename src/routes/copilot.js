@@ -1,10 +1,13 @@
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
+const { complete, isConfigured, AiError } = require('../services/claude');
+// The tighter limit meant for model calls was defined and attached to nothing.
+const { limiters } = require('../middleware/rateLimit');
 
 const router = Router();
 
 // Ask copilot
-router.post('/ask', authenticate, async (req, res, next) => {
+router.post('/ask', authenticate, limiters.ai, async (req, res, next) => {
   try {
     const { question, context } = req.body;
     if (!question) return res.status(400).json({ error: 'question required' });
@@ -19,21 +22,18 @@ router.post('/ask', authenticate, async (req, res, next) => {
       ]);
       enrichedContext = { openDeals: dealCount, openCases, weeklyActivities: activities };
     }
-    // If Anthropic key available, use AI
-    if (process.env.ANTHROPIC_API_KEY) {
+    // With a key configured, ask the model. If it cannot answer (outage,
+    // rate limit, refusal) the rule-based reply below still helps.
+    if (isConfigured()) {
       try {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514', max_tokens: 1024,
-            system: `You are a CRM copilot assistant. User context: ${JSON.stringify(enrichedContext)}. Be concise and actionable.`,
-            messages: [{ role: 'user', content: question }],
-          }),
+        const { text } = await complete({
+          system: `You are a CRM copilot assistant. User context: ${JSON.stringify(enrichedContext)}. Be concise and actionable.`,
+          messages: [{ role: 'user', content: question }],
         });
-        const data = await response.json();
-        return res.json({ answer: data.content?.[0]?.text || 'Unable to process', context: enrichedContext, model: 'ai' });
-      } catch (e) { /* fall through to rule-based */ }
+        if (text) return res.json({ answer: text, context: enrichedContext, model: 'ai' });
+      } catch (e) {
+        if (!(e instanceof AiError)) throw e;
+      }
     }
     // Rule-based fallback
     const lowerQ = question.toLowerCase();
@@ -46,7 +46,7 @@ router.post('/ask', authenticate, async (req, res, next) => {
 });
 
 // Chat (conversational with history)
-router.post('/chat', authenticate, async (req, res, next) => {
+router.post('/chat', authenticate, limiters.ai, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { message, threadId } = req.body;
@@ -55,16 +55,23 @@ router.post('/chat', authenticate, async (req, res, next) => {
     let thread;
     if (threadId) {
       thread = await prisma.copilotThread.findUnique({ where: { id: threadId } });
-      if (!thread) return res.status(404).json({ error: 'Thread not found' });
+      // Another user's thread reads as missing, as it does in GET /threads/:id.
+      if (!thread || thread.userId !== req.user.id) return res.status(404).json({ error: 'Thread not found' });
     } else {
       thread = await prisma.copilotThread.create({ data: { userId: req.user.id, title: message.substring(0, 100) } });
     }
     // Save user message
     await prisma.copilotMessage.create({ data: { threadId: thread.id, role: 'user', content: message } });
-    // Generate response (AI or fallback)
-    const response = `I understand you're asking about "${message.substring(0, 50)}". Let me help you with that based on your CRM data.`;
-    await prisma.copilotMessage.create({ data: { threadId: thread.id, role: 'assistant', content: response } });
-    res.json({ threadId: thread.id, response });
+    // This used to answer every message with the same canned sentence,
+    // claiming to use CRM data it never read. It now sends the thread to the
+    // model, or says plainly that no model is configured.
+    const history = await prisma.copilotMessage.findMany({ where: { threadId: thread.id }, orderBy: { createdAt: 'asc' }, take: 50 });
+    const { text } = await complete({
+      system: 'You are a CRM copilot assistant. Be concise and actionable.',
+      messages: history.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+    });
+    await prisma.copilotMessage.create({ data: { threadId: thread.id, role: 'assistant', content: text } });
+    res.json({ threadId: thread.id, response: text });
   } catch (err) { next(err); }
 });
 
@@ -96,6 +103,9 @@ router.get('/threads/:id', authenticate, async (req, res, next) => {
 router.delete('/threads/:id', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Any user could delete anyone's thread by id.
+    const thread = await prisma.copilotThread.findUnique({ where: { id: req.params.id }, select: { userId: true } });
+    if (!thread || thread.userId !== req.user.id) return res.status(404).json({ error: 'Thread not found' });
     await prisma.copilotMessage.deleteMany({ where: { threadId: req.params.id } });
     await prisma.copilotThread.delete({ where: { id: req.params.id } });
     res.json({ success: true });

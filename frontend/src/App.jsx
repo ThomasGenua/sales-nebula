@@ -393,20 +393,22 @@ function Modal({ open, onClose, title, children, wide }) {
   );
 }
 
-function StatCard({ label, value, change, icon: Icon, color = "primary" }) {
+function StatCard({ label, value, change, changeHint, icon: Icon, color = "primary" }) {
   const bgColors = { primary: "bg-[rgba(245,166,35,0.08)]", success: "bg-[rgba(52,211,153,0.10)]", warning: "bg-[rgba(251,191,36,0.10)]", danger: "bg-[rgba(248,113,113,0.10)]", purple: "bg-[rgba(167,139,250,0.10)]", cyan: "bg-[rgba(45,212,191,0.10)]" };
   const iconColors = { primary: "text-[#F5A623]", success: "text-[#34D399]", warning: "text-[#FBBF24]", danger: "text-[#F87171]", purple: "text-[#A78BFA]", cyan: "text-[#2DD4BF]" };
   const isUp = change > 0;
+  const isFlat = change === 0;
   return (
     <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-5 hover:border-[#203060] transition-colors active:scale-[0.98] touch-manipulation">
       <div className="flex items-start justify-between mb-2 sm:mb-3">
         <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-lg ${bgColors[color]} flex items-center justify-center`}>
           <Icon size={18} className={iconColors[color]} />
         </div>
-        {change !== undefined && (
-          <div className={`flex items-center gap-0.5 text-xs font-medium ${isUp ? "text-[#34D399]" : "text-[#F87171]"}`}>
-            {isUp ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+        {change != null && (
+          <div className={`flex items-center gap-0.5 text-xs font-medium ${isFlat ? "text-[#4A5168]" : isUp ? "text-[#34D399]" : "text-[#F87171]"}`} title={changeHint}>
+            {!isFlat && (isUp ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />)}
             {Math.abs(change)}%
+            {changeHint && <span className="sr-only">{changeHint}</span>}
           </div>
         )}
       </div>
@@ -1740,8 +1742,10 @@ function DashboardPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4 mt-4 mb-4 sm:mb-6">
-        <StatCard label="Total Deals" value={pipe.dealCount || counts.openDeals || 0} icon={Target} color="primary" change={12} />
-        <StatCard label="Pipeline Value" value={`$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`} icon={DollarSign} color="success" change={8} />
+        <StatCard label="Total Deals" value={pipe.dealCount || counts.openDeals || 0} icon={Target} color="primary"
+          change={s.trends?.newDeals?.changePct} changeHint="New deals, last 30 days vs the 30 days before" />
+        <StatCard label="Pipeline Value" value={`$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`} icon={DollarSign} color="success"
+          change={s.trends?.newPipeline?.changePct} changeHint="Value of new deals, last 30 days vs the 30 days before" />
         <StatCard label="Contacts" value={counts.contacts || 0} icon={Users} color="purple" />
         <StatCard label="Accounts" value={counts.accounts || 0} icon={Building2} color="cyan" />
       </div>

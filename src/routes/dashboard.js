@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
+const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 
 const router = Router();
 router.use(authenticate);
@@ -12,23 +13,36 @@ router.get('/', async (req, res, next) => {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
 
+    // Live records the user may see. This counted soft-deleted records, and
+    // ignored sharing, so under a Private default a rep still saw other reps'
+    // deals and activities in the recent lists.
+    const user = req.user || await prisma.user.findUnique({ where: { id: req.userId }, include: { role: true } });
+    const [contacts, leads, accounts, deals, activities, cases] = await Promise.all([
+      ['contacts', 'contact'], ['leads', 'lead'], ['accounts', 'account'],
+      ['deals', 'deal'], ['activities', 'activity'], ['cases', 'case'],
+    ].map(async ([module, modelName]) => {
+      const filter = await buildAccessFilter(prisma, user, module, { modelName });
+      return (where = {}) => applyAccessFilter({ ...where, deletedAt: null }, filter);
+    }));
+
     const [
       contactCount, leadCount, accountCount,
       allDeals, activitiesThisMonth, casesOpen,
       recentActivities, recentDeals,
     ] = await Promise.all([
-      prisma.contact.count(),
-      prisma.lead.count({ where: { status: { not: 'Converted' } } }),
-      prisma.account.count(),
-      prisma.deal.findMany({ select: { id: true, stage: true, value: true, probability: true, closeDate: true, createdAt: true } }),
-      prisma.activity.count({ where: { date: { gte: startOfMonth } } }),
-      prisma.case.count({ where: { status: { notIn: ['Resolved', 'Closed'] } } }),
+      prisma.contact.count({ where: contacts() }),
+      prisma.lead.count({ where: leads({ status: { not: 'Converted' } }) }),
+      prisma.account.count({ where: accounts() }),
+      prisma.deal.findMany({ where: deals(), select: { id: true, stage: true, value: true, probability: true, closeDate: true, createdAt: true } }),
+      prisma.activity.count({ where: activities({ date: { gte: startOfMonth } }) }),
+      prisma.case.count({ where: cases({ status: { notIn: ['Resolved', 'Closed'] } }) }),
       prisma.activity.findMany({
+        where: activities(),
         orderBy: { date: 'desc' }, take: 10,
         include: { contact: { select: { id: true, firstName: true, lastName: true } }, deal: { select: { id: true, name: true } }, assignedTo: { select: { id: true, firstName: true, lastName: true } } },
       }),
       prisma.deal.findMany({
-        where: { createdAt: { gte: startOfMonth } },
+        where: deals({ createdAt: { gte: startOfMonth } }),
         orderBy: { createdAt: 'desc' }, take: 10,
         include: { account: { select: { id: true, name: true } }, owner: { select: { id: true, firstName: true, lastName: true } } },
       }),
@@ -42,8 +56,19 @@ router.get('/', async (req, res, next) => {
     const wonThisQuarter = wonDeals.filter(d => d.closeDate && d.closeDate >= startOfQuarter);
 
     // Conversion rates
-    const totalConverted = await prisma.lead.count({ where: { status: 'Converted' } });
-    const totalLeadsEver = await prisma.lead.count();
+    const totalConverted = await prisma.lead.count({ where: leads({ status: 'Converted' }) });
+    const totalLeadsEver = await prisma.lead.count({ where: leads() });
+
+    // New business, last 30 days against the 30 before. These replace the
+    // fixed +12% / +8% the dashboard cards used to show. No change is
+    // reported when the earlier window is empty.
+    const DAY = 86400000;
+    const recentFrom = new Date(now - 30 * DAY);
+    const priorFrom = new Date(now - 60 * DAY);
+    const openedRecently = allDeals.filter(d => d.createdAt >= recentFrom);
+    const openedBefore = allDeals.filter(d => d.createdAt >= priorFrom && d.createdAt < recentFrom);
+    const sumValue = list => list.reduce((s, d) => s + d.value, 0);
+    const changePct = (current, previous) => (previous > 0 ? Math.round(((current - previous) / previous) * 100) : null);
 
     // Weighted pipeline
     const weightedPipeline = openDeals.reduce((s, d) => s + (d.value * d.probability / 100), 0);
@@ -81,6 +106,11 @@ router.get('/', async (req, res, next) => {
       rates: {
         winRate: (wonDeals.length + lostDeals.length) > 0 ? Math.round(wonDeals.length / (wonDeals.length + lostDeals.length) * 100) : 0,
         leadConversion: totalLeadsEver > 0 ? Math.round(totalConverted / totalLeadsEver * 100) : 0,
+      },
+      trends: {
+        window: '30d',
+        newDeals: { current: openedRecently.length, previous: openedBefore.length, changePct: changePct(openedRecently.length, openedBefore.length) },
+        newPipeline: { current: sumValue(openedRecently), previous: sumValue(openedBefore), changePct: changePct(sumValue(openedRecently), sumValue(openedBefore)) },
       },
       recentActivities,
       recentDeals,

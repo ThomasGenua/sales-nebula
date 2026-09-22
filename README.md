@@ -41,9 +41,13 @@ Shared demo access is always available from the login screen:
 `demo@salesnebula.com` / `Demo1234!`. Demo mode runs entirely in the browser
 with local sample data, requires no API or database, and is read-only.
 
-When `DATABASE_URL` is not set, or PostgreSQL cannot be reached, the API
-automatically creates and uses `data/sales-nebula.sqlite`. PostgreSQL remains
-the production database when it is available.
+In development, when `DATABASE_URL` is not set or PostgreSQL cannot be
+reached, the API creates and uses `data/sales-nebula.sqlite`. With
+`NODE_ENV=production` it never falls back on its own: it retries PostgreSQL
+(`DB_CONNECT_ATTEMPTS`, default 5, with backoff) and then exits, so a database
+blip cannot bring the app up on an empty SQLite file. Set
+`ALLOW_SQLITE_FALLBACK=true` to allow the fallback in production anyway, for
+example on a single-machine demo.
 
 ## At a Glance
 
@@ -530,7 +534,8 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 | Variable | Description |
 |----------|-------------|
 | `REDIS_URL` | Redis connection string for caching and job queues |
-| `ANTHROPIC_API_KEY` | Anthropic API key (enables AI Agents and Copilot features) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (enables the AI endpoints and the Copilot) |
+| `ANTHROPIC_MODEL` | Claude model for every AI call (default `claude-opus-5`) |
 
 **File Storage** (S3 or local fallback):
 

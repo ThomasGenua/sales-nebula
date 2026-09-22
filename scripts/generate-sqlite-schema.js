@@ -25,11 +25,5 @@ schema = schema.replace(
   },
 );
 
-// SQLite table names are case-insensitive; these are distinct in PostgreSQL.
-schema = schema.replace(
-  /(model PriceBookEntry \{[\s\S]*?@@index\(\[priceBookId\]\)\r?\n)(\})/,
-  '$1  @@map("PriceBookEntryLegacy")\n$2',
-);
-
 fs.writeFileSync(outputPath, schema);
 console.log(`Generated ${path.relative(process.cwd(), outputPath)}`);

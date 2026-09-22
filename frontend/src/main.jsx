@@ -6,6 +6,13 @@ import { PrivacyPage, TermsPage } from "./Legal";
 import ResetPasswordPage from "./ResetPassword";
 import ErrorBoundary from "./ErrorBoundary";
 import { ThemeProvider } from "./theme";
+// Served from this app rather than Google Fonts, so no visitor's IP address
+// goes to a third party just to render text.
+import "@fontsource/poppins/400.css";
+import "@fontsource/poppins/500.css";
+import "@fontsource/poppins/600.css";
+import "@fontsource/poppins/700.css";
+import "@fontsource/poppins/800.css";
 import "./index.css";
 
 /**

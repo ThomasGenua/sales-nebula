@@ -4263,19 +4263,6 @@ model TeamMember {
   @@index([userId])
 }
 
-model PriceBookEntry {
-  id          String   @id @default(cuid())
-  priceBookId String?
-  productId   String
-  unitPrice   Float
-  currency    String   @default("USD")
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  @@index([productId])
-  @@index([priceBookId])
-}
-
 // ═══════════════════════════════════════════════════════════════
 // TIER 1A: CALENDAR SUITE
 // ═══════════════════════════════════════════════════════════════

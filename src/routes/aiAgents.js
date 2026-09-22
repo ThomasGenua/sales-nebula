@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+// The app integrates Claude only; these templates named gpt-4.
+const { aiModel } = require('../services/claude');
 
 const router = Router();
 
@@ -153,8 +155,8 @@ router.get('/:id/analytics', authenticate, async (req, res, next) => {
 // Agent templates
 router.get('/templates', authenticate, async (req, res, next) => {
   res.json([
-    { type: 'SDR', name: 'Sales Development', description: 'Prioritize leads, draft outreach, qualify prospects', defaultConfig: { model: 'gpt-4', maxTokens: 1000 } },
-    { type: 'DealCoach', name: 'Deal Coach', description: 'Analyze deals, suggest next steps, identify risks', defaultConfig: { model: 'gpt-4', maxTokens: 2000 } },
-    { type: 'ServiceAgent', name: 'Service Agent', description: 'Triage cases, suggest solutions, draft responses', defaultConfig: { model: 'gpt-4', maxTokens: 1500 } },
+    { type: 'SDR', name: 'Sales Development', description: 'Prioritize leads, draft outreach, qualify prospects', defaultConfig: { model: aiModel(), maxTokens: 1000 } },
+    { type: 'DealCoach', name: 'Deal Coach', description: 'Analyze deals, suggest next steps, identify risks', defaultConfig: { model: aiModel(), maxTokens: 2000 } },
+    { type: 'ServiceAgent', name: 'Service Agent', description: 'Triage cases, suggest solutions, draft responses', defaultConfig: { model: aiModel(), maxTokens: 1500 } },
   ]);
 });
