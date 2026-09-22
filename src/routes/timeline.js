@@ -61,29 +61,29 @@ router.get('/:module/:recordId', async (req, res, next) => {
     const audits = await prisma.auditLog.findMany({
       where: { recordId, ...cursor },
       orderBy: { createdAt: 'desc' }, take,
-      select: { id: true, action: true, module: true, details: true, changes: true, createdAt: true },
+      // Field-level changes are written into details; there is no changes column.
+      select: { id: true, action: true, module: true, details: true, createdAt: true },
     });
     audits.forEach(a => timeline.push({ ...a, timelineType: 'audit', timelineDate: a.createdAt }));
 
     // Deal stage history
     if (module === 'deals') {
       const stages = await prisma.dealStageHistory.findMany({
-        where: { dealId: recordId },
-        orderBy: { changedAt: 'desc' }, take,
-        select: { id: true, fromStage: true, toStage: true, changedAt: true },
+        where: { dealId: recordId, ...cursor },
+        orderBy: { createdAt: 'desc' }, take,
+        select: { id: true, fromStage: true, toStage: true, createdAt: true },
       });
-      stages.forEach(s => timeline.push({ ...s, timelineType: 'stage_change', timelineDate: s.changedAt }));
+      stages.forEach(s => timeline.push({ ...s, changedAt: s.createdAt, timelineType: 'stage_change', timelineDate: s.createdAt }));
     }
 
-    // Chatter posts mentioning this record
-    const mentions = await prisma.chatterMention.findMany({
-      where: { recordId },
-      include: { post: { select: { id: true, body: true, createdAt: true } } },
-      take,
+    // Chatter posts about this record. A ChatterMention names a user, not a
+    // record, so the post's own recordId is what ties it here.
+    const posts = await prisma.chatterPost.findMany({
+      where: { recordId, ...cursor },
+      orderBy: { createdAt: 'desc' }, take,
+      select: { id: true, body: true, createdAt: true },
     });
-    mentions.forEach(m => {
-      if (m.post) timeline.push({ ...m.post, timelineType: 'chatter', timelineDate: m.post.createdAt });
-    });
+    posts.forEach(p => timeline.push({ ...p, timelineType: 'chatter', timelineDate: p.createdAt }));
 
     // Sort all by date descending and limit
     timeline.sort((a, b) => new Date(b.timelineDate) - new Date(a.timelineDate));
@@ -101,7 +101,7 @@ router.get('/record/:module/:id/unified', authenticate, async (req, res, next) =
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId', cases: 'caseId' }[module] || 'parentId';
     const [activities, notes, feedItems, emails] = await Promise.all([
       prisma.activity.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
-      prisma.note.findMany({ where: { parentId: id, deletedAt: null }, select: { id: true, title: true, body: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
+      prisma.note.findMany({ where: { module, recordId: id, deletedAt: null }, select: { id: true, body: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
       prisma.feedItem.findMany({ where: { parentId: id }, select: { id: true, body: true, type: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
       prisma.email.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, status: true, sentAt: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
     ]);
@@ -123,7 +123,7 @@ router.get('/stats/:module/:id', authenticate, async (req, res, next) => {
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId' }[module] || 'parentId';
     const [actCount, noteCount, emailCount, lastActivity] = await Promise.all([
       prisma.activity.count({ where: { [parentField]: id, deletedAt: null } }).catch(() => 0),
-      prisma.note.count({ where: { parentId: id, deletedAt: null } }).catch(() => 0),
+      prisma.note.count({ where: { module, recordId: id, deletedAt: null } }).catch(() => 0),
       prisma.email.count({ where: { [parentField]: id, deletedAt: null } }).catch(() => 0),
       prisma.activity.findFirst({ where: { [parentField]: id, deletedAt: null }, orderBy: { createdAt: 'desc' } }).catch(() => null),
     ]);

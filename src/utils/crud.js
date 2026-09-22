@@ -6,6 +6,7 @@ const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 const { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
+const { createNumbered } = require('./numbering');
 const {
   checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
 } = require('../services/recordRules');
@@ -26,6 +27,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     validate,
     orderBy = { createdAt: 'desc' },
     customRoutes,
+    // { field, prefix, width }: the record's human-readable number, which the
+    // server assigns on create (see utils/numbering).
+    numbering,
   } = options;
 
   // Relations the model really has go to Prisma; `account` on a model with only
@@ -161,7 +165,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       // A key the model does not have used to 500 the whole request.
       const { data: createData, ignored } = pickModelFields(modelName, data);
-      const record = await prisma[modelName].create({ data: createData, include });
+      const record = numbering
+        ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
+        : await prisma[modelName].create({ data: createData, include });
       await hydrateIncludes(prisma, record, manualIncludes);
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });

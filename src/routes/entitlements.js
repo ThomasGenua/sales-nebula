@@ -83,21 +83,26 @@ module.exports = router;
 router.get('/processes', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const processes = await prisma.entitlementProcess.findMany({ orderBy: { name: 'asc' }, include: { milestones: true } });
-    res.json(processes);
+    const processes = await prisma.entitlementProcess.findMany({ orderBy: { name: 'asc' } });
+    // A process keeps its milestones in `steps`; callers read them as milestones.
+    res.json(processes.map(p => ({ ...p, milestones: p.steps || [] })));
   } catch (err) { next(err); }
 });
 
 router.post('/processes', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, description, milestones } = req.body;
-    if (!name) return res.status(400).json({ error: 'name required' });
+    const { name, description, entitlementId, milestones } = req.body;
+    if (!name || !entitlementId) return res.status(400).json({ error: 'name and entitlementId required' });
+    const entitlement = await prisma.entitlement.findUnique({ where: { id: entitlementId }, select: { id: true } });
+    if (!entitlement) return res.status(404).json({ error: 'Entitlement not found' });
+    // There is no milestone table for processes; the ordered steps are stored
+    // as JSON on the process itself.
+    const steps = (milestones || []).map((m, i) => ({ name: m.name, triggerMinutes: m.triggerMinutes || 60, actions: m.actions || {}, order: i }));
     const process = await prisma.entitlementProcess.create({
-      data: { name, description, milestones: milestones?.length ? { create: milestones.map((m, i) => ({ name: m.name, triggerMinutes: m.triggerMinutes || 60, actions: m.actions || {}, order: i })) } : undefined },
-      include: { milestones: true },
+      data: { name, description, entitlementId, steps },
     });
-    res.status(201).json(process);
+    res.status(201).json({ ...process, milestones: steps });
   } catch (err) { next(err); }
 });
 

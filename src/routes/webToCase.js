@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 
@@ -31,7 +32,7 @@ router.post('/', async (req, res, next) => {
     const descLower = (description || '').toLowerCase();
     if (descLower.includes('urgent') || descLower.includes('down') || descLower.includes('critical')) casePriority = 'High';
 
-    const newCase = await prisma.case.create({
+    const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
       data: {
         subject, description: description || '', origin: 'Web',
         status: 'New', priority: casePriority, type: type || 'Question',

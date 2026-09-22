@@ -371,10 +371,15 @@ model Case {
   slaBreached Boolean   @default(false)
   slaDueAt DateTime?
   slaStatus String?
+  // The asset's service history and the entitlement's usage count cases by these.
+  assetId       String?
+  entitlementId String?
 
   @@index([accountId])
   @@index([contactId])
   @@index([assignedId])
+  @@index([assetId])
+  @@index([entitlementId])
   deletedAt   DateTime?
 
 }
@@ -383,8 +388,9 @@ model CaseComment {
   id       String   @id @default(uuid())
   caseId   String
   case     Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  authorId String
-  author   User     @relation(fields: [authorId], references: [id])
+  // Null when a customer wrote it by email; authorEmail says who.
+  authorId String?
+  author   User?    @relation(fields: [authorId], references: [id], onDelete: Restrict)
   createdAt DateTime @default(now())
   text      String
   isInternal Boolean @default(false)
@@ -676,12 +682,6 @@ model CustomField {
   createdAt DateTime @default(now())
 
   values CustomFieldValue[]
-  // Written by the routes, never migrated until now.
-  customObjectId String?
-  defaultValue String?
-  label String?
-  order Int?
-  unique Boolean   @default(false)
 }
 
 model CustomFieldValue {
@@ -963,8 +963,6 @@ model ApprovalStep {
   createdAt   DateTime @default(now())
   decidedAt DateTime?
   stepOrder Int @default(0)
-  // Written by the routes, never migrated until now.
-  actedAt DateTime?
 
   @@index([requestId])
   @@index([approverId])
@@ -1873,6 +1871,7 @@ model Macro {
   scheduled Boolean   @default(false)
   scheduleModule String?
   scheduleTargetQuery String?
+  category String?
 }
 
 // ═══════════════════════════════════════
@@ -1921,8 +1920,9 @@ model ConnectedApp {
   logoUrl       String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-  // Written by the routes, never migrated until now.
-  apiToken String?
+  // Written by the routes, never migrated until now. Only a SHA-256 of the
+  // app's API token is kept; the token itself is shown once, when issued.
+  apiTokenHash String?
   revokedAt DateTime?
   revokedById String?
   secretRotatedAt DateTime?
@@ -1992,8 +1992,6 @@ model Subscription {
 
   revenueSchedules RevenueSchedule[]
   // Written by the routes, never migrated until now.
-  cancelDate DateTime?
-  cancelReason String?
   changeEffectiveDate DateTime?
   renewalCount Int       @default(0)
 
@@ -2187,7 +2185,8 @@ model CallRecording {
   callDate    DateTime  @default(now())
   createdAt   DateTime  @default(now())
   // Written by the routes, never migrated until now.
-  analysis String?
+  // The analysis endpoint stores an object (topics, sentiment, questions).
+  analysis Json?
   participants Json?
   status String?
   title String?
@@ -2317,9 +2316,12 @@ model WorkOrder {
   partsUsed Json?
   resolution String?
   schedulingNotes String?
+  // Service history and the field-service screens link a job to its asset.
+  assetId String?
 
   @@index([accountId])
   @@index([status])
+  @@index([assetId])
 }
 
 model WorkOrderLineItem {
@@ -2574,6 +2576,7 @@ model AppListing {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  features         Json?
 
 }
 
@@ -3110,6 +3113,8 @@ model Asset {
   // Written by the routes, never migrated until now.
   decommissionDate DateTime?
   decommissionReason String?
+  // The asset form and the warranty reports both use it.
+  warrantyEndDate DateTime?
 
   @@index([accountId])
   @@index([contactId])
@@ -3788,7 +3793,6 @@ model EntitlementProcess {
   updatedAt     DateTime @updatedAt
   // Written by the routes, never migrated until now.
   description String?
-  milestones Json?
   @@index([entitlementId])
 }
 
@@ -3929,17 +3933,6 @@ model MarketplaceListing {
   featured  Boolean  @default(false)
   badge     String?
   createdAt DateTime @default(now())
-  // Written by the routes, never migrated until now.
-  author String?
-  category String?
-  description String?
-  features Json?
-  installCount Int       @default(0)
-  listed Boolean   @default(false)
-  name String?
-  pricing String?
-  rating Float?
-  version String?
   @@index([appId])
 }
 
@@ -4034,9 +4027,7 @@ model SalesPathStage {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   // Written by the routes, never migrated until now.
-  coachingTips String?
   keyActions Json?
-  requiredFields Json?
   successCriteria Json?
   @@index([salesPathId])
 }
@@ -5046,7 +5037,6 @@ model InboundRoutingRule {
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime?
   // Written by the routes, never migrated until now.
-  assignToUserId String?
   setStatus String?
 
   @@index([accountId, priority])
@@ -5263,10 +5253,9 @@ model ProspectList {
   deletedAt     DateTime?
 
   entries ProspectListEntry[]
-  // Written by the routes, never migrated until now.
-  entryCount Int       @default(0)
+  // Written by the routes, never migrated until now. A list's purpose is its
+  // type; whether it is rebuilt from filterJson is a separate switch.
   isDynamic Boolean   @default(false)
-  lastPopulatedAt DateTime?
 
   @@index([type])
   @@index([ownerId])

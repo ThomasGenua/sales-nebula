@@ -369,11 +369,15 @@ Case management with comments, escalation, resolution
 
 ### `/api/public/email-to-case`
 
-Inbound email auto-creates cases (public)
+Inbound email auto-creates cases. The inbound endpoints are a webhook for the
+mail provider: they require `EMAIL_TO_CASE_SECRET`, sent as an
+`X-Webhook-Secret` header or as the HTTP basic auth password, and answer 503
+while it is unset.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/public/email-to-case/inbound` | Receive inbound email for case creation |
+| POST | `/api/public/email-to-case/inbound/bulk` | Receive up to 50 inbound emails in one call |
 | GET | `/api/public/email-to-case/config` | Get public configuration |
 | PUT | `/api/public/email-to-case/config` | Update email-to-case configuration |
 

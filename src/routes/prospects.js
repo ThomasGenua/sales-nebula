@@ -81,7 +81,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
 
     const memberships = await prisma.prospectListEntry.findMany({
       where: { prospectId: prospect.id },
-      include: { list: { select: { id: true, name: true, listType: true } } },
+      include: { list: { select: { id: true, name: true, type: true } } },
     }).catch(() => []);
 
     res.json({ ...prospect, lists: memberships.map(m => m.list).filter(Boolean), suppressed: await isSuppressed(prisma, prospect.email) });
@@ -190,7 +190,7 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
     }
 
     if (listId) {
-      await prisma.prospectList.update({ where: { id: listId }, data: { entryCount: { increment: imported.length } } }).catch(() => {});
+      await prisma.prospectList.update({ where: { id: listId }, data: { memberCount: { increment: imported.length } } }).catch(() => {});
     }
 
     await req.audit({ action: 'create', module: 'prospects', recordId: 'import', details: `${imported.length} prospects imported` });
@@ -347,7 +347,7 @@ router.get('/lists/:id/members', authenticate, async (req, res, next) => {
       prisma.prospectListEntry.findMany({
         where: { listId: req.params.id },
         skip: (+page - 1) * +limit, take: Math.min(+limit, 500),
-        orderBy: { createdAt: 'desc' },
+        orderBy: { addedAt: 'desc' },
       }),
       prisma.prospectListEntry.count({ where: { listId: req.params.id } }),
     ]);
@@ -379,7 +379,7 @@ router.post('/lists/:id/members', authenticate, requirePermission('campaigns', '
     }
 
     const total = await prisma.prospectListEntry.count({ where: { listId: list.id } });
-    await prisma.prospectList.update({ where: { id: list.id }, data: { entryCount: total } }).catch(() => {});
+    await prisma.prospectList.update({ where: { id: list.id }, data: { memberCount: total } }).catch(() => {});
     res.status(201).json({ added, total });
   } catch (err) { next(err); }
 });
@@ -389,7 +389,7 @@ router.delete('/lists/:id/members/:entryId', authenticate, requirePermission('ca
     const prisma = req.app.locals.prisma;
     await prisma.prospectListEntry.delete({ where: { id: req.params.entryId } });
     const total = await prisma.prospectListEntry.count({ where: { listId: req.params.id } });
-    await prisma.prospectList.update({ where: { id: req.params.id }, data: { entryCount: total } }).catch(() => {});
+    await prisma.prospectList.update({ where: { id: req.params.id }, data: { memberCount: total } }).catch(() => {});
     res.json({ removed: true, total });
   } catch (err) { next(err); }
 });
@@ -421,7 +421,7 @@ router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 
     }
 
     const total = await prisma.prospectListEntry.count({ where: { listId: list.id } });
-    await prisma.prospectList.update({ where: { id: list.id }, data: { entryCount: total, filterJson: filter, lastPopulatedAt: new Date() } }).catch(() => {});
+    await prisma.prospectList.update({ where: { id: list.id }, data: { memberCount: total, filterJson: filter, lastBuiltAt: new Date() } }).catch(() => {});
 
     await req.audit({ action: 'update', module: 'prospects', recordId: list.id, details: `List populated: ${added} added` });
     res.json({ matched: prospects.length, added, suppressed, listTotal: total });
@@ -446,7 +446,7 @@ router.get('/suppression', authenticate, requirePermission('campaigns', 'read'),
     const where = {};
     if (search) where.email = { contains: search, mode: 'insensitive' };
     const [data, total] = await Promise.all([
-      prisma.emailSuppression.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 500), orderBy: { createdAt: 'desc' } }),
+      prisma.emailSuppression.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 500), orderBy: { suppressedAt: 'desc' } }),
       prisma.emailSuppression.count({ where }),
     ]);
     res.json({ data, total, page: +page });

@@ -13,7 +13,7 @@ router.get('/login-history', authenticate, requirePermission('admin', 'read'), a
     if (userId) where.userId = userId;
     if (status) where.status = status;
     const [data, total] = await Promise.all([
-      queryWithIncludes(prisma, 'loginHistory', 'findMany', { where, orderBy: { createdAt: 'desc' }, take: +limit, skip: (+page - 1) * +limit, include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } } }),
+      queryWithIncludes(prisma, 'loginHistory', 'findMany', { where, orderBy: { loginTime: 'desc' }, take: +limit, skip: (+page - 1) * +limit, include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } } }),
       prisma.loginHistory.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
@@ -30,12 +30,12 @@ router.get('/event-logs', authenticate, requirePermission('admin', 'read'), asyn
     if (module) where.module = module;
     if (userId) where.userId = userId;
     if (from || to) {
-      where.createdAt = {};
-      if (from) where.createdAt.gte = new Date(from);
-      if (to) where.createdAt.lte = new Date(to);
+      where.timestamp = {};
+      if (from) where.timestamp.gte = new Date(from);
+      if (to) where.timestamp.lte = new Date(to);
     }
     const [data, total] = await Promise.all([
-      prisma.eventLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit, skip: (+page - 1) * +limit }),
+      prisma.eventLog.findMany({ where, orderBy: { timestamp: 'desc' }, take: +limit, skip: (+page - 1) * +limit }),
       prisma.eventLog.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
@@ -52,11 +52,11 @@ router.get('/metrics', authenticate, requirePermission('admin', 'read'), async (
 
     const [totalUsers, activeToday, loginsToday, failedLogins, apiCalls, errorCount] = await Promise.all([
       prisma.user.count({ where: { active: true } }),
-      prisma.loginHistory.findMany({ where: { createdAt: { gte: oneDayAgo }, status: 'Success' }, distinct: ['userId'] }).then(r => r.length),
-      prisma.loginHistory.count({ where: { createdAt: { gte: oneDayAgo }, status: 'Success' } }),
-      prisma.loginHistory.count({ where: { createdAt: { gte: oneDayAgo }, status: 'Failed' } }),
-      prisma.eventLog.count({ where: { createdAt: { gte: oneHourAgo }, eventType: 'API_CALL' } }).catch(() => 0),
-      prisma.eventLog.count({ where: { createdAt: { gte: oneHourAgo }, eventType: 'ERROR' } }).catch(() => 0),
+      prisma.loginHistory.findMany({ where: { loginTime: { gte: oneDayAgo }, status: 'Success' }, distinct: ['userId'] }).then(r => r.length),
+      prisma.loginHistory.count({ where: { loginTime: { gte: oneDayAgo }, status: 'Success' } }),
+      prisma.loginHistory.count({ where: { loginTime: { gte: oneDayAgo }, status: 'Failed' } }),
+      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, eventType: 'API_CALL' } }).catch(() => 0),
+      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, eventType: 'ERROR' } }).catch(() => 0),
     ]);
     res.json({
       system: { uptime: process.uptime(), memoryUsage: process.memoryUsage(), nodeVersion: process.version },
@@ -72,7 +72,7 @@ router.get('/alerts', authenticate, requirePermission('admin', 'read'), async (r
   try {
     const prisma = req.app.locals.prisma;
     const alerts = [];
-    const failedLogins = await prisma.loginHistory.count({ where: { createdAt: { gte: new Date(Date.now() - 3600000) }, status: 'Failed' } });
+    const failedLogins = await prisma.loginHistory.count({ where: { loginTime: { gte: new Date(Date.now() - 3600000) }, status: 'Failed' } });
     if (failedLogins > 10) alerts.push({ severity: 'high', type: 'security', message: `${failedLogins} failed logins in the last hour`, timestamp: new Date() });
     const memUsage = process.memoryUsage();
     if (memUsage.heapUsed / memUsage.heapTotal > 0.85) alerts.push({ severity: 'warning', type: 'performance', message: 'Memory usage above 85%', timestamp: new Date() });
@@ -103,11 +103,12 @@ router.get('/metrics/performance', authenticate, requirePermission('admin', 'rea
     const { hours = 24 } = req.query;
     const since = new Date(Date.now() - (+hours) * 3600000);
     const [apiCalls, errors, avgResponse] = await Promise.all([
-      prisma.eventLog.count({ where: { createdAt: { gte: since } } }).catch(() => 0),
-      prisma.eventLog.count({ where: { createdAt: { gte: since }, level: 'error' } }).catch(() => 0),
-      prisma.eventLog.aggregate({ where: { createdAt: { gte: since } }, _avg: { duration: true } }).catch(() => ({ _avg: { duration: null } })),
+      prisma.eventLog.count({ where: { timestamp: { gte: since } } }).catch(() => 0),
+      // EventLog has no level; a server error is what the status code says.
+      prisma.eventLog.count({ where: { timestamp: { gte: since }, statusCode: { gte: 500 } } }).catch(() => 0),
+      prisma.eventLog.aggregate({ where: { timestamp: { gte: since } }, _avg: { responseTime: true } }).catch(() => ({ _avg: { responseTime: null } })),
     ]);
-    res.json({ period: `${hours}h`, apiCalls, errors, errorRate: apiCalls ? (errors / apiCalls * 100).toFixed(2) + '%' : '0%', avgResponseMs: Math.round(avgResponse._avg.duration || 0), uptime: process.uptime() });
+    res.json({ period: `${hours}h`, apiCalls, errors, errorRate: apiCalls ? (errors / apiCalls * 100).toFixed(2) + '%' : '0%', avgResponseMs: Math.round(avgResponse._avg.responseTime || 0), uptime: process.uptime() });
   } catch (err) { next(err); }
 });
 
@@ -123,9 +124,13 @@ router.get('/alerts/rules', authenticate, requirePermission('admin', 'read'), as
 router.post('/alerts/rules', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, condition, threshold, action, enabled } = req.body;
-    if (!name || !condition) return res.status(400).json({ error: 'name and condition required' });
-    const rule = await prisma.monitoringAlertRule.create({ data: { name, condition, threshold, action: action || 'notify', active: enabled !== false, createdById: req.user.id } });
+    const { name, metric, condition, threshold, channel, action, enabled } = req.body;
+    // metric and threshold are required columns: a rule that watches nothing
+    // against no limit cannot fire.
+    if (!name || !metric || !condition || threshold == null || !Number.isFinite(Number(threshold))) {
+      return res.status(400).json({ error: 'name, metric, condition and a numeric threshold are required' });
+    }
+    const rule = await prisma.monitoringAlertRule.create({ data: { name, metric, condition, threshold: Number(threshold), channel: channel || null, action: action || 'notify', active: enabled !== false, createdById: req.user.id } });
     res.status(201).json(rule);
   } catch (err) { next(err); }
 });
@@ -153,7 +158,7 @@ router.get('/trends', authenticate, requirePermission('admin', 'read'), async (r
       const end = new Date(Date.now() - i * 3600000);
       const [logins, events] = await Promise.all([
         prisma.loginHistory.count({ where: { loginTime: { gte: start, lt: end } } }).catch(() => 0),
-        prisma.eventLog.count({ where: { createdAt: { gte: start, lt: end } } }).catch(() => 0),
+        prisma.eventLog.count({ where: { timestamp: { gte: start, lt: end } } }).catch(() => 0),
       ]);
       hours.push({ hour: start.toISOString().substring(11, 16), logins, events });
     }

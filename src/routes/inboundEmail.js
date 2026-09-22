@@ -3,6 +3,8 @@ const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { encrypt, decrypt } = require('../utils/secretBox');
+const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { pickModelFields } = require('../utils/modelFields');
 const {
   ingestMessages, recordPoll,
   normalizeSubject, extractCaseRef, stripQuotedReply,
@@ -173,7 +175,9 @@ router.post('/accounts/:id/test', authenticate, requirePermission('admin', 'edit
  * body by the mail worker, so this endpoint owns routing and dedup
  * while the transport stays outside the API process.
  */
-router.post('/accounts/:id/poll', authenticate, auditMiddleware, async (req, res, next) => {
+// The mail worker holds an admin API key. Anyone who can post here can open
+// cases and leads as the mailbox, so a signed-in user is not enough.
+router.post('/accounts/:id/poll', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   const startedAt = Date.now();
   try {
     const prisma = req.app.locals.prisma;
@@ -300,8 +304,9 @@ router.post('/messages/:id/reply', authenticate, auditMiddleware, async (req, re
   }
 });
 
-// Accounts whose poll interval has elapsed
-router.get('/accounts/due/poll', authenticate, async (req, res, next) => {
+// Accounts whose poll interval has elapsed, with their decrypted passwords for
+// the mail worker. Any signed-in user could read every mailbox password here.
+router.get('/accounts/due/poll', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const accounts = await prisma.inboundEmailAccount.findMany({ where: { deletedAt: null, active: true, status: { not: 'Disabled' } } });
@@ -345,7 +350,7 @@ router.post('/messages/:id/convert', authenticate, auditMiddleware, async (req, 
 
     if (target === 'case') {
       const contact = message.fromEmail ? await prisma.contact.findFirst({ where: { email: message.fromEmail, deletedAt: null } }) : null;
-      const created = await prisma.case.create({
+      const created = await createNumbered(prisma, 'case', CASE_NUMBER, {
         data: {
           subject: (message.subject || 'Email enquiry').slice(0, 250),
           description: (message.textBody || '').slice(0, 8000),
@@ -365,6 +370,7 @@ router.post('/messages/:id/convert', authenticate, auditMiddleware, async (req, 
       data: {
         firstName: first, lastName: rest.join(' ') || first,
         email: message.fromEmail, source: 'Email', status: 'New',
+        company: (message.fromEmail || '').split('@')[1] || 'Unknown',
         description: (message.textBody || '').slice(0, 4000),
         ownerId: req.body.ownerId || req.user.id,
       },
@@ -397,7 +403,7 @@ router.get('/rules', authenticate, requirePermission('admin', 'read'), async (re
 router.post('/rules', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, accountId, conditions, assignToUserId, setPriority, setType, setStatus, priority, active } = req.body;
+    const { name, accountId, conditions, assignToId, assignToUserId, setPriority, setType, setStatus, priority, active } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
     if (!Array.isArray(conditions) || !conditions.length) return res.status(400).json({ error: 'conditions array required' });
 
@@ -410,7 +416,8 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), async (r
     }
 
     const rule = await prisma.inboundRoutingRule.create({
-      data: { name, accountId: accountId || null, conditions, assignToUserId, setPriority, setType, setStatus, priority: priority ?? 0, active: active !== false },
+      // assignToUserId is the name this endpoint has always taken; the column is assignToId.
+      data: { name, accountId: accountId || null, conditions, assignToId: assignToId ?? assignToUserId, setPriority, setType, setStatus, priority: priority ?? 0, active: active !== false },
     });
     res.status(201).json(rule);
   } catch (err) { next(err); }
@@ -419,7 +426,8 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), async (r
 router.put('/rules/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
+    const { id, createdAt, updatedAt, assignToUserId, ...body } = req.body;
+    const { data } = pickModelFields('inboundRoutingRule', { ...body, ...(assignToUserId !== undefined && body.assignToId === undefined && { assignToId: assignToUserId }) });
     res.json(await prisma.inboundRoutingRule.update({ where: { id: req.params.id }, data }));
   } catch (err) { next(err); }
 });

@@ -38,10 +38,11 @@ router.get('/:id/products', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const items = await prisma.dealLineItem.findMany({
       where: { dealId: req.params.id },
-      include: { product: { select: { id: true, name: true, code: true } } },
-      orderBy: { createdAt: 'asc' },
+      include: { product: { select: { id: true, name: true, sku: true } } },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
-    const total = items.reduce((s, i) => s + (parseFloat(i.totalPrice) || 0), 0);
+    // A line's amount is `total`; there is no totalPrice, so this summed to 0.
+    const total = items.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
     res.json({ items, total, count: items.length });
   } catch (err) { next(err); }
 });
@@ -51,14 +52,15 @@ router.get('/:id/stage-history', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const history = await queryWithIncludes(prisma, 'dealStageHistory', 'findMany', {
-      where: { dealId: req.params.id }, orderBy: { changedAt: 'asc' },
+      where: { dealId: req.params.id }, orderBy: { createdAt: 'asc' },
       include: { changedBy: { select: { id: true, firstName: true, lastName: true } } },
     });
-    // Calculate time in each stage
+    // Calculate time in each stage. A row's timestamp is createdAt; callers
+    // still read it as changedAt.
     const enriched = history.map((h, i) => {
       const next = history[i + 1];
-      const daysInStage = next ? Math.round((new Date(next.changedAt) - new Date(h.changedAt)) / 86400000) : null;
-      return { ...h, daysInStage };
+      const daysInStage = next ? Math.round((new Date(next.createdAt) - new Date(h.createdAt)) / 86400000) : null;
+      return { ...h, changedAt: h.createdAt, daysInStage };
     });
     res.json(enriched);
   } catch (err) { next(err); }
@@ -134,10 +136,10 @@ router.post('/:id/competitors', authenticate, async (req, res, next) => {
 router.get('/:id/analysis', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.id }, include: { activities: { where: { deletedAt: null } }, contacts: { select: { role: true } } } });
+    const deal = await prisma.deal.findUnique({ where: { id: req.params.id }, include: { activities: { where: { deletedAt: null } }, contactRoles: { select: { role: true } } } });
     if (!deal) return res.status(404).json({ error: 'Not found' });
     const daysInPipeline = deal.createdAt ? Math.floor((Date.now() - new Date(deal.createdAt)) / 86400000) : 0;
-    res.json({ dealId: deal.id, stage: deal.stage, daysInPipeline, activityCount: deal.activities?.length || 0, contactRoles: deal.contacts?.length || 0, hasDecisionMaker: (deal.contacts || []).some(c => c.role === 'Decision Maker'), recommendedActions: daysInPipeline > 60 ? ['Schedule follow-up','Engage executive sponsor'] : ['Continue nurturing'] });
+    res.json({ dealId: deal.id, stage: deal.stage, daysInPipeline, activityCount: deal.activities?.length || 0, contactRoles: deal.contactRoles?.length || 0, hasDecisionMaker: (deal.contactRoles || []).some(c => c.role === 'Decision Maker'), recommendedActions: daysInPipeline > 60 ? ['Schedule follow-up','Engage executive sponsor'] : ['Continue nurturing'] });
   } catch (err) { next(err); }
 });
 

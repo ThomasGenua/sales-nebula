@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { CASE_NUMBER } = require('../utils/numbering');
 
 const router = createCrudRouter('case', 'cases', {
   include: {
@@ -21,11 +22,7 @@ const router = createCrudRouter('case', 'cases', {
     if (!data.subject?.trim()) errors.subject = 'Required';
     return { valid: Object.keys(errors).length === 0, errors };
   },
-  beforeCreate: async (data, req) => {
-    const prisma = req.app.locals.prisma;
-    const count = await prisma.case.count();
-    return { ...data, caseNumber: `CS-${String(count + 1).padStart(3, '0')}` };
-  },
+  numbering: CASE_NUMBER,
   customRoutes: (router) => {
     // POST /api/cases/:id/comments
     router.post('/:id/comments', requirePermission('cases', 'edit'), async (req, res, next) => {

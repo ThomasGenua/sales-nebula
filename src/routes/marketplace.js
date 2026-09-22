@@ -1,86 +1,186 @@
+/**
+ * App marketplace.
+ *
+ * The module was built on two models at once. AppListing carries everything an
+ * app has — name, slug, author, category, pricing, version, rating, installs —
+ * while MarketplaceListing is a thin promotion record (appId, featured, badge).
+ * Most routes wrote app details into MarketplaceListing, which has none of
+ * those columns, so creating, listing and installing apps all failed; the
+ * featured and trending routes read AppListing with filters it does not have.
+ * Apps now live in AppListing, and "featured" means an AppListing that a
+ * MarketplaceListing promotes.
+ *
+ * Installs were likewise split: the install route wrote InstalledApp while the
+ * settings routes read AppInstallation, which nothing ever wrote. Both use
+ * InstalledApp now. And /installed and /featured were declared after /:id, so
+ * they were read as ids; named routes now come first.
+ */
+
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { queryWithIncludes, looksLikeId } = require('../utils/modelFields');
 
 const router = Router();
+router.use(authenticate);
 
-// List marketplace listings
-router.get('/', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { page = 1, limit = 50, search, category } = req.query;
-    const where = { deletedAt: null, listed: true };
-    if (search) where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }];
-    if (category) where.category = category;
-    const [data, total] = await Promise.all([
-      prisma.marketplaceListing.findMany({ where, orderBy: { installCount: 'desc' }, take: +limit, skip: (+page - 1) * +limit }),
-      prisma.marketplaceListing.count({ where }),
-    ]);
-    res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
-  } catch (err) { next(err); }
-});
+const PUBLISHED = 'Published';
 
-router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const l = await prisma.marketplaceListing.findUnique({ where: { id: req.params.id } }); if (!l) return res.status(404).json({ error: 'Not found' }); res.json(l); } catch (err) { next(err); }
-});
+const slugify = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'app';
 
-router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { name, description, author, category, pricing, version, features } = req.body;
-    if (!name || !author) return res.status(400).json({ error: 'name and author required' });
-    const listing = await prisma.marketplaceListing.create({ data: { name, description, author, category, pricing: pricing || 'Free', version: version || '1.0.0', features: features || [], listed: false } });
-    res.status(201).json(listing);
-  } catch (err) { next(err); }
-});
-
-// Install app
-router.post('/:id/install', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const listing = await prisma.marketplaceListing.findUnique({ where: { id: req.params.id } });
-    if (!listing) return res.status(404).json({ error: 'Listing not found' });
-    const existing = await prisma.installedApp.findFirst({ where: { appId: req.params.id } });
-    if (existing) return res.status(409).json({ error: 'Already installed' });
-    const installed = await prisma.installedApp.create({
-      data: { appId: req.params.id, userId: req.user.id, version: listing.version, status: 'Active' },
-    });
-    await prisma.marketplaceListing.update({ where: { id: req.params.id }, data: { installCount: { increment: 1 } } });
-    await req.audit({ action: 'create', module: 'marketplace', recordId: listing.id, details: `Installed: ${listing.name}` });
-    res.status(201).json(installed);
-  } catch (err) { next(err); }
-});
-
-// Uninstall
-router.delete('/:id/uninstall', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const installed = await prisma.installedApp.findFirst({ where: { appId: req.params.id } });
-    if (!installed) return res.status(404).json({ error: 'Not installed' });
-    await prisma.installedApp.delete({ where: { id: installed.id } });
-    await req.audit({ action: 'delete', module: 'marketplace', recordId: req.params.id, details: 'App uninstalled' });
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
+// ─── Named routes first ───
 
 // Installed apps
-router.get('/installed', authenticate, async (req, res, next) => {
+router.get('/installed', async (req, res, next) => {
   try {
-    const prisma = req.app.locals.prisma;
-    const apps = await queryWithIncludes(prisma, 'installedApp', 'findMany', {
+    const apps = await queryWithIncludes(req.app.locals.prisma, 'installedApp', 'findMany', {
       include: { listing: true, installedBy: { select: { id: true, firstName: true, lastName: true } } },
-      orderBy: { installedAt: 'desc' },
+      orderBy: { createdAt: 'desc' },
     });
     res.json(apps);
   } catch (err) { next(err); }
 });
 
-// Reviews
-router.get('/:id/reviews', authenticate, async (req, res, next) => {
+// App settings live on the installation.
+router.get('/installed/:appId/settings', async (req, res, next) => {
+  try {
+    const install = await req.app.locals.prisma.installedApp.findFirst({ where: { appId: req.params.appId } });
+    if (!install) return res.status(404).json({ error: 'App is not installed' });
+    res.json({ appId: req.params.appId, settings: install.settings || {}, installedAt: install.createdAt });
+  } catch (err) { next(err); }
+});
+
+router.put('/installed/:appId/settings', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const updated = await req.app.locals.prisma.installedApp.updateMany({
+      where: { appId: req.params.appId }, data: { settings: req.body || {} },
+    });
+    if (!updated.count) return res.status(404).json({ error: 'App is not installed' });
+    res.json({ updated: updated.count });
+  } catch (err) { next(err); }
+});
+
+// Featured apps: those a MarketplaceListing promotes.
+router.get('/featured', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const reviews = await queryWithIncludes(prisma, 'marketplaceReview', 'findMany', {
+    const promoted = await prisma.marketplaceListing.findMany({ where: { featured: true }, select: { appId: true, badge: true } });
+    const badges = new Map(promoted.map(p => [p.appId, p.badge]));
+    const apps = await prisma.appListing.findMany({
+      where: { id: { in: [...badges.keys()] }, status: PUBLISHED, deletedAt: null },
+      orderBy: { installCount: 'desc' }, take: 10,
+    });
+    res.json(apps.map(a => ({ ...a, badge: badges.get(a.id) || null })));
+  } catch (err) { next(err); }
+});
+
+router.get('/featured/trending', async (req, res, next) => {
+  try {
+    const trending = await req.app.locals.prisma.appListing.findMany({
+      where: { status: PUBLISHED, deletedAt: null },
+      orderBy: { installCount: 'desc' }, take: 10,
+      select: { id: true, name: true, description: true, category: true, rating: true, installCount: true },
+    });
+    res.json(trending);
+  } catch (err) { next(err); }
+});
+
+// ─── Listings ───
+
+router.get('/', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { page = 1, limit = 50, search, category, pricing } = req.query;
+    const take = Math.min(+limit || 50, 200);
+    const where = { deletedAt: null, status: PUBLISHED };
+    if (search) where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }];
+    if (category) where.category = category;
+    if (pricing) where.pricing = pricing;
+    const [data, total] = await Promise.all([
+      prisma.appListing.findMany({ where, orderBy: { installCount: 'desc' }, take, skip: ((+page || 1) - 1) * take }),
+      prisma.appListing.count({ where }),
+    ]);
+    res.json({ data, total, page: +page || 1, pages: Math.ceil(total / take) });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    if (!looksLikeId('appListing', req.params.id)) return next();
+    const app = await req.app.locals.prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!app) return res.status(404).json({ error: 'Not found' });
+    res.json(app);
+  } catch (err) { next(err); }
+});
+
+router.post('/', requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { name, description, author, category, pricing, version, features, status } = req.body;
+    if (!name || !author) return res.status(400).json({ error: 'name and author required' });
+
+    // The slug is unique; a clash gets a short suffix rather than a 500.
+    let slug = slugify(name);
+    if (await prisma.appListing.findUnique({ where: { slug } })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const app = await prisma.appListing.create({
+      data: {
+        name, slug, description, author, features: features || [],
+        ...(category && { category }), ...(pricing && { pricing }), ...(version && { version }),
+        status: status || PUBLISHED,
+      },
+    });
+    await req.audit({ action: 'create', module: 'marketplace', recordId: app.id, details: `Listed: ${app.name}` });
+    res.status(201).json(app);
+  } catch (err) { next(err); }
+});
+
+// ─── Installs ───
+
+router.post('/:id/install', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const app = await prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!app) return res.status(404).json({ error: 'Listing not found' });
+    if (await prisma.installedApp.findFirst({ where: { appId: app.id } })) return res.status(409).json({ error: 'Already installed' });
+
+    const installed = await prisma.installedApp.create({
+      data: { appId: app.id, userId: req.userId, version: app.version, status: 'Active' },
+    });
+    await prisma.appListing.update({ where: { id: app.id }, data: { installCount: { increment: 1 } } });
+    await req.audit({ action: 'create', module: 'marketplace', recordId: app.id, details: `Installed: ${app.name}` });
+    res.status(201).json(installed);
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id/uninstall', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const installed = await prisma.installedApp.findFirst({ where: { appId: req.params.id } });
+    if (!installed) return res.status(404).json({ error: 'Not installed' });
+    await prisma.installedApp.delete({ where: { id: installed.id } });
+    await prisma.appListing.updateMany({ where: { id: req.params.id, installCount: { gt: 0 } }, data: { installCount: { decrement: 1 } } });
+    await req.audit({ action: 'delete', module: 'marketplace', recordId: req.params.id, details: 'App uninstalled' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/dependencies', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const app = await prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!app) return res.status(404).json({ error: 'Not found' });
+    // AppListing declares no dependencies; report none rather than inventing them.
+    const installed = await prisma.installedApp.findMany({ where: { userId: req.userId }, select: { appId: true } });
+    res.json({ appId: app.id, dependencies: [], installedCount: installed.length, allMet: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Reviews ───
+
+router.get('/:id/reviews', async (req, res, next) => {
+  try {
+    const reviews = await queryWithIncludes(req.app.locals.prisma, 'marketplaceReview', 'findMany', {
       where: { appId: req.params.id },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
       orderBy: { createdAt: 'desc' },
@@ -90,68 +190,24 @@ router.get('/:id/reviews', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/reviews', authenticate, async (req, res, next) => {
+router.post('/:id/reviews', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { rating, title, body } = req.body;
-    if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'rating (1-5) required' });
+    const rating = Number(req.body.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) return res.status(400).json({ error: 'rating (1-5) required' });
+    const app = await prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!app) return res.status(404).json({ error: 'Listing not found' });
+
     const review = await prisma.marketplaceReview.create({
-      data: { appId: req.params.id, userId: req.user.id, rating, title, body },
+      data: { appId: app.id, userId: req.userId, rating, title: req.body.title, body: req.body.body },
     });
-    // Update listing avg rating
-    const reviews = await prisma.marketplaceReview.findMany({ where: { appId: req.params.id } });
-    const avgRating = reviews.reduce((s, r) => s + r.rating, 0) / reviews.length;
-    await prisma.marketplaceListing.update({ where: { id: req.params.id }, data: { rating: parseFloat(avgRating.toFixed(1)) } });
+    const agg = await prisma.marketplaceReview.aggregate({ where: { appId: app.id }, _avg: { rating: true }, _count: true });
+    await prisma.appListing.update({
+      where: { id: app.id },
+      data: { rating: Number((agg._avg.rating || 0).toFixed(1)), reviewCount: agg._count },
+    });
     res.status(201).json(review);
   } catch (err) { next(err); }
 });
 
 module.exports = router;
-
-// App settings
-router.get('/installed/:appId/settings', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const install = await prisma.appInstallation.findFirst({ where: { appId: req.params.appId } }).catch(() => null);
-    res.json({ appId: req.params.appId, settings: install?.settings || {}, installedAt: install?.createdAt });
-  } catch (err) { next(err); }
-});
-
-router.put('/installed/:appId/settings', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const updated = await prisma.appInstallation.updateMany({ where: { appId: req.params.appId }, data: { settings: req.body } });
-    res.json({ updated: updated.count });
-  } catch (err) { next(err); }
-});
-
-// Featured apps
-router.get('/featured', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const featured = await prisma.appListing.findMany({ where: { featured: true, active: true }, take: 10, orderBy: { installCount: 'desc' } });
-    res.json(featured);
-  } catch (err) { next(err); }
-});
-
-// App dependencies check
-router.get('/:id/dependencies', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const app = await prisma.appListing.findUnique({ where: { id: req.params.id } });
-    if (!app) return res.status(404).json({ error: 'Not found' });
-    const deps = app.dependencies || [];
-    const installed = await prisma.installedApp.findMany({ where: { userId: req.user.id } });
-    const installedIds = installed.map(i => i.appId);
-    res.json({ appId: app.id, dependencies: deps.map(d => ({ ...d, installed: installedIds.includes(d.appId) })), allMet: deps.every(d => installedIds.includes(d.appId)) });
-  } catch (err) { next(err); }
-});
-
-// Featured / trending apps
-router.get('/featured/trending', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const trending = await prisma.appListing.findMany({ where: { active: true, deletedAt: null }, orderBy: { installCount: 'desc' }, take: 10, select: { id: true, name: true, description: true, category: true, rating: true, installCount: true, pricing: true, author: true } });
-    res.json(trending);
-  } catch (err) { next(err); }
-});

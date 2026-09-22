@@ -1,9 +1,15 @@
--- 179 columns across 56 models that the routes already write, and in most
+-- 161 columns across the models that the routes already write, and in most
 -- cases read back, but that no migration ever created — so every one of those
 -- writes failed with an unknown-argument error and the route answered 500.
 -- Found by scripts/check-prisma-fields.js; types inferred from the values the
--- code writes. Every column is nullable or has a default, so existing rows
--- are untouched.
+-- code writes, then each checked by hand against the model's existing columns
+-- so a route that used the wrong name for a column that already exists was
+-- corrected instead of given a duplicate. Every column is nullable or has a
+-- default, so existing rows are untouched.
+--
+-- CaseComment.authorId becomes optional: a reply a customer sends by email
+-- has no internal author (authorEmail records who wrote it). The foreign key
+-- keeps ON DELETE RESTRICT.
 
 -- AlterTable
 ALTER TABLE "Account" ADD COLUMN     "createdById" TEXT;
@@ -25,6 +31,9 @@ ALTER TABLE "AiAgentRun" ADD COLUMN     "context" JSONB,
 ADD COLUMN     "triggeredById" TEXT;
 
 -- AlterTable
+ALTER TABLE "AppListing" ADD COLUMN     "features" JSONB;
+
+-- AlterTable
 ALTER TABLE "Appointment" ADD COLUMN     "assignedToId" TEXT,
 ADD COLUMN     "cancelReason" TEXT,
 ADD COLUMN     "notes" TEXT,
@@ -35,14 +44,12 @@ ALTER TABLE "ApprovalRequest" ADD COLUMN     "comments" TEXT,
 ADD COLUMN     "completedAt" TIMESTAMP(3);
 
 -- AlterTable
-ALTER TABLE "ApprovalStep" ADD COLUMN     "actedAt" TIMESTAMP(3);
-
--- AlterTable
 ALTER TABLE "Asset" ADD COLUMN     "decommissionDate" TIMESTAMP(3),
-ADD COLUMN     "decommissionReason" TEXT;
+ADD COLUMN     "decommissionReason" TEXT,
+ADD COLUMN     "warrantyEndDate" TIMESTAMP(3);
 
 -- AlterTable
-ALTER TABLE "CallRecording" ADD COLUMN     "analysis" TEXT,
+ALTER TABLE "CallRecording" ADD COLUMN     "analysis" JSONB,
 ADD COLUMN     "participants" JSONB,
 ADD COLUMN     "status" TEXT,
 ADD COLUMN     "title" TEXT;
@@ -51,7 +58,9 @@ ADD COLUMN     "title" TEXT;
 ALTER TABLE "Campaign" ADD COLUMN     "createdById" TEXT;
 
 -- AlterTable
-ALTER TABLE "Case" ADD COLUMN     "escalatedAt" TIMESTAMP(3),
+ALTER TABLE "Case" ADD COLUMN     "assetId" TEXT,
+ADD COLUMN     "entitlementId" TEXT,
+ADD COLUMN     "escalatedAt" TIMESTAMP(3),
 ADD COLUMN     "escalationReason" TEXT,
 ADD COLUMN     "isEscalated" BOOLEAN NOT NULL DEFAULT false,
 ADD COLUMN     "satisfactionComment" TEXT,
@@ -61,7 +70,10 @@ ADD COLUMN     "slaDueAt" TIMESTAMP(3),
 ADD COLUMN     "slaStatus" TEXT;
 
 -- AlterTable
-ALTER TABLE "ConnectedApp" ADD COLUMN     "apiToken" TEXT,
+ALTER TABLE "CaseComment" ALTER COLUMN "authorId" DROP NOT NULL;
+
+-- AlterTable
+ALTER TABLE "ConnectedApp" ADD COLUMN     "apiTokenHash" TEXT,
 ADD COLUMN     "revokedAt" TIMESTAMP(3),
 ADD COLUMN     "revokedById" TEXT,
 ADD COLUMN     "secretRotatedAt" TIMESTAMP(3),
@@ -93,13 +105,6 @@ ALTER TABLE "CustomComponent" ADD COLUMN     "targetModules" JSONB,
 ADD COLUMN     "version" TEXT;
 
 -- AlterTable
-ALTER TABLE "CustomField" ADD COLUMN     "customObjectId" TEXT,
-ADD COLUMN     "defaultValue" TEXT,
-ADD COLUMN     "label" TEXT,
-ADD COLUMN     "order" INTEGER,
-ADD COLUMN     "unique" BOOLEAN NOT NULL DEFAULT false;
-
--- AlterTable
 ALTER TABLE "CustomFieldValue" ADD COLUMN     "module" TEXT;
 
 -- AlterTable
@@ -129,8 +134,7 @@ ALTER TABLE "EmailSuppression" ADD COLUMN     "addedById" TEXT;
 ALTER TABLE "Entitlement" ADD COLUMN     "createdById" TEXT;
 
 -- AlterTable
-ALTER TABLE "EntitlementProcess" ADD COLUMN     "description" TEXT,
-ADD COLUMN     "milestones" JSONB;
+ALTER TABLE "EntitlementProcess" ADD COLUMN     "description" TEXT;
 
 -- AlterTable
 ALTER TABLE "Environment" ADD COLUMN     "url" TEXT;
@@ -154,8 +158,7 @@ ALTER TABLE "FlowElement" ADD COLUMN     "nextElementId" TEXT,
 ADD COLUMN     "order" INTEGER;
 
 -- AlterTable
-ALTER TABLE "InboundRoutingRule" ADD COLUMN     "assignToUserId" TEXT,
-ADD COLUMN     "setStatus" TEXT;
+ALTER TABLE "InboundRoutingRule" ADD COLUMN     "setStatus" TEXT;
 
 -- AlterTable
 ALTER TABLE "InstalledApp" ADD COLUMN     "version" TEXT;
@@ -172,24 +175,13 @@ ALTER TABLE "IntegrationFieldMapping" ADD COLUMN     "direction" TEXT;
 ALTER TABLE "KnowledgeArticle" ADD COLUMN     "publishedAt" TIMESTAMP(3);
 
 -- AlterTable
-ALTER TABLE "Macro" ADD COLUMN     "executionCount" INTEGER NOT NULL DEFAULT 0,
+ALTER TABLE "Macro" ADD COLUMN     "category" TEXT,
+ADD COLUMN     "executionCount" INTEGER NOT NULL DEFAULT 0,
 ADD COLUMN     "lastExecutedAt" TIMESTAMP(3),
 ADD COLUMN     "scheduleCron" TEXT,
 ADD COLUMN     "scheduleModule" TEXT,
 ADD COLUMN     "scheduleTargetQuery" TEXT,
 ADD COLUMN     "scheduled" BOOLEAN NOT NULL DEFAULT false;
-
--- AlterTable
-ALTER TABLE "MarketplaceListing" ADD COLUMN     "author" TEXT,
-ADD COLUMN     "category" TEXT,
-ADD COLUMN     "description" TEXT,
-ADD COLUMN     "features" JSONB,
-ADD COLUMN     "installCount" INTEGER NOT NULL DEFAULT 0,
-ADD COLUMN     "listed" BOOLEAN NOT NULL DEFAULT false,
-ADD COLUMN     "name" TEXT,
-ADD COLUMN     "pricing" TEXT,
-ADD COLUMN     "rating" DOUBLE PRECISION,
-ADD COLUMN     "version" TEXT;
 
 -- AlterTable
 ALTER TABLE "MobileDevice" ADD COLUMN     "deviceName" TEXT;
@@ -232,9 +224,7 @@ ADD COLUMN     "phone" TEXT,
 ADD COLUMN     "timezone" TEXT;
 
 -- AlterTable
-ALTER TABLE "ProspectList" ADD COLUMN     "entryCount" INTEGER NOT NULL DEFAULT 0,
-ADD COLUMN     "isDynamic" BOOLEAN NOT NULL DEFAULT false,
-ADD COLUMN     "lastPopulatedAt" TIMESTAMP(3);
+ALTER TABLE "ProspectList" ADD COLUMN     "isDynamic" BOOLEAN NOT NULL DEFAULT false;
 
 -- AlterTable
 ALTER TABLE "Quote" ADD COLUMN     "discountReason" TEXT,
@@ -251,9 +241,7 @@ ALTER TABLE "SalesPath" ADD COLUMN     "createdById" TEXT,
 ADD COLUMN     "name" TEXT;
 
 -- AlterTable
-ALTER TABLE "SalesPathStage" ADD COLUMN     "coachingTips" TEXT,
-ADD COLUMN     "keyActions" JSONB,
-ADD COLUMN     "requiredFields" JSONB,
+ALTER TABLE "SalesPathStage" ADD COLUMN     "keyActions" JSONB,
 ADD COLUMN     "successCriteria" JSONB;
 
 -- AlterTable
@@ -268,9 +256,7 @@ ALTER TABLE "ScheduledExport" ADD COLUMN     "nextRunAt" TIMESTAMP(3),
 ADD COLUMN     "recipients" JSONB;
 
 -- AlterTable
-ALTER TABLE "Subscription" ADD COLUMN     "cancelDate" TIMESTAMP(3),
-ADD COLUMN     "cancelReason" TEXT,
-ADD COLUMN     "changeEffectiveDate" TIMESTAMP(3),
+ALTER TABLE "Subscription" ADD COLUMN     "changeEffectiveDate" TIMESTAMP(3),
 ADD COLUMN     "renewalCount" INTEGER NOT NULL DEFAULT 0;
 
 -- AlterTable
@@ -286,7 +272,8 @@ ALTER TABLE "User" ADD COLUMN     "contactId" TEXT,
 ADD COLUMN     "isPortalUser" BOOLEAN NOT NULL DEFAULT false;
 
 -- AlterTable
-ALTER TABLE "WorkOrder" ADD COLUMN     "assignedToId" TEXT,
+ALTER TABLE "WorkOrder" ADD COLUMN     "assetId" TEXT,
+ADD COLUMN     "assignedToId" TEXT,
 ADD COLUMN     "cancelReason" TEXT,
 ADD COLUMN     "completedAt" TIMESTAMP(3),
 ADD COLUMN     "customerSignature" TEXT,
@@ -295,4 +282,13 @@ ADD COLUMN     "laborHours" INTEGER,
 ADD COLUMN     "partsUsed" JSONB,
 ADD COLUMN     "resolution" TEXT,
 ADD COLUMN     "schedulingNotes" TEXT;
+
+-- CreateIndex
+CREATE INDEX "Case_assetId_idx" ON "Case"("assetId");
+
+-- CreateIndex
+CREATE INDEX "Case_entitlementId_idx" ON "Case"("entitlementId");
+
+-- CreateIndex
+CREATE INDEX "WorkOrder_assetId_idx" ON "WorkOrder"("assetId");
 

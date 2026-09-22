@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
 const { resolveInclude } = require('../src/utils/modelFields');
+const NUMBERING = require('../src/utils/numbering');
 const { Prisma } = require('@prisma/client');
 
 const MODELS = new Map();           // delegate name -> model
@@ -219,7 +220,7 @@ function checkOrderBy(file, model, node, label) {
   }
 }
 
-function checkCall(file, model, op, arg, { wrapped = false } = {}) {
+function checkCall(file, model, op, arg, { wrapped = false, implied = EMPTY } = {}) {
   if (!arg || arg.type !== 'ObjectExpression') return;
   checkWhere(file, model, prop(arg, 'where'), 'where');
   checkProjection(file, model, prop(arg, 'select'), 'select');
@@ -237,7 +238,7 @@ function checkCall(file, model, op, arg, { wrapped = false } = {}) {
     checkData(file, model, prop(arg, 'create'), 'create', true);
     checkData(file, model, prop(arg, 'update'), 'update');
   } else if (WRITE_OPS.has(op)) {
-    checkData(file, model, prop(arg, 'data'), 'data', op === 'create' || op === 'createMany');
+    checkData(file, model, prop(arg, 'data'), 'data', op === 'create' || op === 'createMany', implied);
   }
 }
 
@@ -271,6 +272,18 @@ function scan(file) {
       const model = d?.type === 'StringLiteral' ? MODELS.get(d.value) : null;
       if (model && m?.type === 'StringLiteral') {
         checkCall(path.relative(path.join(__dirname, '..'), file), model, m.value, a, { wrapped: true });
+      }
+      return;
+    }
+
+    // createNumbered(prisma, 'model', CASE_NUMBER, args): a create whose
+    // number the helper fills in.
+    if (callee.type === 'Identifier' && callee.name === 'createNumbered') {
+      const [, d, n, a] = node.arguments;
+      const model = d?.type === 'StringLiteral' ? MODELS.get(d.value) : null;
+      const field = n?.type === 'Identifier' ? NUMBERING[n.name]?.field : null;
+      if (model) {
+        checkCall(path.relative(path.join(__dirname, '..'), file), model, 'create', a, { implied: new Set(field ? [field] : []) });
       }
       return;
     }

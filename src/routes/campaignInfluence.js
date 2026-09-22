@@ -118,12 +118,12 @@ router.get('/attribution', authenticate, async (req, res, next) => {
 router.get('/roi', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budgetedCost: true, actualCost: true } });
+    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budget: true, actualCost: true } });
     const result = [];
     for (const c of campaigns) {
       const influenced = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []);
       const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + ((i.deal?.value || 0) * (i.influencePercentage || 1)), 0);
-      const cost = c.actualCost || c.budgetedCost || 0;
+      const cost = c.actualCost || c.budget || 0;
       result.push({ campaignId: c.id, name: c.name, cost, attributedRevenue: revenue, roi: cost ? Math.round((revenue - cost) / cost * 100) : 0, deals: influenced.length });
     }
     result.sort((a, b) => b.roi - a.roi);
@@ -169,12 +169,12 @@ router.get('/attribution-models', authenticate, async (req, res, next) => {
 router.get('/roi', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budgetedCost: true, actualCost: true, expectedRevenue: true } });
+    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budget: true, actualCost: true, expectedRevenue: true } });
     const results = [];
     for (const c of campaigns) {
       const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } });
       const wonRevenue = influences.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + (i.influencePercentage || 100) / 100 * (i.deal?.value || 0), 0);
-      const cost = c.actualCost || c.budgetedCost || 0;
+      const cost = c.actualCost || c.budget || 0;
       results.push({ campaignId: c.id, name: c.name, cost, wonRevenue: Math.round(wonRevenue), roi: cost > 0 ? ((wonRevenue - cost) / cost * 100).toFixed(1) + '%' : 'N/A', touchpoints: influences.length });
     }
     results.sort((a, b) => b.wonRevenue - a.wonRevenue);

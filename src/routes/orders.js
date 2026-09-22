@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
 
 const include = {
   account: { select: { id: true, name: true } },
@@ -16,9 +17,8 @@ const router = createCrudRouter('order', 'orders', {
       { account: { name: { contains: q, mode: 'insensitive' } } },
     ],
   }),
-  beforeCreate: async (data, { prisma }) => {
-    const count = await prisma.order.count();
-    data.orderNumber = `ORD-${String(count + 1).padStart(4, '0')}`;
+  numbering: ORDER_NUMBER,
+  beforeCreate: async (data) => {
     if (data.items) {
       data.subtotal = data.items.reduce((s, i) => s + (i.unitPrice * i.quantity), 0);
       data.total = data.subtotal + (data.tax || 0) - (data.discount || 0);
@@ -52,10 +52,8 @@ router.post('/from-quote/:quoteId', authenticate, requirePermission('orders', 'e
     });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-    const count = await prisma.order.count();
-    const order = await prisma.order.create({
+    const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
       data: {
-        orderNumber: `ORD-${String(count + 1).padStart(4, '0')}`,
         accountId: quote.accountId,
         contactId: quote.contactId,
         quoteId: quote.id,
@@ -146,7 +144,7 @@ router.post('/:id/clone', authenticate, requirePermission('orders', 'full'), asy
     const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
     if (!order) return res.status(404).json({ error: 'Not found' });
     const { id, createdAt, updatedAt, items, orderNumber, ...data } = order;
-    const clone = await prisma.order.create({ data: { ...data, status: 'Draft', name: `${order.name} (Copy)`, createdById: req.user.id } });
+    const clone = await createNumbered(prisma, 'order', ORDER_NUMBER, { data: { ...data, status: 'Draft', name: `${order.name} (Copy)`, createdById: req.user.id } });
     for (const item of items) {
       const { id: iId, orderId, createdAt: iC, updatedAt: iU, ...iData } = item;
       await prisma.orderItem.create({ data: { ...iData, orderId: clone.id } });

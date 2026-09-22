@@ -330,11 +330,15 @@ module.exports = createCrudRouter('deal', 'deals', {
         // Find applicable approval process
         const process = await prisma.approvalProcess.findFirst({
           where: { module: 'deals', active: true },
-          include: { steps: { orderBy: { order: 'asc' } } },
+          include: { steps: { orderBy: { stepOrder: 'asc' } } },
         });
 
         if (!process) {
           return res.status(400).json({ error: 'No active approval process configured for deals' });
+        }
+        const unassigned = process.steps.find(step => !step.approverId);
+        if (unassigned) {
+          return res.status(400).json({ error: `Approval step "${unassigned.name}" has no approver; set approverId on the process step` });
         }
 
         // Create approval request
@@ -347,10 +351,11 @@ module.exports = createCrudRouter('deal', 'deals', {
             status: 'Pending',
             currentStep: 1,
             steps: {
-              create: process.steps.map(step => ({
-                order: step.order,
+              // Numbered from 1 in process order, to match currentStep.
+              create: process.steps.map((step, i) => ({
+                stepOrder: i + 1,
                 approverId: step.approverId,
-                status: step.order === 1 ? 'Pending' : 'Waiting',
+                status: i === 0 ? 'Pending' : 'Waiting',
               })),
             },
           },

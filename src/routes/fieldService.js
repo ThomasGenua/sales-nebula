@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { WORK_ORDER_NUMBER } = require('../utils/numbering');
 
 const router = createCrudRouter('workOrder', 'fieldService', {
   include: {
@@ -22,6 +23,7 @@ const router = createCrudRouter('workOrder', 'fieldService', {
     if (!data.subject?.trim()) errors.subject = 'Subject required';
     return { valid: Object.keys(errors).length === 0, errors };
   },
+  numbering: WORK_ORDER_NUMBER,
 });
 
 // Schedule work order

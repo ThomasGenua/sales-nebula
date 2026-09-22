@@ -2,6 +2,8 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
+const { pickModelFields } = require('../utils/modelFields');
+
 const router = Router();
 
 router.get('/', authenticate, async (req, res, next) => {
@@ -16,7 +18,7 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: { orderBy: { order: 'asc' } } } }); if (!obj) return res.status(404).json({ error: 'Not found' }); res.json(obj); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: { orderBy: { sortOrder: 'asc' } } } }); if (!obj) return res.status(404).json({ error: 'Not found' }); res.json(obj); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
@@ -51,7 +53,7 @@ router.delete('/:id', authenticate, requirePermission('admin', 'full'), auditMid
 
 // Fields CRUD
 router.get('/:id/fields', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const fields = await prisma.customField.findMany({ where: { customObjectId: req.params.id }, orderBy: { order: 'asc' } }); res.json(fields); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const fields = await prisma.customObjectField.findMany({ where: { objectId: req.params.id }, orderBy: { sortOrder: 'asc' } }); res.json(fields); } catch (err) { next(err); }
 });
 
 router.post('/:id/fields', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
@@ -59,20 +61,30 @@ router.post('/:id/fields', authenticate, requirePermission('admin', 'full'), asy
     const prisma = req.app.locals.prisma;
     const { label, type, required, unique, defaultValue, options } = req.body;
     if (!label) return res.status(400).json({ error: 'label required' });
-    const maxOrder = await prisma.customField.aggregate({ where: { customObjectId: req.params.id }, _max: { order: true } });
-    const field = await prisma.customField.create({
-      data: { customObjectId: req.params.id, label, fieldKey: label.replace(/\s+/g, '_') + '__c', type: type || 'Text', required: required || false, unique: unique || false, defaultValue, options, order: (maxOrder._max.order || 0) + 1 },
+    // A custom object's fields are CustomObjectField rows; this wrote them into
+    // CustomField — the per-module field definitions — which has none of these
+    // columns, so no field could ever be added to a custom object.
+    const maxOrder = await prisma.customObjectField.aggregate({ where: { objectId: req.params.id }, _max: { sortOrder: true } });
+    const field = await prisma.customObjectField.create({
+      data: {
+        objectId: req.params.id, label,
+        apiName: label.replace(/\s+/g, '_') + '__c',
+        type: type || 'Text', required: !!required, unique: !!unique,
+        defaultValue: defaultValue === undefined || defaultValue === null ? null : String(defaultValue),
+        picklistValues: options == null ? undefined : typeof options === 'string' ? options : JSON.stringify(options),
+        sortOrder: (maxOrder._max.sortOrder || 0) + 1,
+      },
     });
     res.status(201).json(field);
   } catch (err) { next(err); }
 });
 
 router.put('/:id/fields/:fieldId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const field = await prisma.customField.update({ where: { id: req.params.fieldId }, data: req.body }); res.json(field); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const { data } = pickModelFields('customObjectField', req.body); delete data.id; delete data.objectId; const field = await prisma.customObjectField.update({ where: { id: req.params.fieldId }, data }); res.json(field); } catch (err) { next(err); }
 });
 
 router.delete('/:id/fields/:fieldId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { await req.app.locals.prisma.customField.delete({ where: { id: req.params.fieldId } }); res.json({ success: true }); } catch (err) { next(err); }
+  try { await req.app.locals.prisma.customObjectField.delete({ where: { id: req.params.fieldId } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
 // Records CRUD (dynamic data stored as JSON)
@@ -115,7 +127,7 @@ router.delete('/:id/records/:recordId', authenticate, async (req, res, next) => 
 router.get('/:id/schema', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: { orderBy: { order: 'asc' } } } });
+    const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: { orderBy: { sortOrder: 'asc' } } } });
     if (!obj) return res.status(404).json({ error: 'Not found' });
     res.json({ objectName: obj.apiName, label: obj.label, fields: obj.fields.map(f => ({ name: f.apiName, label: f.label, type: f.type, required: f.required, unique: f.unique })) });
   } catch (err) { next(err); }

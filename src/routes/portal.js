@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 
@@ -99,7 +100,7 @@ router.post('/my/cases', authenticate, auditMiddleware, async (req, res, next) =
     const prisma = req.app.locals.prisma;
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { contactId: true } });
     if (!user?.contactId) return res.status(403).json({ error: 'No associated contact' });
-    const c = await prisma.case.create({
+    const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
       data: { subject: req.body.subject, description: req.body.description, priority: req.body.priority || 'Medium', status: 'New', origin: 'Portal', contactId: user.contactId },
     });
     res.status(201).json(c);

@@ -49,7 +49,7 @@ router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) =>
     if (!agent || !agent.active) return res.status(400).json({ error: 'Agent not found or inactive' });
     const { input, context } = req.body;
     const run = await prisma.aiAgentRun.create({
-      data: { agentId: req.params.id, input: input || {}, context: context || {}, status: 'Running', startedAt: new Date(), triggeredById: req.user.id },
+      data: { agentId: req.params.id, trigger: 'manual', input: input || {}, context: context || {}, status: 'Running', startedAt: new Date(), triggeredById: req.user.id },
     });
     // Execute agent logic based on type
     let output = {};
@@ -140,9 +140,12 @@ router.get('/:id/analytics', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { period = '30' } = req.query;
     const since = new Date(Date.now() - (+period) * 86400000);
-    const runs = await prisma.aiAgentRun.findMany({ where: { agentId: req.params.id, createdAt: { gte: since } } }).catch(() => []);
-    const successful = runs.filter(r => r.status === 'success');
-    const avgDuration = runs.length ? Math.round(runs.reduce((s, r) => s + (r.duration || 0), 0) / runs.length) : 0;
+    const runs = await prisma.aiAgentRun.findMany({ where: { agentId: req.params.id, startedAt: { gte: since } } });
+    // Runs finish as Completed or Failed, and a run's length is completedAt
+    // minus startedAt; there is no 'success' status or duration column.
+    const successful = runs.filter(r => r.status === 'Completed');
+    const finished = runs.filter(r => r.completedAt);
+    const avgDuration = finished.length ? Math.round(finished.reduce((s, r) => s + (new Date(r.completedAt) - new Date(r.startedAt)), 0) / finished.length) : 0;
     res.json({ period: +period, totalRuns: runs.length, successRate: runs.length ? Math.round(successful.length / runs.length * 100) : 0, avgDurationMs: avgDuration, runsPerDay: Math.round(runs.length / +period * 10) / 10 });
   } catch (err) { next(err); }
 });

@@ -141,11 +141,11 @@ router.get('/:id/roi', authenticate, async (req, res, next) => {
     if (!campaign) return res.status(404).json({ error: 'Not found' });
     const members = await queryWithIncludes(prisma, 'campaignMember', 'findMany', { where: { campaignId: req.params.id }, include: { contact: { include: { deals: { where: { stage: 'Closed Won' }, select: { value: true } } } } } });
     const totalWonRevenue = members.reduce((s, m) => s + (m.contact?.deals?.reduce((ds, d) => ds + (d.value || 0), 0) || 0), 0);
-    const cost = campaign.budgetedCost || campaign.actualCost || 0;
+    const cost = campaign.budget || campaign.actualCost || 0;
     const roi = cost > 0 ? Math.round(((totalWonRevenue - cost) / cost) * 100) : 0;
     const responses = members.filter(m => m.status === 'Responded').length;
     const converted = members.filter(m => m.status === 'Converted').length;
-    res.json({ campaignId: campaign.id, totalMembers: members.length, responses, converted, responseRate: members.length ? Math.round(responses / members.length * 100) : 0, conversionRate: members.length ? Math.round(converted / members.length * 100) : 0, budgetedCost: campaign.budgetedCost || 0, actualCost: campaign.actualCost || 0, wonRevenue: totalWonRevenue, roi, costPerResponse: responses > 0 ? Math.round(cost / responses) : 0, costPerConversion: converted > 0 ? Math.round(cost / converted) : 0 });
+    res.json({ campaignId: campaign.id, totalMembers: members.length, responses, converted, responseRate: members.length ? Math.round(responses / members.length * 100) : 0, conversionRate: members.length ? Math.round(converted / members.length * 100) : 0, budgetedCost: campaign.budget || 0, actualCost: campaign.actualCost || 0, wonRevenue: totalWonRevenue, roi, costPerResponse: responses > 0 ? Math.round(cost / responses) : 0, costPerConversion: converted > 0 ? Math.round(cost / converted) : 0 });
   } catch (err) { next(err); }
 });
 
@@ -153,13 +153,17 @@ router.get('/:id/roi', authenticate, async (req, res, next) => {
 router.get('/:id/email-stats', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const emails = await prisma.email.findMany({ where: { campaignId: req.params.id }, select: { status: true, openedAt: true, clickedAt: true, bouncedAt: true, unsubscribedAt: true } });
-    const total = emails.length;
-    const sent = emails.filter(e => e.status === 'Sent' || e.status === 'Delivered').length;
-    const opened = emails.filter(e => e.openedAt).length;
-    const clicked = emails.filter(e => e.clickedAt).length;
-    const bounced = emails.filter(e => e.bouncedAt).length;
-    const unsub = emails.filter(e => e.unsubscribedAt).length;
+    // A campaign's sends are tracked per recipient; an Email row has no
+    // campaign. Status runs pending → sent → delivered → opened → clicked,
+    // or ends at bounced / unsubscribed.
+    const recipients = await prisma.campaignRecipient.findMany({ where: { campaignId: req.params.id }, select: { status: true, sentAt: true, openedAt: true, clickedAt: true } });
+    const status = r => String(r.status || '').toLowerCase();
+    const total = recipients.length;
+    const sent = recipients.filter(r => r.sentAt || ['sent', 'delivered', 'opened', 'clicked'].includes(status(r))).length;
+    const opened = recipients.filter(r => r.openedAt || ['opened', 'clicked'].includes(status(r))).length;
+    const clicked = recipients.filter(r => r.clickedAt || status(r) === 'clicked').length;
+    const bounced = recipients.filter(r => status(r) === 'bounced').length;
+    const unsub = recipients.filter(r => status(r) === 'unsubscribed').length;
     res.json({ totalEmails: total, sent, opened, clicked, bounced, unsubscribed: unsub, openRate: sent ? Math.round(opened / sent * 100) : 0, clickRate: opened ? Math.round(clicked / opened * 100) : 0, bounceRate: sent ? Math.round(bounced / sent * 100) : 0, unsubRate: sent ? Math.round(unsub / sent * 100) : 0 });
   } catch (err) { next(err); }
 });

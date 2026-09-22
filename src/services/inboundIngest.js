@@ -11,6 +11,8 @@
  *   date, uid, attachments, headers }.
  */
 
+const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+
 /** Pull a plain address out of "Display Name <addr@host>". */
 function parseAddress(raw) {
   if (!raw) return { name: null, email: null };
@@ -188,18 +190,16 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
         const contact = from.email ? await prisma.contact.findFirst({ where: { email: from.email, deletedAt: null } }) : null;
         // caseNumber is required and has no default, and type is not nullable,
         // so an email-opened case has to supply one and omit the other.
-        const caseCount = await prisma.case.count();
         const caseType = routed?.setType || account.defaultCaseType;
-        const newCase = await prisma.case.create({
+        const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
           data: {
-            caseNumber: `CS-${String(caseCount + 1).padStart(3, '0')}`,
             subject: subject.slice(0, 250),
             description: bodyText.slice(0, 8000),
-            status: 'New',
+            status: routed?.setStatus || 'New',
             priority: routed?.setPriority || account.defaultPriority || 'Medium',
             ...(caseType ? { type: caseType } : {}),
             origin: 'Email',
-            ownerId: routed?.assignToUserId || account.defaultOwnerId || null,
+            ownerId: routed?.assignToId || account.defaultOwnerId || null,
             contactId: contact?.id || null,
             accountId: contact?.accountId || null,
             contactEmail: from.email,

@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { SUBSCRIPTION_NUMBER } = require('../utils/numbering');
 
 const router = createCrudRouter('subscription', 'subscriptions', {
   include: {
@@ -14,6 +15,7 @@ const router = createCrudRouter('subscription', 'subscriptions', {
       { account: { name: { contains: q, mode: 'insensitive' } } },
     ],
   }),
+  numbering: SUBSCRIPTION_NUMBER,
 });
 
 // Renew subscription
@@ -47,7 +49,7 @@ router.post('/:id/cancel', authenticate, requirePermission('subscriptions', 'edi
     const { reason, cancelDate, prorated } = req.body;
     const sub = await prisma.subscription.update({
       where: { id: req.params.id },
-      data: { status: 'Cancelled', cancelReason: reason, cancelDate: cancelDate ? new Date(cancelDate) : new Date() },
+      data: { status: 'Cancelled', cancellationReason: reason, cancellationDate: cancelDate ? new Date(cancelDate) : new Date() },
     });
     await req.audit({ action: 'update', module: 'subscriptions', recordId: sub.id, details: `Cancelled: ${reason || 'No reason'}` });
     res.json(sub);

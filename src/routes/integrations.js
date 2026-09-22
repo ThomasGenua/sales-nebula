@@ -42,15 +42,20 @@ router.post('/:id/sync', authenticate, requirePermission('admin', 'edit'), audit
     const prisma = req.app.locals.prisma;
     const integration = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integration) return res.status(404).json({ error: 'Not found' });
+    // No integration type has a sync connector. This used to log the run,
+    // then mark it Completed three seconds later with a random record count
+    // and stamp lastSyncAt, reporting a sync that never happened. Record the
+    // attempt and say plainly that nothing was synced.
+    const error = `No sync connector is implemented for ${integration.provider || integration.type || 'this integration'}`;
+    const now = new Date();
     const syncLog = await prisma.syncLog.create({
-      data: { integrationId: req.params.id, status: 'Running', startedAt: new Date(), triggeredById: req.user.id },
+      data: {
+        integrationId: req.params.id, direction: req.body.direction || 'inbound',
+        status: 'Failed', startedAt: now, completedAt: now,
+        errors: [{ message: error }], triggeredById: req.user.id,
+      },
     });
-    // Simulate async sync completion
-    setTimeout(async () => {
-      try { await prisma.syncLog.update({ where: { id: syncLog.id }, data: { status: 'Completed', completedAt: new Date(), recordsOk: Math.floor(Math.random() * 100) } }); } catch (e) {}
-    }, 3000);
-    await prisma.integration.update({ where: { id: req.params.id }, data: { lastSyncAt: new Date() } });
-    res.json({ syncId: syncLog.id, status: 'Running', message: 'Sync initiated' });
+    res.status(501).json({ syncId: syncLog.id, status: 'Failed', error });
   } catch (err) { next(err); }
 });
 
@@ -72,8 +77,9 @@ router.post('/:id/test', authenticate, requirePermission('admin', 'edit'), async
     const prisma = req.app.locals.prisma;
     const integration = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integration) return res.status(404).json({ error: 'Not found' });
-    // Simulate connection test
-    res.json({ success: true, message: 'Connection test passed', latencyMs: Math.floor(Math.random() * 200 + 50) });
+    // This always answered "passed" with a random latency, whatever the
+    // credentials. There is no connector to test against, so say so.
+    res.status(501).json({ success: false, error: `No connection test is implemented for ${integration.provider || integration.type || 'this integration'}` });
   } catch (err) { next(err); }
 });
 
@@ -133,8 +139,8 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const int = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!int) return res.status(404).json({ error: 'Not found' });
-    const recentLogs = await prisma.syncLog.findMany({ where: { integrationId: req.params.id }, orderBy: { createdAt: 'desc' }, take: 10 }).catch(() => []);
-    const errorCount = recentLogs.filter(l => l.status === 'error').length;
+    const recentLogs = await prisma.syncLog.findMany({ where: { integrationId: req.params.id }, orderBy: { startedAt: 'desc' }, take: 10 });
+    const errorCount = recentLogs.filter(l => ['error', 'Failed'].includes(l.status)).length;
     res.json({ status: errorCount > 3 ? 'unhealthy' : errorCount > 0 ? 'degraded' : 'healthy', recentErrors: errorCount, lastSync: int.lastSyncAt, recentLogs: recentLogs.slice(0, 5) });
   } catch (err) { next(err); }
 });

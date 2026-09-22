@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 
@@ -65,7 +66,7 @@ router.post('/:id/convert-to-order', authenticate, requirePermission('orders', '
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
-    const order = await prisma.order.create({
+    const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
       data: {
         name: `Order - ${quote.name}`, status: 'Draft',
         accountId: quote.accountId, dealId: quote.dealId, contactId: quote.contactId,

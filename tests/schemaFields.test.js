@@ -23,7 +23,7 @@ const { checkPaths } = require('../scripts/check-prisma-fields');
 // rather than more breakage.
 
 // Lower this as references are fixed. Never raise it.
-const BASELINE = 444;
+const BASELINE = 23;
 
 // Files that have been audited and must stay clean.
 const CLEAN = [

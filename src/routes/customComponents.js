@@ -1,34 +1,45 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { pickModelFields, looksLikeId } = require('../utils/modelFields');
 
 const router = Router();
+
+// `/count` was declared after `/:id`, which swallowed it.
+const idParam = (req, res, next) => (looksLikeId('customComponent', req.params.id) ? next() : next('route'));
 
 router.get('/', authenticate, async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const comps = await prisma.customComponent.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } }); res.json(comps); } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, idParam, async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const c = await prisma.customComponent.findUnique({ where: { id: req.params.id } }); if (!c) return res.status(404).json({ error: 'Not found' }); res.json(c); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, type, markup, script, styles, description, targetModules, properties } = req.body;
+    const { name, label, type, markup, script, styles, style, description, targetModules, properties } = req.body;
     if (!name || !type) return res.status(400).json({ error: 'name and type required' });
     const comp = await prisma.customComponent.create({
-      data: { name, type, markup, script, style: styles, description, targetModules: targetModules || [], properties: properties || {}, version: '1.0.0', active: false, createdById: req.user.id },
+      // label and markup are required columns; a new component starts empty.
+      data: { name, label: label || name, type, markup: markup ?? '', script, style: style ?? styles, description, targetModules: targetModules || [], properties: properties || {}, version: '1.0.0', active: false, createdById: req.user.id },
     });
     res.status(201).json(comp);
   } catch (err) { next(err); }
 });
 
-router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const c = await prisma.customComponent.update({ where: { id: req.params.id }, data: req.body }); res.json(c); } catch (err) { next(err); }
+router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { id, createdById, createdAt, updatedAt, deletedAt, styles, ...body } = req.body;
+    const { data } = pickModelFields('customComponent', { ...body, ...(styles !== undefined && body.style === undefined && { style: styles }) });
+    const c = await prisma.customComponent.update({ where: { id: req.params.id }, data });
+    res.json(c);
+  } catch (err) { next(err); }
 });
 
-router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
+router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'), async (req, res, next) => {
   try { await req.app.locals.prisma.customComponent.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
@@ -91,7 +102,7 @@ router.get('/:id/export', authenticate, async (req, res, next) => {
 router.get('/:id/versions', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const versions = await prisma.customComponentVersion.findMany({ where: { componentId: req.params.id }, orderBy: { version: 'desc' }, take: 10 }).catch(() => []);
+    const versions = await prisma.customComponentVersion.findMany({ where: { customComponentId: req.params.id }, orderBy: { version: 'desc' }, take: 10 });
     res.json(versions);
   } catch (err) { next(err); }
 });
@@ -120,9 +131,11 @@ router.get('/count', authenticate, async (req, res, next) => {
 router.get('/analytics/usage', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const components = await prisma.customComponent.findMany({ where: { deletedAt: null }, select: { id: true, name: true, active: true, type: true, usageCount: true } });
-    const active = components.filter(c => c.active);
-    res.json({ total: components.length, active: active.length, topUsed: components.sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0)).slice(0, 10) });
+    // Nothing records where a component is used, so there is no usage to
+    // rank; this reported a usageCount column that was never there.
+    const components = await prisma.customComponent.findMany({ where: { deletedAt: null }, select: { id: true, active: true, type: true } });
+    const byType = components.reduce((acc, c) => { acc[c.type] = (acc[c.type] || 0) + 1; return acc; }, {});
+    res.json({ total: components.length, active: components.filter(c => c.active).length, byType });
   } catch (err) { next(err); }
 });
 
