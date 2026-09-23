@@ -3,6 +3,8 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { invalidateCurrencyCache } = require('../utils/currency');
 const { hashApiKey } = require('../utils/apiKeys');
+const { permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -139,13 +141,22 @@ router.get('/stats', requirePermission('settings', 'read'), async (req, res, nex
 
 // ─── DATA EXPORT ───
 
+// Both exports read every row of a module for anyone with settings: read,
+// private records included. They now take read permission on the module
+// and return the rows the caller's row security reaches.
+const MODULE_OF = {
+  contact: 'contacts', lead: 'leads', deal: 'deals', account: 'accounts', activity: 'activities', case: 'cases',
+  product: 'products', quote: 'quotes', invoice: 'invoices', email: 'emails', campaign: 'campaigns', document: 'documents',
+};
+
 router.get('/export/:module', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const mod = req.params.module;
-    const validModels = ['contact', 'lead', 'deal', 'account', 'activity', 'case', 'product', 'quote', 'invoice', 'email', 'campaign', 'document'];
-    if (!validModels.includes(mod)) return res.status(400).json({ error: 'Invalid module' });
-    const data = await prisma[mod].findMany();
+    const module = Object.prototype.hasOwnProperty.call(MODULE_OF, mod) ? MODULE_OF[mod] : null;
+    if (!module) return res.status(400).json({ error: 'Invalid module' });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    const data = await prisma[mod].findMany({ where: await reachableWhere(req, module, mod) });
     res.json({ data });
   } catch (err) { next(err); }
 });
@@ -447,10 +458,11 @@ router.get('/export-csv/:module', requirePermission('settings', 'read'), async (
       contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
       cases: 'case', products: 'product', activities: 'activity',
     };
-    const modelName = models[module];
+    const modelName = Object.prototype.hasOwnProperty.call(models, module) ? models[module] : null;
     if (!modelName) return res.status(400).json({ error: `Unknown module: ${module}` });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
 
-    const records = await prisma[modelName].findMany({ take: 10000 });
+    const records = await prisma[modelName].findMany({ where: await reachableWhere(req, module, modelName), take: 10000 });
     if (records.length === 0) return res.status(404).json({ error: 'No records to export' });
 
     const headers = Object.keys(records[0]).filter(k => k !== 'password');
