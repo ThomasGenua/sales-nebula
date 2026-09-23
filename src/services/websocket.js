@@ -108,6 +108,8 @@ function initWebSocket(server, prisma) {
         include: { role: { include: { permissions: true } } },
       });
       if (!user || !user.active) return next(new Error('Invalid token'));
+      // Customer portal accounts have nothing to follow here (see auth.js).
+      if (user.isPortalUser) return next(new Error('Not available to portal accounts'));
       socket.user = user;
       socket.userId = user.id;
       socket.tokenExpiresAt = decoded.exp ? decoded.exp * 1000 : null;

@@ -120,6 +120,50 @@ function signToken(userId, role) {
   return signAccessToken(userId, role);
 }
 
+// ─── CUSTOMER PORTAL ACCOUNTS ───
+// A portal account (User.isPortalUser) belongs to a customer's contact. It
+// signs in like staff, and its session used to open every route that checks
+// only for one: search, feeds, notes, calendars, timelines. It now reaches
+// its own account and the portal, and nothing else.
+const PORTAL_ROUTES = [
+  { method: 'GET', path: '/api/auth/me' },
+  { method: 'PUT', path: '/api/auth/me' },
+  { method: 'POST', path: '/api/auth/change-password' },
+  { prefix: '/api/security/mfa' },
+  { prefix: '/api/portal/my' },
+  { method: 'GET', path: '/api/portal/config' },
+  { method: 'PUT', pattern: /^\/api\/portal\/users\/[^/]+\/profile$/ },
+];
+
+/** Why a portal account may not make this request, or null when it may. */
+function portalRefusal(req) {
+  const path = `${req.baseUrl || ''}${req.path || ''}`.toLowerCase().replace(/\/+$/, '');
+  const method = req.method === 'HEAD' ? 'GET' : req.method;
+  const allowed = PORTAL_ROUTES.some(route => {
+    if (route.prefix) return path === route.prefix || path.startsWith(`${route.prefix}/`);
+    if (route.method !== method) return false;
+    return route.pattern ? route.pattern.test(path) : path === route.path;
+  });
+  return allowed ? null : 'Customer portal accounts can only use the portal';
+}
+
+/** Refuse a portal account anything outside the portal. True when it did. */
+function refusedToPortalAccount(req, res, user) {
+  if (!user?.isPortalUser) return false;
+  const refusal = portalRefusal(req);
+  if (!refusal) return false;
+  res.status(403).json({ error: refusal, code: 'PORTAL_ACCOUNT' });
+  return true;
+}
+
+const LEVELS = { none: 0, read: 1, edit: 2, full: 3 };
+
+/** Whether a user's role grants at least `level` on a module, as requirePermission decides. */
+function hasPermission(user, module, level) {
+  const perm = user?.role?.permissions?.find(p => p.module === module);
+  return (LEVELS[perm?.level] || 0) >= (LEVELS[level] || 0);
+}
+
 // ─── API KEY RATE LIMIT ───
 // A key's rateLimit is requests per hour. It was stored and never enforced.
 // Counted in Redis when there is one, so every instance shares the count;
@@ -171,6 +215,7 @@ async function authenticateApiKey(req, res, next) {
     // disabled: routes without a permission check used to take such a key.
     const owner = await loadUser(req, keyRecord.createdById);
     if (!owner || !owner.active) return res.status(401).json({ error: 'API key owner is disabled' });
+    if (refusedToPortalAccount(req, res, owner)) return;
 
     if (keyRecord.rateLimit > 0) {
       const { count, resetAt } = await countApiKeyRequest(keyRecord.id);
@@ -219,6 +264,7 @@ async function authenticateAppToken(req, res, next, token) {
     if (!owner || !owner.active) {
       return bearerError(401, 'invalid_token', 'The access token is invalid', { error: 'Invalid token' });
     }
+    if (refusedToPortalAccount(req, res, owner)) return;
     const refusal = appTokenRefusal(req, grant.scopes);
     if (refusal) {
       return bearerError(403, 'insufficient_scope', refusal, { error: refusal, code: 'INSUFFICIENT_SCOPE' });
@@ -298,6 +344,7 @@ async function authenticate(req, res, next) {
     const user = await loadUser(req, decoded.userId);
     if (!user) return res.status(401).json({ error: 'Account no longer exists' });
     if (!user.active) return res.status(403).json({ error: 'Account disabled' });
+    if (refusedToPortalAccount(req, res, user)) return;
     req.user = user;
 
     next();
@@ -311,7 +358,7 @@ async function authenticate(req, res, next) {
 
 // ─── PERMISSION MIDDLEWARE ───
 function requirePermission(module, minLevel) {
-  const levels = { none: 0, read: 1, edit: 2, full: 3 };
+  const levels = LEVELS;
   return async (req, res, next) => {
     try {
       const user = await loadUser(req, req.userId);
@@ -346,6 +393,8 @@ module.exports = {
   authenticate,
   authenticateApiKey,
   requirePermission,
+  hasPermission,
+  portalRefusal,
   signToken,
   signAccessToken,
   signRefreshToken,
