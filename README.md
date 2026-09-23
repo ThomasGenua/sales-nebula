@@ -480,7 +480,9 @@ Each user is assigned one role. The role contains a set of `Permission` records,
 
 ### API Key Authentication
 
-For server-to-server integrations, generate API keys via `POST /api/admin/api-keys`. Pass the key as `X-API-Key` header. Keys inherit the permissions of the user who created them.
+For server-to-server integrations, generate API keys via `POST /api/admin/api-keys`. Pass the key as `X-API-Key` header. The key is shown once, in that response: only a SHA-256 of it is stored, so a lost key is replaced, not recovered.
+
+A key acts for the user who created it and stops working if that user is disabled. Give it `permissions: [{ "module": "contacts", "level": "read" }, ...]` to limit it to those modules, never beyond the creator's own access; `"module": "*"` covers every module. A key with an empty `permissions` list carries the creator's full access.
 
 ### SSO and OAuth
 

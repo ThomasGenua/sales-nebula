@@ -190,7 +190,7 @@ describe('API Key Management', () => {
     await prisma.apiKey.create({
       data: {
         name: 'Test Key',
-        key: 'sn_abc123def456',
+        keyHash: 'hash-of-sn_abc123def456',
         prefix: 'sn_abc123',
         permissions: [],
         createdById: userId,
@@ -209,7 +209,7 @@ describe('API Key Management', () => {
 
   it('revokes an API key', async () => {
     const key = await prisma.apiKey.create({
-      data: { name: 'Revoke Me', key: 'sn_revoke123', prefix: 'sn_revoke', permissions: [], createdById: userId },
+      data: { name: 'Revoke Me', keyHash: 'hash-of-sn_revoke123', prefix: 'sn_revoke', permissions: [], createdById: userId },
     });
 
     const res = await request(app)

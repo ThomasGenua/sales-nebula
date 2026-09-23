@@ -1451,7 +1451,9 @@ model RecycleBinItem {
 model ApiKey {
   id          String    @id @default(uuid())
   name        String
-  key         String    @unique
+  // SHA-256 of the key (utils/apiKeys); the key itself is never stored. The
+  // column keeps its old name, "key".
+  keyHash     String    @unique @map("key")
   prefix      String    // First 8 chars for display
   permissions Json      // [{module, level}]
   rateLimit   Int       @default(1000) // requests per hour

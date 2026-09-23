@@ -15,6 +15,7 @@ const { v4: uuid } = require('uuid');
 
 const { resolveJwtSecret } = require('../utils/secrets');
 const { ACCESS_COOKIE, readCookie, csrfValid, needsCsrf } = require('../utils/sessionCookies');
+const { hashApiKey } = require('../utils/apiKeys');
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
@@ -124,7 +125,7 @@ async function authenticateApiKey(req, res, next) {
 
   try {
     const prisma = req.app.locals.prisma;
-    const keyRecord = await prisma.apiKey.findUnique({ where: { key: apiKey } });
+    const keyRecord = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(apiKey) } });
     if (!keyRecord) return res.status(401).json({ error: 'Invalid API key' });
     if (!keyRecord.active) return res.status(401).json({ error: 'API key disabled' });
     if (keyRecord.expiresAt && new Date(keyRecord.expiresAt) < new Date()) {
@@ -134,9 +135,14 @@ async function authenticateApiKey(req, res, next) {
     // Update last used timestamp (non-blocking)
     prisma.apiKey.update({ where: { id: keyRecord.id }, data: { lastUsedAt: new Date() } }).catch(() => {});
 
+    // A key acts for the user who made it, and not after they are gone or
+    // disabled: routes without a permission check used to take such a key.
+    const owner = await loadUser(req, keyRecord.createdById);
+    if (!owner || !owner.active) return res.status(401).json({ error: 'API key owner is disabled' });
+
     req.userId = keyRecord.createdById;
     req.userRole = 'api';
-    req.user = await loadUser(req, keyRecord.createdById);
+    req.user = owner;
     req.isApiKey = true;
     req.apiKeyPermissions = keyRecord.permissions;
     next();
@@ -221,17 +227,22 @@ function requirePermission(module, minLevel) {
   const levels = { none: 0, read: 1, edit: 2, full: 3 };
   return async (req, res, next) => {
     try {
-      const prisma = req.app.locals.prisma;
-
-      // API keys with explicit role bypass
-      if (req.isApiKey && req.userRole === 'admin') return next();
-
       const user = await loadUser(req, req.userId);
       if (!user || !user.active) {
         return res.status(403).json({ error: 'Account disabled' });
       }
       const perm = user.role.permissions.find(p => p.module === module);
-      const userLevel = perm ? levels[perm.level] || 0 : 0;
+      let userLevel = perm ? levels[perm.level] || 0 : 0;
+      // An API key reaches no further than the modules it was granted,
+      // [{ module, level }], and never past its owner's own access. The grant
+      // was stored and ignored, so a "contacts: read" key had its creator's
+      // full rights. A key granted nothing carries its owner's access, as
+      // keys always have.
+      const grants = req.isApiKey && Array.isArray(req.apiKeyPermissions) ? req.apiKeyPermissions : [];
+      if (grants.length) {
+        const grant = grants.find(g => g.module === module || g.module === '*');
+        userLevel = Math.min(userLevel, grant ? levels[grant.level] || 0 : 0);
+      }
       if (userLevel < (levels[minLevel] || 0)) {
         return res.status(403).json({ error: `Insufficient permissions for ${module}` });
       }

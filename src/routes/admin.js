@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { invalidateCurrencyCache } = require('../utils/currency');
+const { hashApiKey } = require('../utils/apiKeys');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -353,8 +354,8 @@ router.get('/api-keys', requirePermission('settings', 'read'), async (req, res, 
   try {
     const prisma = req.app.locals.prisma;
     const keys = await prisma.apiKey.findMany({ orderBy: { createdAt: 'desc' } });
-    // Mask full key, show only prefix
-    const safe = keys.map(k => ({ ...k, key: `${k.prefix}...` }));
+    // Only the prefix can be shown: the key itself is not stored.
+    const safe = keys.map(({ keyHash, ...k }) => ({ ...k, key: `${k.prefix}...` }));
     res.json({ data: safe });
   } catch (err) { next(err); }
 });
@@ -372,7 +373,7 @@ router.post('/api-keys', requirePermission('settings', 'full'), async (req, res,
     const apiKey = await prisma.apiKey.create({
       data: {
         name,
-        key: rawKey,
+        keyHash: hashApiKey(rawKey),
         prefix,
         permissions: permissions || [],
         rateLimit: rateLimit || 1000,
@@ -382,8 +383,9 @@ router.post('/api-keys', requirePermission('settings', 'full'), async (req, res,
     });
 
     await req.audit({ action: 'create', module: 'settings', recordId: apiKey.id, details: `Created API key: ${name}` });
-    // Return full key ONLY on creation
-    res.status(201).json(apiKey);
+    // The only time the key exists outside the caller's hands: it is not stored.
+    const { keyHash, ...created } = apiKey;
+    res.status(201).json({ ...created, key: rawKey });
   } catch (err) { next(err); }
 });
 
@@ -398,9 +400,8 @@ router.put('/api-keys/:id', requirePermission('settings', 'full'), async (req, r
     if (active !== undefined) data.active = active;
     if (expiresAt !== undefined) data.expiresAt = expiresAt ? new Date(expiresAt) : null;
 
-    const key = await prisma.apiKey.update({ where: { id: req.params.id }, data });
-    key.key = `${key.prefix}...`;
-    res.json(key);
+    const { keyHash, ...key } = await prisma.apiKey.update({ where: { id: req.params.id }, data });
+    res.json({ ...key, key: `${key.prefix}...` });
   } catch (err) { next(err); }
 });
 
