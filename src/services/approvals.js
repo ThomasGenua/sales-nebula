@@ -15,9 +15,25 @@
  * Every candidate now gets a step row at the step's position, the first
  * decision settles the step for all of them, and the submitter is never a
  * candidate.
+ *
+ * When a request is decided, its process's final action for that outcome
+ * runs: `updateField` sets one field on the record, `createNotification`
+ * tells the record's owner (or config.userId). The approve route used to
+ * read a finalApprovalConfig column that did not exist, so neither ever ran.
  */
+const { Prisma } = require('@prisma/client');
+const { logger } = require('./logger');
+const { visibleWhere, isAdmin } = require('../middleware/rowSecurity');
 
 const APPROVER_TYPES = ['user', 'role', 'manager', 'queue', 'team'];
+const FINAL_ACTIONS = ['none', 'updateField', 'createNotification'];
+
+/** The modules an approval can be about, and the table each one lives in. */
+const APPROVAL_MODELS = {
+  deals: 'deal', quotes: 'quote', invoices: 'invoice', contracts: 'contract', orders: 'order',
+  cases: 'case', leads: 'lead', accounts: 'account', contacts: 'contact', campaigns: 'campaign',
+  products: 'product', projects: 'project', subscriptions: 'subscription',
+};
 
 class ApprovalError extends Error {
   constructor(message) {
@@ -112,7 +128,136 @@ async function closeOpenSteps(prisma, requestId) {
   });
 }
 
+// ─── FINAL ACTIONS ───
+
+// A final action sets a plain value, never who owns or links to a record:
+// those would let a process quietly hand records to someone else.
+const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
+const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
+
+const dmmfModel = modelName => Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === modelName.toLowerCase());
+
+/** Why `{ field, value }` cannot be set on this module's records, or null. */
+function fieldUpdateProblem(module, config) {
+  const modelName = APPROVAL_MODELS[module];
+  if (!modelName) return `updateField works only for these modules: ${Object.keys(APPROVAL_MODELS).join(', ')}`;
+  const { field, value } = config && typeof config === 'object' ? config : {};
+  const model = dmmfModel(modelName);
+  const foreignKeys = new Set(model.fields.flatMap(f => f.relationFromFields || []));
+  const def = model.fields.find(f => f.name === field);
+  if (!def || def.kind === 'object' || def.isId || def.isUpdatedAt || foreignKeys.has(field)
+      || PROTECTED_FIELDS.has(field) || /Id$/.test(field)) {
+    return `updateField needs a field a final action may set on ${module}; "${field}" is not one`;
+  }
+  if (value === null || value === undefined) {
+    return def.isRequired ? `${field} cannot be emptied` : null;
+  }
+  if (def.kind === 'enum') {
+    const values = Prisma.dmmf.datamodel.enums.find(e => e.name === def.type)?.values.map(v => v.name) || [];
+    return values.includes(value) ? null : `${field} must be one of: ${values.join(', ')}`;
+  }
+  const expected = VALUE_TYPES[def.type];
+  if (!expected) return `${field} is a ${def.type}, which a final action cannot set`;
+  if (typeof value !== expected || (def.type === 'Int' && !Number.isInteger(value))) {
+    return `${field} needs a ${def.type === 'Int' ? 'whole number' : expected} value`;
+  }
+  return null;
+}
+
+/** Why a process's final actions could not run, or null when they can. */
+function finalActionProblem(process) {
+  const outcomes = [
+    ['finalApprovalAction', process.finalApprovalAction, process.finalApprovalConfig],
+    ['finalRejectionAction', process.finalRejectionAction, process.finalRejectionConfig],
+  ];
+  for (const [label, action, config] of outcomes) {
+    if (action == null || action === 'none') continue;
+    if (!FINAL_ACTIONS.includes(action)) return `${label} must be one of: ${FINAL_ACTIONS.join(', ')}`;
+    if (action === 'updateField') {
+      const problem = fieldUpdateProblem(process.module, config);
+      if (problem) return problem;
+    }
+    if (action === 'createNotification' && config != null) {
+      const { message, userId } = config;
+      if ((message != null && typeof message !== 'string') || (userId != null && typeof userId !== 'string')) {
+        return 'createNotification takes an optional message and userId, both strings';
+      }
+    }
+  }
+  return null;
+}
+
+/** Who owns a record, by whichever ownership columns its model has. */
+async function recordOwners(prisma, modelName, recordId) {
+  const fields = ['ownerId', 'assignedId'].filter(f => prisma[modelName]?.fields && f in prisma[modelName].fields);
+  if (!fields.length) return [];
+  const record = await prisma[modelName].findUnique({
+    where: { id: recordId },
+    select: Object.fromEntries(fields.map(f => [f, true])),
+  });
+  return [...new Set(fields.map(f => record?.[f]).filter(Boolean))];
+}
+
+/**
+ * The final action a decided request's process names for its outcome
+ * ('Approved' or 'Rejected'). The decision stands whatever happens here, so
+ * a failure is logged and returned, not thrown.
+ */
+async function runFinalAction(prisma, request, process, outcome) {
+  const approved = outcome === 'Approved';
+  const action = approved ? process.finalApprovalAction : process.finalRejectionAction;
+  const config = (approved ? process.finalApprovalConfig : process.finalRejectionConfig) || {};
+  if (!action || action === 'none') return null;
+  const modelName = APPROVAL_MODELS[request.module];
+  try {
+    if (action === 'updateField') {
+      // Checked again: the process or the schema may have changed since.
+      const problem = fieldUpdateProblem(request.module, config);
+      if (problem) throw new Error(problem);
+      await prisma[modelName].update({ where: { id: request.recordId }, data: { [config.field]: config.value } });
+    } else if (action === 'createNotification') {
+      const to = config.userId ? [config.userId] : modelName ? await recordOwners(prisma, modelName, request.recordId) : [];
+      // The submitter hears of every outcome already.
+      for (const userId of to.filter(id => id !== request.submittedById)) {
+        await prisma.notification.create({
+          data: {
+            title: `Approval ${outcome.toLowerCase()}`,
+            message: config.message || `${process.name}: ${outcome.toLowerCase()}`,
+            userId, recordModule: request.module, recordId: request.recordId,
+          },
+        });
+      }
+    } else {
+      throw new Error(`Unknown final action: ${action}`);
+    }
+    return { action, ok: true };
+  } catch (err) {
+    logger.warn({ err, requestId: request.id, action }, 'Approval final action failed');
+    return { action, ok: false, error: err.message };
+  }
+}
+
+// ─── WHO SEES WHAT ───
+
+/** The record an approval would be about, if the submitter may see it. */
+async function findVisibleRecord(req, module, recordId) {
+  const modelName = APPROVAL_MODELS[module];
+  if (!modelName || !recordId) return null;
+  const prisma = req.app.locals.prisma;
+  return prisma[modelName].findFirst({ where: await visibleWhere(req, module, modelName, { id: String(recordId) }) });
+}
+
+/**
+ * Administrators, and whoever may fully manage workflows, see every request;
+ * everyone else sees those they submitted or were asked to decide.
+ */
+function canSeeAllRequests(user) {
+  if (isAdmin(user)) return true;
+  return user?.role?.permissions?.some(p => p.module === 'workflows' && p.level === 'full') || false;
+}
+
 module.exports = {
-  APPROVER_TYPES, ApprovalError,
+  APPROVER_TYPES, APPROVAL_MODELS, FINAL_ACTIONS, ApprovalError,
   candidatesFor, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
+  fieldUpdateProblem, finalActionProblem, runFinalAction, findVisibleRecord, canSeeAllRequests,
 };

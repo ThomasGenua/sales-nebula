@@ -2746,20 +2746,67 @@ function SequencesPage() {
 }
 
 // ── Approvals ──
+const APPROVAL_BADGE = { Approved: "success", Rejected: "danger", Pending: "warning", Recalled: "neutral" };
+
+/** "Discount approval: Acme renewal", else the module and a short record id. */
+const approvalTitle = (a) => {
+  const subject = a.deal?.name || `${a.module} ${String(a.recordId || "").substring(0, 8)}`;
+  return a.process?.name ? `${a.process.name}: ${subject}` : subject;
+};
+
 function ApprovalsPage() {
   const { apiFetch } = useAuth();
   const [pending, setPending] = useState([]); const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null); const [tab, setTab] = useState('pending');
-  const load = useCallback(() => { setLoading(true); Promise.all([apiFetch('/approvals/pending').catch(()=>({data:[]})),apiFetch('/approvals/history?limit=20').catch(()=>({data:[]}))]).then(([p,h])=>{setPending(p.data||p||[]);setHistory(h.data||h||[]);}).finally(()=>setLoading(false)); }, [apiFetch]);
+  const [busy, setBusy] = useState(null);
+  // What waits on this user, and every request they submitted or were asked to
+  // decide. These called /approvals/pending and /approvals/history, which do
+  // not exist, and the errors were swallowed, so the page was always empty.
+  const load = useCallback(() => {
+    setLoading(true);
+    Promise.all([apiFetch('/approvals/requests/pending'), apiFetch('/approvals/requests?limit=50')])
+      .then(([p, h]) => {
+        setPending((p.data || []).map(step => ({ ...step.request, stepOrder: step.stepOrder })));
+        setHistory(h.data || []);
+      })
+      .catch(e => setToast({ message: e.message || 'Could not load approvals', type: 'error' }))
+      .finally(() => setLoading(false));
+  }, [apiFetch]);
   useEffect(() => { load(); }, [load]);
-  const handleAction = async (id, action) => { try { await apiFetch(`/approvals/${id}/${action}`, { method: 'POST', body: {} }); setToast({ message: `${action}d`, type: 'success' }); load(); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
+  const handleAction = async (id, action) => {
+    setBusy(id);
+    try {
+      await apiFetch(`/approvals/requests/${id}/${action}`, { method: 'POST', body: {} });
+      setToast({ message: action === 'approve' ? 'Approved' : 'Rejected', type: 'success' });
+      load();
+    } catch (e) { setToast({ message: e.message, type: 'error' }); }
+    finally { setBusy(null); }
+  };
   const items = tab === 'pending' ? pending : history;
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Approvals</h1>
       <div className="flex gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit">{['pending','history'].map(t=><button key={t} onClick={()=>setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize touch-manipulation ${tab===t?'bg-[rgba(245,166,35,0.08)] text-[#F5A623]':'text-[#7E8598]'}`}>{t}{t==='pending'&&pending.length>0&&<span className="ml-1 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{pending.length}</span>}</button>)}</div>
       {loading ? <Spinner /> : items.length===0 ? <EmptyState icon={CheckCircle2} title={tab==='pending'?"No pending approvals":"No history"} /> : (
-        <div className="space-y-2">{items.map(a=>(<div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div><div className="text-sm font-medium text-[#F0EDE5]">{a.module} - {a.recordId?.substring(0,8)}</div><div className="text-xs text-[#4A5168] mt-0.5">{a.createdAt?new Date(a.createdAt).toLocaleString(...fmt()):''}</div></div><div className="flex items-center gap-2">{a.status==='Pending'?<><Button variant="primary" size="sm" onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>:<Badge color={a.status==='Approved'?'success':'danger'}>{a.status}</Badge>}</div></div></div>))}</div>)}
+        <div className="space-y-2">{items.map(a=>(
+          <div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-[#F0EDE5] truncate">{approvalTitle(a)}</div>
+                <div className="text-xs text-[#4A5168] mt-0.5">
+                  {a.submittedBy ? `${a.submittedBy.firstName} ${a.submittedBy.lastName} · ` : ''}
+                  {a.createdAt ? new Date(a.createdAt).toLocaleString(...fmt()) : ''}
+                  {tab === 'pending' && a.stepOrder ? ` · step ${a.stepOrder}` : ''}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {tab === 'pending'
+                  ? <><Button variant="primary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>
+                  : <Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge>}
+              </div>
+            </div>
+          </div>
+        ))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );

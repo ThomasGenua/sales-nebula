@@ -923,12 +923,16 @@ model ApprovalProcess {
   active       Boolean  @default(true)
   entryConditions Json? // Conditions to trigger this process
   finalApprovalAction String @default("none") // none, updateField, createNotification
+  // What the action needs: { field, value } for updateField, and optionally
+  // { message } for createNotification (see services/approvals).
+  finalApprovalConfig Json?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   steps    ApprovalProcessStep[]
   requests ApprovalRequest[]
   finalRejectionAction String?
+  finalRejectionConfig Json?
 }
 
 model ApprovalProcessStep {

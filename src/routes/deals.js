@@ -365,6 +365,8 @@ module.exports = createCrudRouter('deal', 'deals', {
           return res.status(400).json({ error: 'No active approval process configured for deals' });
         }
         if (!process.steps.length) return res.status(400).json({ error: 'Approval process has no steps' });
+        const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: deal.id, status: 'Pending' } });
+        if (open) return res.status(409).json({ error: 'This deal is already awaiting approval', requestId: open.id });
         // Every candidate for every step, never the submitter (services/approvals).
         const stepRows = await buildApprovalSteps(prisma, process.steps, req.user);
 
@@ -373,6 +375,7 @@ module.exports = createCrudRouter('deal', 'deals', {
           data: {
             processId: process.id,
             recordId: deal.id,
+            dealId: deal.id,
             module: 'deals',
             submittedById: req.userId,
             status: 'Pending',
