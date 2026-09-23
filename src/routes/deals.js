@@ -1,7 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
 const { visibleWhere } = require('../middleware/rowSecurity');
-const { buildApprovalSteps, notifyApprovers } = require('../services/approvals');
+const { buildApprovalSteps, notifyApprovers, meetsEntryConditions } = require('../services/approvals');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
 
 module.exports = createCrudRouter('deal', 'deals', {
@@ -355,15 +355,19 @@ module.exports = createCrudRouter('deal', 'deals', {
         const deal = await prisma.deal.findFirst({ where: await visibleWhere(req, 'deals', 'deal', { id: req.params.id }) });
         if (!deal) return res.status(404).json({ error: 'Not found' });
 
-        // Find applicable approval process
-        const process = await prisma.approvalProcess.findFirst({
+        // The first active process, oldest first, whose entry conditions the
+        // deal meets. This took whichever active process the database
+        // returned first, conditions unread.
+        const processes = await prisma.approvalProcess.findMany({
           where: { module: 'deals', active: true },
           include: { steps: { orderBy: { stepOrder: 'asc' } } },
+          orderBy: { createdAt: 'asc' },
         });
-
-        if (!process) {
+        if (!processes.length) {
           return res.status(400).json({ error: 'No active approval process configured for deals' });
         }
+        const process = processes.find(p => meetsEntryConditions(p, deal));
+        if (!process) return res.status(400).json({ error: 'This deal meets the entry conditions of no active approval process' });
         if (!process.steps.length) return res.status(400).json({ error: 'Approval process has no steps' });
         const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: deal.id, status: 'Pending' } });
         if (open) return res.status(409).json({ error: 'This deal is already awaiting approval', requestId: open.id });

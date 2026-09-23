@@ -5,6 +5,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const {
   APPROVER_TYPES, APPROVAL_MODELS, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
   finalActionProblem, runFinalAction, findVisibleRecord, canSeeAllRequests,
+  entryConditionsProblem, meetsEntryConditions,
 } = require('../services/approvals');
 
 const router = Router();
@@ -60,12 +61,20 @@ function processFields(body) {
   return data;
 }
 
-/** The merged process, for checking its final actions before it is saved. */
+/** The merged process, for checking it before it is saved. */
 const asSaved = (current, data) => {
   const merged = { ...current, ...data };
-  for (const key of ['finalApprovalConfig', 'finalRejectionConfig']) if (merged[key] === Prisma.DbNull) merged[key] = null;
+  for (const key of ['entryConditions', 'finalApprovalConfig', 'finalRejectionConfig']) {
+    if (merged[key] === Prisma.DbNull) merged[key] = null;
+  }
   return merged;
 };
+
+/** Why a process as it would be saved could not work, or null. */
+const processProblem = (process, steps) =>
+  invalidStep(steps)
+  || entryConditionsProblem(process.module, process.entryConditions)
+  || finalActionProblem(process);
 
 router.post('/processes', requirePermission('workflows', 'edit'), async (req, res, next) => {
   try {
@@ -73,7 +82,7 @@ router.post('/processes', requirePermission('workflows', 'edit'), async (req, re
     const { steps } = req.body || {};
     const data = processFields(req.body);
     if (!data.name || !data.module) return res.status(400).json({ error: 'name and module are required' });
-    const problem = invalidStep(steps) || finalActionProblem(asSaved({}, data));
+    const problem = processProblem(asSaved({}, data), steps);
     if (problem) return res.status(400).json({ error: problem });
     const process = await prisma.approvalProcess.create({
       data: { ...data, steps: { create: stepRows(steps || []) } },
@@ -91,7 +100,7 @@ router.put('/processes/:id', requirePermission('workflows', 'edit'), async (req,
     if (!current) return res.status(404).json({ error: 'Not found' });
     const { steps } = req.body || {};
     const data = processFields(req.body);
-    const problem = invalidStep(steps) || finalActionProblem(asSaved(current, data));
+    const problem = processProblem(asSaved(current, data), steps);
     if (problem) return res.status(400).json({ error: problem });
     // New steps replace the old in one transaction: a failed update used to
     // leave the process with none.
@@ -188,16 +197,16 @@ router.post('/requests', async (req, res, next) => {
     // module. Any id used to be taken, with whatever module and deal the
     // body named, and then shown, deal value included, to every approver.
     const known = !!APPROVAL_MODELS[process.module];
-    if (known && !(await findVisibleRecord(req, process.module, recordId))) {
-      return res.status(404).json({ error: 'Record not found' });
+    const record = known ? await findVisibleRecord(req, process.module, recordId) : null;
+    if (known && !record) return res.status(404).json({ error: 'Record not found' });
+    if (!meetsEntryConditions(process, record)) {
+      return res.status(400).json({ error: `This record does not meet the entry conditions of "${process.name}"` });
     }
     const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: String(recordId), status: 'Pending' } });
     if (open) return res.status(409).json({ error: 'This record is already awaiting approval', requestId: open.id });
 
     // Every candidate for every step, never the submitter (services/approvals).
     const rows = await buildApprovalSteps(prisma, process.steps, req.user);
-
-    // entryConditions are stored with the process but not yet evaluated.
 
     const request = await prisma.approvalRequest.create({
       data: {

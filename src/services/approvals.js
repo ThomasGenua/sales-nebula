@@ -16,6 +16,10 @@
  * decision settles the step for all of them, and the submitter is never a
  * candidate.
  *
+ * A process's entryConditions, [{ field, operator, value }] as workflows use
+ * them, must all hold for a record to be submitted to it. They were stored
+ * and never looked at.
+ *
  * When a request is decided, its process's final action for that outcome
  * runs: `updateField` sets one field on the record, `createNotification`
  * tells the record's owner (or config.userId). The approve route used to
@@ -24,6 +28,7 @@
 const { Prisma } = require('@prisma/client');
 const { logger } = require('./logger');
 const { visibleWhere, isAdmin } = require('../middleware/rowSecurity');
+const { evaluateConditions, COMPARE_OPERATORS } = require('./workflowEngine');
 
 const APPROVER_TYPES = ['user', 'role', 'manager', 'queue', 'team'];
 const FINAL_ACTIONS = ['none', 'updateField', 'createNotification'];
@@ -164,6 +169,33 @@ function fieldUpdateProblem(module, config) {
   return null;
 }
 
+// ─── ENTRY CONDITIONS ───
+
+/** Why a process's entry conditions could never be checked, or null. */
+function entryConditionsProblem(module, conditions) {
+  if (conditions == null) return null;
+  if (!Array.isArray(conditions)) return 'entryConditions must be a list of { field, operator, value }';
+  if (!conditions.length) return null;
+  const modelName = APPROVAL_MODELS[module];
+  if (!modelName) return `entryConditions work only for these modules: ${Object.keys(APPROVAL_MODELS).join(', ')}`;
+  const model = dmmfModel(modelName);
+  for (const condition of conditions) {
+    const { field, operator } = condition || {};
+    if (!model.fields.some(f => f.name === field && f.kind !== 'object')) {
+      return `entryConditions: ${module} has no field "${field}"`;
+    }
+    if (!COMPARE_OPERATORS.includes(operator)) {
+      return `entryConditions: operator must be one of ${COMPARE_OPERATORS.join(', ')}`;
+    }
+  }
+  return null;
+}
+
+/** Whether a record meets a process's entry conditions; none means it does. */
+const meetsEntryConditions = (process, record) =>
+  !Array.isArray(process.entryConditions) || !process.entryConditions.length
+    || (!!record && evaluateConditions(process.entryConditions, record));
+
 /** Why a process's final actions could not run, or null when they can. */
 function finalActionProblem(process) {
   const outcomes = [
@@ -260,4 +292,5 @@ module.exports = {
   APPROVER_TYPES, APPROVAL_MODELS, FINAL_ACTIONS, ApprovalError,
   candidatesFor, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
   fieldUpdateProblem, finalActionProblem, runFinalAction, findVisibleRecord, canSeeAllRequests,
+  entryConditionsProblem, meetsEntryConditions,
 };
