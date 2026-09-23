@@ -1,8 +1,13 @@
 const crypto = require('crypto');
 const { Router } = require('express');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
+const { editableFields, modelHasField } = require('../utils/modelFields');
 
 const router = Router();
+
+// The modules offline sync carries, and the table each lives in.
+const SYNC_MODELS = { contacts: 'contact', leads: 'lead', deals: 'deal', activities: 'activity', accounts: 'account', cases: 'case' };
 
 // Mobile config
 router.get('/config', authenticate, async (req, res, next) => {
@@ -60,7 +65,8 @@ router.get('/feed', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { limit = 20, before } = req.query;
-    const where = { OR: [{ ownerId: req.user.id }, { assignedToId: req.user.id }] };
+    // The column is assignedId; assignedToId failed every request.
+    const where = { OR: [{ ownerId: req.user.id }, { assignedId: req.user.id }] };
     if (before) where.createdAt = { lt: new Date(before) };
     const activities = await prisma.activity.findMany({
       where, orderBy: { createdAt: 'desc' }, take: +limit,
@@ -76,15 +82,16 @@ router.get('/sync', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { since, modules } = req.query;
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 7 * 86400000);
-    const syncModules = modules ? modules.split(',') : ['contacts', 'leads', 'deals', 'activities'];
+    const syncModules = modules ? String(modules).split(',') : ['contacts', 'leads', 'deals', 'activities'];
     const data = {};
-    const modelMap = { contacts: 'contact', leads: 'lead', deals: 'deal', activities: 'activity', accounts: 'account', cases: 'case' };
+    // Modules the caller may read, and their rows only: this sent every
+    // user's recent records to anyone signed in.
     for (const mod of syncModules) {
-      const model = modelMap[mod];
-      if (!model) continue;
+      const model = SYNC_MODELS[mod];
+      if (!model || !permits(req, mod, 'read')) continue;
       try {
         data[mod] = await prisma[model].findMany({
-          where: { updatedAt: { gte: sinceDate }, deletedAt: null },
+          where: await reachableWhere(req, mod, model, { updatedAt: { gte: sinceDate } }),
           take: 500, orderBy: { updatedAt: 'desc' },
         });
       } catch (e) { data[mod] = []; }
@@ -97,20 +104,33 @@ router.get('/sync', authenticate, async (req, res, next) => {
 router.post('/sync', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { changes } = req.body;
-    if (!changes?.length) return res.json({ processed: 0 });
+    const { changes } = req.body || {};
+    if (!Array.isArray(changes) || !changes.length) return res.json({ processed: 0 });
     const results = [];
-    for (const change of changes) {
+    // `module` named the Prisma model itself, so a change to "user" or
+    // "permission" rewrote accounts and roles: anyone signed in could make
+    // themselves an administrator. A change is now one of the sync modules,
+    // takes edit permission on it, writes the model's own columns, and
+    // updates only records the caller may change.
+    for (const change of changes.slice(0, 500)) {
       try {
-        const model = change.module === 'cases' ? 'case' : change.module;
+        const model = SYNC_MODELS[change?.module];
+        if (!model) throw new Error(`Cannot sync ${change?.module}`);
+        if (!permits(req, change.module, 'edit')) throw new Error(`Insufficient permissions for ${change.module}`);
+        const data = editableFields(model, change.data);
         if (change.action === 'create') {
-          const record = await prisma[model].create({ data: change.data });
+          if (modelHasField(model, 'ownerId')) data.ownerId = req.userId;
+          const record = await prisma[model].create({ data });
           results.push({ id: change.localId, serverId: record.id, status: 'created' });
         } else if (change.action === 'update') {
-          await prisma[model].update({ where: { id: change.id }, data: change.data });
+          const { count } = await prisma[model].updateMany({
+            where: await reachableWhere(req, change.module, model, { id: String(change.id) }, 'Edit'),
+            data,
+          });
+          if (!count) throw new Error('Not found');
           results.push({ id: change.id, status: 'updated' });
         }
-      } catch (e) { results.push({ id: change.id || change.localId, status: 'error', error: e.message }); }
+      } catch (e) { results.push({ id: change?.id || change?.localId, status: 'error', error: e.message }); }
     }
     res.json({ processed: results.length, results });
   } catch (err) { next(err); }
