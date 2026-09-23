@@ -148,21 +148,6 @@ router.get('/approval-matrix', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'AdvancedCpq';
-    // Generic stats endpoint
-    const stats = {
-      module: 'advancedCpq',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

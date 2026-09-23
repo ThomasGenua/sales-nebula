@@ -135,11 +135,10 @@ function createApp(prisma) {
   // ─── SHARED SERVICES ───
   app.locals.prisma = prisma;
   app.locals.emit = app.locals.emit || {
-    toUser: () => {}, toRecord: () => {}, toModule: () => {}, toAll: () => {},
-    toRole: () => {}, toFeed: () => {}, recordCreated: () => {}, recordUpdated: () => {},
-    recordDeleted: () => {}, notification: () => {}, dealStageChanged: () => {},
-    approvalRequired: () => {}, workflowExecuted: () => {}, chatterNewPost: () => {},
-    forecastUpdated: () => {},
+    toUser: () => {}, toRecord: () => {}, toModule: () => {}, toFeed: () => {},
+    recordCreated: () => {}, recordUpdated: () => {}, recordDeleted: () => {},
+    notification: () => {}, dealStageChanged: () => {}, approvalRequired: () => {},
+    chatterNewPost: () => {},
   };
   app.locals.cache = app.locals.cache || { get: async () => null, set: async () => {}, del: async () => {}, enabled: false };
   app.locals.storage = app.locals.storage || { mode: 'local', init: () => {} };

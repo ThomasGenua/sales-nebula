@@ -923,12 +923,16 @@ model ApprovalProcess {
   active       Boolean  @default(true)
   entryConditions Json? // Conditions to trigger this process
   finalApprovalAction String @default("none") // none, updateField, createNotification
+  // What the action needs: { field, value } for updateField, and optionally
+  // { message } for createNotification (see services/approvals).
+  finalApprovalConfig Json?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   steps    ApprovalProcessStep[]
   requests ApprovalRequest[]
   finalRejectionAction String?
+  finalRejectionConfig Json?
 }
 
 model ApprovalProcessStep {
@@ -1451,7 +1455,9 @@ model RecycleBinItem {
 model ApiKey {
   id          String    @id @default(uuid())
   name        String
-  key         String    @unique
+  // SHA-256 of the key (utils/apiKeys); the key itself is never stored. The
+  // column keeps its old name, "key".
+  keyHash     String    @unique @map("key")
   prefix      String    // First 8 chars for display
   permissions Json      // [{module, level}]
   rateLimit   Int       @default(1000) // requests per hour
@@ -1844,7 +1850,6 @@ model SalesPath {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  steps SalesPathStep[]
   deletedAt   DateTime?
   // Written by the routes, never migrated until now.
   createdById String?
@@ -1852,18 +1857,6 @@ model SalesPath {
 
 }
 
-model SalesPathStep {
-  id          String   @id @default(uuid())
-  pathId      String
-  path        SalesPath @relation(fields: [pathId], references: [id], onDelete: Cascade)
-  stageName   String   // Prospecting, Qualification, etc.
-  stepOrder   Int
-  guidance    String?  // coaching text
-  keyFields   Json?    // fields to highlight at this stage
-  successCriteria String? // what success looks like
-
-  @@index([pathId])
-}
 
 // ═══════════════════════════════════════
 // MACROS
@@ -1928,7 +1921,9 @@ model ConnectedApp {
   id            String  @id @default(uuid())
   name          String
   clientId      String  @unique
-  clientSecret  String
+  // Only a SHA-256 of the client secret is kept. The secret itself is shown
+  // once, when the app is registered or its secret rotated.
+  clientSecretHash String @map("clientSecret")
   redirectUris  String[] @default([])
   scopes        String[] @default(["read"])
   active        Boolean @default(true)
@@ -1946,15 +1941,36 @@ model ConnectedApp {
   tokenRefreshedAt DateTime?
 }
 
+// One user's grant to one connected app. Only a SHA-256 of each token is
+// kept; the tokens themselves go to the app alone (see services/oauth).
 model OAuthToken {
-  id            String   @id @default(uuid())
+  id               String    @id @default(uuid())
+  appId            String
+  userId           String
+  accessTokenHash  String    @unique @map("accessToken")
+  refreshTokenHash String?   @unique @map("refreshToken")
+  scopes           String[]  @default([])
+  expiresAt        DateTime
+  refreshExpiresAt DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([appId])
+  @@index([userId])
+}
+
+// The single-use code a user's consent produces, redeemed at the token
+// endpoint with the PKCE verifier that matches codeChallenge.
+model OAuthAuthorizationCode {
+  id            String    @id @default(uuid())
+  codeHash      String    @unique
   appId         String
   userId        String
-  accessToken   String   @unique
-  refreshToken  String?  @unique
-  scopes        String[] @default([])
+  redirectUri   String
+  scopes        String[]  @default([])
+  codeChallenge String
   expiresAt     DateTime
-  createdAt     DateTime @default(now())
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
 
   @@index([appId])
   @@index([userId])

@@ -214,12 +214,12 @@ function AuthProvider({ children }) {
     });
     applySession(d);
   };
-  const logout = async () => {
+  const logout = async ({ returnTo = "/" } = {}) => {
     // The server revokes both tokens and clears the cookies; the page cannot.
     if (!demoMode) await apiFetch("/auth/logout", { method: "POST", skipRefresh: true }).catch(() => {});
     setUser(null); setDemoMode(false);
     localStorage.removeItem("sn_demo_mode");
-    window.history.pushState({}, "", "/");
+    window.history.pushState({}, "", returnTo);
     window.location.reload();
   };
 
@@ -1879,8 +1879,11 @@ function SettingsPage() {
     email: user?.email || "",
     timezone: user?.timezone || "",
     locale: user?.locale || "",
+    currentPassword: "",
   });
   const zoneOptions = useMemo(() => timeZones(), []);
+  // A new sign-in address takes the current password (the API insists).
+  const emailChanging = !demoMode && profile.email.trim().toLowerCase() !== (user?.email || "").toLowerCase();
   const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1893,6 +1896,7 @@ function SettingsPage() {
       email: user?.email || "",
       timezone: user?.timezone || "",
       locale: user?.locale || "",
+      currentPassword: "",
     });
   }, [user?.id, user?.firstName, user?.lastName, user?.email, user?.timezone, user?.locale]);
 
@@ -1925,8 +1929,10 @@ function SettingsPage() {
           email: profile.email,
           timezone: profile.timezone,
           locale: profile.locale,
+          ...(emailChanging && { currentPassword: profile.currentPassword }),
         },
       });
+      setProfile(p => ({ ...p, currentPassword: "" }));
       updateUser?.(updated);
       setToast({ message: "Profile updated", type: "success" });
     } catch (e) {
@@ -2004,6 +2010,10 @@ function SettingsPage() {
               <Input label="First Name" value={profile.firstName} onChange={v => setProfile(p => ({ ...p, firstName: v }))} />
               <Input label="Last Name" value={profile.lastName} onChange={v => setProfile(p => ({ ...p, lastName: v }))} />
               <Input label="Email" value={profile.email} onChange={v => setProfile(p => ({ ...p, email: v }))} type="email" className="sm:col-span-2" />
+              {emailChanging && (
+                <Input label="Current password (to change your email)" value={profile.currentPassword}
+                  onChange={v => setProfile(p => ({ ...p, currentPassword: v }))} type="password" autoComplete="current-password" className="sm:col-span-2" />
+              )}
               <Select label="Time zone" value={profile.timezone} onChange={v => setProfile(p => ({ ...p, timezone: v }))}
                 placeholder="Browser default" options={zoneOptions} />
               <Select label="Date & number format" value={profile.locale} onChange={v => setProfile(p => ({ ...p, locale: v }))}
@@ -2076,6 +2086,7 @@ function SettingsPage() {
               Enable 2FA
             </Button>
           </div>
+          <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
 
@@ -2099,6 +2110,52 @@ function SettingsPage() {
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+/** The connected apps this user has let act for them, each revocable. */
+function AuthorizedAppsPanel({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [apps, setApps] = useState(null);
+
+  const load = useCallback(() => {
+    if (demoMode) { setApps([]); return; }
+    apiFetch("/connected-apps/authorizations").then(d => setApps(d.data || [])).catch(() => setApps([]));
+  }, [apiFetch, demoMode]);
+  useEffect(() => { load(); }, [load]);
+
+  const revoke = async (app) => {
+    try {
+      await apiFetch(`/connected-apps/authorizations/${encodeURIComponent(app.appId)}`, { method: "DELETE" });
+      setToast({ message: `${app.name} can no longer use your account`, type: "success" });
+      load();
+    } catch (e) {
+      setToast({ message: e.message, type: "error" });
+    }
+  };
+
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--sn-body)" }}>Authorized apps</h3>
+      <p className="text-xs mb-4" style={{ color: "var(--sn-slate)" }}>Connected apps you have allowed to act for you. Revoking one ends its access at once.</p>
+      {apps === null ? <Spinner label="Loading authorized apps" /> : apps.length === 0 ? (
+        <p className="text-xs" style={{ color: "var(--sn-dim)" }}>You have not authorized any apps.</p>
+      ) : (
+        <ul className="space-y-2">
+          {apps.map(app => (
+            <li key={app.appId} className="flex items-center justify-between gap-3 py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+              <div className="min-w-0">
+                <div className="text-sm truncate" style={{ color: "var(--sn-cream)" }}>{app.name}</div>
+                <div className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                  {app.scopes.join(", ")} · since {new Date(app.authorizedAt).toLocaleDateString(...fmt())}
+                </div>
+              </div>
+              <Button variant="danger" size="sm" onClick={() => revoke(app)}>Revoke</Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -2196,6 +2253,110 @@ function AdminDashboardPage() {
 }
 
 // ========================================================================
+// OAUTH CONSENT -- where a connected app asks a user for access
+// ========================================================================
+const OAUTH_CONSENT_PATH = "/oauth/authorize";
+
+/** Only ever leave for an http(s) address; the server built it, but still. */
+function leaveFor(url) {
+  try {
+    if (["https:", "http:"].includes(new URL(url).protocol)) window.location.assign(url);
+  } catch { /* not a URL: stay put */ }
+}
+
+/**
+ * A connected app sends the user here, with its OAuth request in the query.
+ * The user sees which app is asking, what for, and where they will be sent
+ * back to; nothing is issued unless they allow it. The server checks the
+ * request again when the decision arrives, so nothing here is trusted.
+ */
+function OAuthConsentPage() {
+  const { user, demoMode, apiFetch, logout } = useAuth();
+  const query = window.location.search;
+  const [request, setRequest] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (demoMode) { setError("The demo account cannot authorize apps. Sign out and sign in with your own account."); return; }
+    apiFetch(`/connected-apps/oauth/authorize${query}`)
+      .then(d => {
+        // A known app's malformed request goes back to it with the reason.
+        if (d.error && d.redirectTo) leaveFor(d.redirectTo);
+        else setRequest(d);
+      })
+      .catch(e => setError(e.message || "This authorization request is not valid."));
+  }, [demoMode, apiFetch, query]);
+
+  const decide = async (decision) => {
+    setBusy(true); setError("");
+    try {
+      const params = Object.fromEntries(new URLSearchParams(query));
+      const d = await apiFetch("/connected-apps/oauth/authorize", { method: "POST", body: { ...params, decision } });
+      leaveFor(d.redirectTo);
+    } catch (e) {
+      setError(e.message || "Could not finish authorizing the app.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-[100dvh] flex items-center justify-center p-4" style={{ background: "var(--sn-void)", color: "var(--sn-cream)" }}>
+      <div className="w-full max-w-md">
+        <div className="flex justify-end mb-4">
+          <ThemeToggle compact />
+        </div>
+        <div className="text-center mb-6">
+          <div className="flex justify-center mb-4">
+            <BrandMark size={48} />
+          </div>
+          <h1 className="text-xl font-bold" style={{ color: "var(--sn-cream)" }}>
+            {request ? `${request.app.name} wants access to your Sales Nebula account` : "Authorize an app"}
+          </h1>
+          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>Signed in as {user?.email}</p>
+        </div>
+        <div className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+          {error && <div role="alert" className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red-ink)" }}>{error}</div>}
+          {!request && !error && <Spinner label="Checking the request" />}
+          {request && (
+            <>
+              {request.app.description && <p className="text-sm" style={{ color: "var(--sn-body)" }}>{request.app.description}</p>}
+              <div>
+                <p className="text-xs font-medium mb-2" style={{ color: "var(--sn-slate)" }}>If you allow it, it can:</p>
+                <ul className="space-y-2">
+                  {request.scopes.map(s => (
+                    <li key={s.name} className="flex items-start gap-2 text-sm" style={{ color: "var(--sn-cream)" }}>
+                      <CheckCircle2 size={16} className="shrink-0 mt-0.5" style={{ color: "var(--sn-green-ink)" }} aria-hidden="true" />
+                      {s.description}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                It acts as you and can do no more than your own permissions allow. It can never change your password,
+                your sign-in or security settings, or your API keys. You can take its access away at any time under
+                Settings, Security.
+              </p>
+              <p className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                Either way you will be sent back to <span className="font-medium" style={{ color: "var(--sn-body)" }}>{request.redirectOrigin}</span>.
+              </p>
+              <div className="flex gap-3 pt-1">
+                <Button variant="secondary" size="lg" fullWidth disabled={busy} onClick={() => decide("deny")}>Deny</Button>
+                <Button size="lg" fullWidth disabled={busy} onClick={() => decide("allow")}>Allow</Button>
+              </div>
+            </>
+          )}
+          <button type="button" onClick={() => logout({ returnTo: OAUTH_CONSENT_PATH + query })}
+            className="w-full text-xs underline min-h-[32px]" style={{ color: "var(--sn-dim)" }}>
+            Not you? Sign out
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ========================================================================
 // LOGIN PAGE -- mobile-first
 // ========================================================================
 function LoginPage({ go }) {
@@ -2209,8 +2370,10 @@ function LoginPage({ go }) {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState("login"); // login | forgot | mfa
 
+  // Signing in on the way to a connected app's consent screen stays there.
+  const authorizing = window.location.pathname === OAUTH_CONSENT_PATH;
   const enterApp = () => {
-    if (window.location.pathname !== "/app") {
+    if (!authorizing && window.location.pathname !== "/app") {
       window.history.pushState({}, "", "/app");
     }
   };
@@ -2279,7 +2442,7 @@ function LoginPage({ go }) {
           </div>
           <h1 className="text-2xl font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</h1>
           <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>
-            {mode === "forgot" ? "Reset your password" : "Sales CRM"}
+            {mode === "forgot" ? "Reset your password" : authorizing ? "Sign in to authorize an app" : "Sales CRM"}
           </p>
         </div>
         <form onSubmit={mode === "forgot" ? handleForgot : mode === "mfa" ? handleMfa : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
@@ -2583,20 +2746,67 @@ function SequencesPage() {
 }
 
 // ── Approvals ──
+const APPROVAL_BADGE = { Approved: "success", Rejected: "danger", Pending: "warning", Recalled: "neutral" };
+
+/** "Discount approval: Acme renewal", else the module and a short record id. */
+const approvalTitle = (a) => {
+  const subject = a.deal?.name || `${a.module} ${String(a.recordId || "").substring(0, 8)}`;
+  return a.process?.name ? `${a.process.name}: ${subject}` : subject;
+};
+
 function ApprovalsPage() {
   const { apiFetch } = useAuth();
   const [pending, setPending] = useState([]); const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null); const [tab, setTab] = useState('pending');
-  const load = useCallback(() => { setLoading(true); Promise.all([apiFetch('/approvals/pending').catch(()=>({data:[]})),apiFetch('/approvals/history?limit=20').catch(()=>({data:[]}))]).then(([p,h])=>{setPending(p.data||p||[]);setHistory(h.data||h||[]);}).finally(()=>setLoading(false)); }, [apiFetch]);
+  const [busy, setBusy] = useState(null);
+  // What waits on this user, and every request they submitted or were asked to
+  // decide. These called /approvals/pending and /approvals/history, which do
+  // not exist, and the errors were swallowed, so the page was always empty.
+  const load = useCallback(() => {
+    setLoading(true);
+    Promise.all([apiFetch('/approvals/requests/pending'), apiFetch('/approvals/requests?limit=50')])
+      .then(([p, h]) => {
+        setPending((p.data || []).map(step => ({ ...step.request, stepOrder: step.stepOrder })));
+        setHistory(h.data || []);
+      })
+      .catch(e => setToast({ message: e.message || 'Could not load approvals', type: 'error' }))
+      .finally(() => setLoading(false));
+  }, [apiFetch]);
   useEffect(() => { load(); }, [load]);
-  const handleAction = async (id, action) => { try { await apiFetch(`/approvals/${id}/${action}`, { method: 'POST', body: {} }); setToast({ message: `${action}d`, type: 'success' }); load(); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
+  const handleAction = async (id, action) => {
+    setBusy(id);
+    try {
+      await apiFetch(`/approvals/requests/${id}/${action}`, { method: 'POST', body: {} });
+      setToast({ message: action === 'approve' ? 'Approved' : 'Rejected', type: 'success' });
+      load();
+    } catch (e) { setToast({ message: e.message, type: 'error' }); }
+    finally { setBusy(null); }
+  };
   const items = tab === 'pending' ? pending : history;
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Approvals</h1>
       <div className="flex gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit">{['pending','history'].map(t=><button key={t} onClick={()=>setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize touch-manipulation ${tab===t?'bg-[rgba(245,166,35,0.08)] text-[#F5A623]':'text-[#7E8598]'}`}>{t}{t==='pending'&&pending.length>0&&<span className="ml-1 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{pending.length}</span>}</button>)}</div>
       {loading ? <Spinner /> : items.length===0 ? <EmptyState icon={CheckCircle2} title={tab==='pending'?"No pending approvals":"No history"} /> : (
-        <div className="space-y-2">{items.map(a=>(<div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div><div className="text-sm font-medium text-[#F0EDE5]">{a.module} - {a.recordId?.substring(0,8)}</div><div className="text-xs text-[#4A5168] mt-0.5">{a.createdAt?new Date(a.createdAt).toLocaleString(...fmt()):''}</div></div><div className="flex items-center gap-2">{a.status==='Pending'?<><Button variant="primary" size="sm" onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>:<Badge color={a.status==='Approved'?'success':'danger'}>{a.status}</Badge>}</div></div></div>))}</div>)}
+        <div className="space-y-2">{items.map(a=>(
+          <div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-[#F0EDE5] truncate">{approvalTitle(a)}</div>
+                <div className="text-xs text-[#4A5168] mt-0.5">
+                  {a.submittedBy ? `${a.submittedBy.firstName} ${a.submittedBy.lastName} · ` : ''}
+                  {a.createdAt ? new Date(a.createdAt).toLocaleString(...fmt()) : ''}
+                  {tab === 'pending' && a.stepOrder ? ` · step ${a.stepOrder}` : ''}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {tab === 'pending'
+                  ? <><Button variant="primary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>
+                  : <Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge>}
+              </div>
+            </div>
+          </div>
+        ))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );
@@ -5390,5 +5600,6 @@ function AppInner({ go }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="min-h-[100dvh] flex items-center justify-center" style={{ background: "var(--sn-void)" }}><Spinner /></div>;
   if (!user) return <LoginPage go={go} />;
+  if (window.location.pathname === OAUTH_CONSENT_PATH) return <OAuthConsentPage />;
   return <AppShell go={go} />;
 }

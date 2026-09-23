@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { statusRoutes } = require('../utils/moduleStatus');
+const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -132,21 +132,8 @@ router.get('/fields/:module', authenticate, async (req, res, next) => {
   res.json({ module: req.params.module, fields: fieldMap[req.params.module] || ['id','name','createdAt'] });
 });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'Export';
-    // Generic stats endpoint
-    const stats = {
-      module: 'export',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'export', model: 'scheduledExport' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
