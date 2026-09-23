@@ -36,6 +36,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     // { field, prefix, width }: the record's human-readable number, which the
     // server assigns on create (see utils/numbering).
     numbering,
+    // (req, 'create') => nested writes the router builds itself, from fields
+    // it has checked; nothing nested comes from the request body.
+    nestedWrites,
   } = options;
 
   // Relations the model really has go to Prisma; `account` on a model with only
@@ -169,8 +172,11 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         break;
       }
 
-      // A key the model does not have used to 500 the whole request.
-      const { data: createData, ignored } = pickModelFields(modelName, data);
+      // A key the model does not have used to 500 the whole request. Relation
+      // keys go too; a router whose records take nested rows (order items)
+      // builds them itself, from checked fields, in nestedWrites.
+      const { data: pickedData, ignored } = pickModelFields(modelName, data);
+      const createData = nestedWrites ? { ...pickedData, ...(await nestedWrites(req, 'create')) } : pickedData;
       const record = numbering
         ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
         : await prisma[modelName].create({ data: createData, include });

@@ -1,7 +1,7 @@
 const { Prisma } = require('@prisma/client');
 
 /**
- * Keep only the keys a model actually declares.
+ * Keep only the scalar keys a model actually declares.
  *
  * Routes that spread req.body into a Prisma write turn any stray key into a
  * 500 — and worse, Prisma then reports the *wrong* field, because one unknown
@@ -9,8 +9,12 @@ const { Prisma } = require('@prisma/client');
  * the relation scalars instead. A client sending `assigneeId` for `assignedId`
  * got "Unknown argument `dealId`".
  *
- * Relation keys are kept so nested writes such as { items: { create: [...] } }
- * still work. Ignored keys are returned rather than dropped in silence.
+ * Relation keys are dropped too. Kept "so nested writes still work", they let
+ * a request reach any table joined to the record: on a deal, `{ owner: {
+ * update: { role: ... } } }` changed its owner's role, and longer chains went
+ * anywhere. A route that needs a nested write builds it from fields it has
+ * checked (see lineItemFields). Ignored keys are returned rather than dropped
+ * in silence.
  */
 function pickModelFields(modelName, data = {}) {
   const model = Prisma.dmmf.datamodel.models.find(
@@ -23,10 +27,30 @@ function pickModelFields(modelName, data = {}) {
   const ignored = [];
   for (const [key, value] of Object.entries(data)) {
     const field = byName.get(key);
-    if (!field) { ignored.push(key); continue; }
+    if (!field || field.kind === 'object') { ignored.push(key); continue; }
     kept[key] = coerce(field, value);
   }
   return { data: kept, ignored };
+}
+
+/**
+ * A quote, invoice or order line from a request, as the columns those item
+ * tables share, and nothing else. `price` and `name` are read as unitPrice
+ * and description, which is what the items actually store.
+ */
+function lineItemFields(item, { discount = true } = {}) {
+  const i = item && typeof item === 'object' ? item : {};
+  const quantity = Number.isInteger(Number(i.quantity)) && Number(i.quantity) > 0 ? Number(i.quantity) : 1;
+  const unitPrice = Number(i.unitPrice ?? i.price) || 0;
+  const off = discount ? Number(i.discount) || 0 : 0;
+  return {
+    productId: i.productId ? String(i.productId) : null,
+    description: i.description ?? i.name ?? null,
+    quantity,
+    unitPrice,
+    ...(discount && { discount: off }),
+    total: quantity * unitPrice - off,
+  };
 }
 
 /** Whether a model declares a given field. */
@@ -174,4 +198,4 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
   return result;
 }
 
-module.exports = { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes };
+module.exports = { pickModelFields, lineItemFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes };
