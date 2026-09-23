@@ -51,7 +51,7 @@ router.get('/requests', authenticate, requirePermission('admin', 'read'), async 
 });
 
 // Log a request without acting on it — a subject may have 30 days to be verified.
-router.post('/requests', authenticate, requirePermission('admin', 'read'), auditMiddleware, async (req, res, next) => {
+router.post('/requests', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const input = readSubjectInput(req.body);
@@ -90,7 +90,9 @@ router.get('/requests/:id', authenticate, requirePermission('admin', 'read'), as
 
 // ─── ACCESS & PORTABILITY (Art. 15, 20) ───
 
-router.post('/export', authenticate, requirePermission('admin', 'read'), auditMiddleware, async (req, res, next) => {
+// Everything held about one person, in one bundle: admin: full, as erasing
+// it is. admin: read, which the default Read Only role has, was enough.
+router.post('/export', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const input = readSubjectInput(req.body);

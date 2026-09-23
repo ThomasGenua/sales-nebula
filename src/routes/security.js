@@ -7,19 +7,29 @@ const bcrypt = require('bcryptjs');
 const { limiters } = require('../middleware/rateLimit');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
 const router = Router();
 
 // ─── SSO CONFIG ───
+// The client secret and signing certificate are written, never read back:
+// listing configs returned them whole at admin: read, which the default Read
+// Only role has. Responses say whether one is set.
+const presentSso = ({ clientSecret, certificateData, ...config }) => ({
+  ...config, hasClientSecret: !!clientSecret, hasCertificate: !!certificateData,
+});
+const ssoFields = body => {
+  const { id, createdAt, updatedAt, ...rest } = body || {};
+  return pickModelFields('ssoConfig', rest).data;
+};
 router.get('/sso', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.ssoConfig.findMany() }); } catch (err) { next(err); }
+  try { res.json({ data: (await req.app.locals.prisma.ssoConfig.findMany()).map(presentSso) }); } catch (err) { next(err); }
 });
 router.post('/sso', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.ssoConfig.create({ data: req.body })); } catch (err) { next(err); }
+  try { res.status(201).json(presentSso(await req.app.locals.prisma.ssoConfig.create({ data: ssoFields(req.body) }))); } catch (err) { next(err); }
 });
 router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: req.body })); } catch (err) { next(err); }
+  try { res.json(presentSso(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: ssoFields(req.body) }))); } catch (err) { next(err); }
 });
 // SSO login endpoint
 /**

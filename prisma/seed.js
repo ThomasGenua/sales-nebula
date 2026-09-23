@@ -43,6 +43,9 @@ async function main() {
     },
   });
 
+  // admin is read, not edit: admin: edit opens security groups, mailbox
+  // settings, invites and a hundred other administrative routes, and a rep
+  // could use them to widen their own access.
   const repRole = await prisma.role.create({
     data: {
       name: 'Sales Rep',
@@ -50,7 +53,7 @@ async function main() {
       permissions: {
         create: modules.map(m => ({
           module: m,
-          level: ['users', 'roles', 'settings'].includes(m) ? 'none' : ['products', 'invoices', 'workflows'].includes(m) ? 'read' : 'edit',
+          level: ['users', 'roles', 'settings'].includes(m) ? 'none' : ['products', 'invoices', 'workflows', 'admin'].includes(m) ? 'read' : 'edit',
         })),
       },
     },

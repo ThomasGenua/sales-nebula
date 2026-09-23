@@ -2,18 +2,37 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
+const { pickModelFields } = require('../utils/modelFields');
+
 const router = Router();
 
-router.get('/', authenticate, async (req, res, next) => {
+/*
+ * Integrations hold third-party credentials. Listing or fetching one took a
+ * session alone and returned the row whole, `credentials` included; the
+ * schedule and field mappings could be changed by anyone. Reading now takes
+ * admin: read and never returns credentials or secret-looking config values;
+ * changing takes admin: edit.
+ */
+const SECRET_KEY = /secret|token|password|passwd|api[-_]?key|private/i;
+function present(integration) {
+  if (!integration) return integration;
+  const { credentials, ...rest } = integration;
+  if (rest.config && typeof rest.config === 'object' && !Array.isArray(rest.config)) {
+    rest.config = Object.fromEntries(Object.entries(rest.config).map(([k, v]) => [k, SECRET_KEY.test(k) && v ? '••••••' : v]));
+  }
+  return { ...rest, hasCredentials: credentials != null };
+}
+
+router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const integrations = await prisma.integration.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } });
-    res.json(integrations);
+    res.json(integrations.map(present));
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const i = await prisma.integration.findUnique({ where: { id: req.params.id } }); if (!i) return res.status(404).json({ error: 'Not found' }); res.json(i); } catch (err) { next(err); }
+router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+  try { const prisma = req.app.locals.prisma; const i = await prisma.integration.findUnique({ where: { id: req.params.id } }); if (!i) return res.status(404).json({ error: 'Not found' }); res.json(present(i)); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
@@ -24,12 +43,12 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
     const integration = await prisma.integration.create({
       data: { name, type, config: config || {}, description, status: 'Active', createdById: req.user.id },
     });
-    res.status(201).json(integration);
+    res.status(201).json(present(integration));
   } catch (err) { next(err); }
 });
 
 router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const i = await prisma.integration.update({ where: { id: req.params.id }, data: req.body }); res.json(i); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const { id, createdAt, updatedAt, createdById, ...rest } = req.body || {}; const i = await prisma.integration.update({ where: { id: req.params.id }, data: pickModelFields('integration', rest).data }); res.json(present(i)); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
@@ -60,7 +79,7 @@ router.post('/:id/sync', authenticate, requirePermission('admin', 'edit'), audit
 });
 
 // Sync logs
-router.get('/:id/logs', authenticate, async (req, res, next) => {
+router.get('/:id/logs', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const logs = await prisma.syncLog.findMany({
@@ -84,7 +103,7 @@ router.post('/:id/test', authenticate, requirePermission('admin', 'edit'), async
 });
 
 // Email sync status
-router.get('/email-sync', authenticate, async (req, res, next) => {
+router.get('/email-sync', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const emailIntegrations = await prisma.integration.findMany({ where: { type: { in: ['gmail', 'outlook', 'email'] }, deletedAt: null } });
@@ -95,7 +114,7 @@ router.get('/email-sync', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Sync schedule
-router.get('/:id/schedule', authenticate, async (req, res, next) => {
+router.get('/:id/schedule', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const integration = await prisma.integration.findUnique({ where: { id: req.params.id } });
@@ -104,17 +123,17 @@ router.get('/:id/schedule', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/:id/schedule', authenticate, async (req, res, next) => {
+router.put('/:id/schedule', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { syncFrequency, syncEnabled } = req.body;
     const updated = await prisma.integration.update({ where: { id: req.params.id }, data: { syncFrequency, syncEnabled, nextSyncAt: syncEnabled ? new Date(Date.now() + 3600000) : null } });
-    res.json(updated);
+    res.json(present(updated));
   } catch (err) { next(err); }
 });
 
 // Field mapping
-router.get('/:id/mappings', authenticate, async (req, res, next) => {
+router.get('/:id/mappings', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const mappings = await prisma.integrationFieldMapping.findMany({ where: { integrationId: req.params.id } }).catch(() => []);
@@ -122,7 +141,7 @@ router.get('/:id/mappings', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/:id/mappings', authenticate, async (req, res, next) => {
+router.put('/:id/mappings', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { mappings } = req.body;
@@ -134,7 +153,7 @@ router.put('/:id/mappings', authenticate, async (req, res, next) => {
 });
 
 // Integration health check
-router.get('/:id/health', authenticate, async (req, res, next) => {
+router.get('/:id/health', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const int = await prisma.integration.findUnique({ where: { id: req.params.id } });
@@ -146,7 +165,7 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
 });
 
 // Integration health dashboard
-router.get('/health', authenticate, async (req, res, next) => {
+router.get('/health', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const integrations = await prisma.integration.findMany({ where: { deletedAt: null } });
