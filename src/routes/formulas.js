@@ -1,75 +1,26 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { evaluateFormula } = require('../utils/formula');
+const { crudModelFor } = require('../utils/crud');
+const { pickModelFields } = require('../utils/modelFields');
+
+/**
+ * The model for a record module the caller may read; otherwise it answers and
+ * returns null. These took any module name as a table, and any record in it.
+ */
+function readableModel(req, res, module) {
+  const modelName = typeof module === 'string' ? crudModelFor(module) : null;
+  if (!modelName) { res.status(400).json({ error: `Formulas are not available for ${module}` }); return null; }
+  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return null; }
+  return modelName;
+}
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
 
-// Supported functions in formulas
-const FUNCTIONS = {
-  NOW: () => new Date(),
-  TODAY: () => new Date(new Date().toISOString().split('T')[0]),
-  DATEDIFF: (a, b) => a && b ? Math.round((new Date(a) - new Date(b)) / (1000 * 60 * 60 * 24)) : 0,
-  IF: (cond, trueVal, falseVal) => cond ? trueVal : falseVal,
-  MAX: (...args) => Math.max(...args.filter(a => typeof a === 'number')),
-  MIN: (...args) => Math.min(...args.filter(a => typeof a === 'number')),
-  ROUND: (n, d = 0) => Number(Number(n).toFixed(d)),
-  ABS: (n) => Math.abs(n),
-  UPPER: (s) => String(s || '').toUpperCase(),
-  LOWER: (s) => String(s || '').toLowerCase(),
-  LEN: (s) => String(s || '').length,
-  CONCAT: (...args) => args.join(''),
-  ISNULL: (v) => v == null || v === '',
-  NULLVALUE: (v, def) => (v == null || v === '') ? def : v,
-};
-
-// Evaluate a formula expression against a record
-function evaluateFormula(formula, record) {
-  try {
-    // Replace field references with actual values
-    let expr = formula;
-
-    // Replace field names with record values
-    const fieldPattern = /\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
-    const reservedWords = ['true', 'false', 'null', 'undefined', 'NaN', 'Infinity', ...Object.keys(FUNCTIONS)];
-
-    expr = expr.replace(fieldPattern, (match) => {
-      if (reservedWords.includes(match)) return match;
-      if (record[match] !== undefined) {
-        const val = record[match];
-        if (typeof val === 'string') return JSON.stringify(val);
-        if (val instanceof Date) return `"${val.toISOString()}"`;
-        if (val === null) return 'null';
-        return val;
-      }
-      return match; // Leave unknown identifiers as-is
-    });
-
-    // Replace function calls
-    Object.entries(FUNCTIONS).forEach(([name, fn]) => {
-      const fnPattern = new RegExp(`${name}\\(([^)]*)\\)`, 'g');
-      expr = expr.replace(fnPattern, (match, args) => {
-        try {
-          const parsedArgs = args ? args.split(',').map(a => {
-            const trimmed = a.trim();
-            if (trimmed === '') return undefined;
-            try { return JSON.parse(trimmed); } catch { return trimmed; }
-          }) : [];
-          const result = fn(...parsedArgs);
-          return typeof result === 'string' ? JSON.stringify(result) : result;
-        } catch { return 'null'; }
-      });
-    });
-
-    // Safely evaluate the expression
-    // Use Function constructor with limited scope (no access to global objects)
-    const safeEval = new Function('return (' + expr + ')');
-    return safeEval();
-  } catch (err) {
-    return { error: err.message };
-  }
-}
-
+// Formulas are parsed and interpreted, never run as code (utils/formula).
 // LIST formula fields
 router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
@@ -101,7 +52,8 @@ router.post('/', requirePermission('settings', 'full'), async (req, res, next) =
 router.put('/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, ...data } = req.body;
+    const { id, createdAt, updatedAt, ...rest } = req.body || {};
+    const { data } = pickModelFields('formulaField', rest);
     const field = await prisma.formulaField.update({ where: { id: req.params.id }, data });
     res.json(field);
   } catch (err) { next(err); }
@@ -134,9 +86,10 @@ router.post('/evaluate', requirePermission('settings', 'read'), async (req, res,
     const prisma = req.app.locals.prisma;
     const { module, recordId } = req.body;
 
-    // Get the record
-    const modelName = module.endsWith('s') ? module.slice(0, -1) : module;
-    const record = await prisma[modelName].findUnique({ where: { id: recordId } });
+    // Get the record, if the caller can see it
+    const modelName = readableModel(req, res, module);
+    if (!modelName) return;
+    const record = await prisma[modelName].findFirst({ where: await reachableWhere(req, module, modelName, { id: String(recordId) }) });
     if (!record) return res.status(404).json({ error: 'Record not found' });
 
     // Get formula fields for this module
@@ -163,8 +116,10 @@ router.post('/evaluate-bulk', requirePermission('settings', 'read'), async (req,
     const prisma = req.app.locals.prisma;
     const { module, recordIds } = req.body;
 
-    const modelName = module.endsWith('s') ? module.slice(0, -1) : module;
-    const records = await prisma[modelName].findMany({ where: { id: { in: recordIds } } });
+    const modelName = readableModel(req, res, module);
+    if (!modelName) return;
+    const ids = Array.isArray(recordIds) ? recordIds.slice(0, 500).map(String) : [];
+    const records = await prisma[modelName].findMany({ where: await reachableWhere(req, module, modelName, { id: { in: ids } }) });
     const fields = await prisma.formulaField.findMany({ where: { module, active: true } });
 
     const results = {};
