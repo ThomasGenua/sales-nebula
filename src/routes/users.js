@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const bcrypt = require('bcryptjs');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const {
+  authenticate, requirePermission, validatePassword, roleCeilingRefusal, roleGrantRefusal, PERMISSION_LEVELS,
+} = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
 const router = Router();
@@ -40,11 +42,37 @@ router.get('/:id', requirePermission('users', 'read'), async (req, res, next) =>
   } catch (err) { next(err); }
 });
 
+// ─── NOBODY GRANTS MORE THAN THEY HOLD ───
+// users: full and roles: full let their holder make and change accounts and
+// roles, and nothing stopped a non-administrator holding them from making an
+// Admin, promoting themselves, or resetting an administrator's password.
+// Every grant is now held to the granter's own access (roleCeilingRefusal).
+
+/** The account being changed, if the caller may act on it; else a refusal. */
+async function manageableUser(req, id) {
+  const target = await req.app.locals.prisma.user.findUnique({
+    where: { id },
+    include: { role: { include: { permissions: true } } },
+  });
+  if (!target) return { status: 404, error: 'User not found' };
+  const refusal = roleCeilingRefusal(req.user, target.role);
+  return refusal ? { status: 403, error: refusal } : { target };
+}
+
+const passwordProblem = password => {
+  const { valid, errors } = validatePassword(String(password));
+  return valid ? null : errors.join('. ');
+};
+
 router.post('/', requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { email, password, firstName, lastName, roleId, active } = req.body;
     if (!email || !password || !firstName) return res.status(400).json({ error: 'Missing required fields' });
+    const weak = passwordProblem(password);
+    if (weak) return res.status(400).json({ error: weak });
+    const refusal = await roleGrantRefusal(prisma, req.user, roleId);
+    if (refusal) return res.status(refusal === 'Role not found' ? 400 : 403).json({ error: refusal });
 
     const hash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
@@ -60,8 +88,27 @@ router.post('/', requirePermission('users', 'full'), async (req, res, next) => {
 router.put('/:id', requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { password, id, createdAt, updatedAt, role, recentActivity, ...data } = req.body;
-    if (password) data.password = await bcrypt.hash(password, 10);
+    const { status, error } = await manageableUser(req, req.params.id);
+    if (error) return res.status(status).json({ error });
+
+    // The account fields an administrator sets. The body went to Prisma whole,
+    // portal flags and linked contacts included.
+    const b = req.body || {};
+    const data = {};
+    for (const key of ['email', 'firstName', 'lastName', 'avatar', 'timezone', 'locale']) {
+      if (b[key] !== undefined) data[key] = b[key];
+    }
+    if (b.active !== undefined) data.active = !!b.active;
+    if (b.roleId !== undefined) {
+      const refusal = await roleGrantRefusal(prisma, req.user, b.roleId);
+      if (refusal) return res.status(refusal === 'Role not found' ? 400 : 403).json({ error: refusal });
+      data.roleId = b.roleId;
+    }
+    if (b.password) {
+      const weak = passwordProblem(b.password);
+      if (weak) return res.status(400).json({ error: weak });
+      data.password = await bcrypt.hash(b.password, 10);
+    }
     const user = await prisma.user.update({
       where: { id: req.params.id },
       data,
@@ -77,6 +124,8 @@ router.delete('/:id', requirePermission('users', 'full'), async (req, res, next)
   try {
     const prisma = req.app.locals.prisma;
     if (req.params.id === req.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
+    const { status, error } = await manageableUser(req, req.params.id);
+    if (error) return res.status(status).json({ error });
     await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -94,15 +143,34 @@ router.get('/roles/all', requirePermission('roles', 'read'), async (req, res, ne
   } catch (err) { next(err); }
 });
 
+/** A role's permissions as stored: { module, level }, level none/read/edit/full. */
+function permissionRows(permissions) {
+  if (permissions === undefined) return { rows: undefined };
+  if (!Array.isArray(permissions)) return { error: 'permissions must be a list of { module, level }' };
+  const rows = [];
+  for (const p of permissions) {
+    if (!p || typeof p.module !== 'string' || !p.module || !(p.level in PERMISSION_LEVELS)) {
+      return { error: `Each permission needs a module and a level (${Object.keys(PERMISSION_LEVELS).join(', ')})` };
+    }
+    rows.push({ module: p.module, level: p.level });
+  }
+  return { rows };
+}
+
 router.post('/roles', requirePermission('roles', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, description, permissions } = req.body;
+    const { name, description, permissions } = req.body || {};
+    if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name is required' });
+    const { rows, error } = permissionRows(permissions);
+    if (error) return res.status(400).json({ error });
+    const refusal = roleCeilingRefusal(req.user, { name, permissions: rows || [] });
+    if (refusal) return res.status(403).json({ error: refusal });
     const role = await prisma.role.create({
       data: {
-        name,
+        name: name.trim(),
         description,
-        permissions: { create: permissions || [] },
+        permissions: { create: rows || [] },
       },
       include: { permissions: true },
     });
@@ -113,22 +181,29 @@ router.post('/roles', requirePermission('roles', 'full'), async (req, res, next)
 router.put('/roles/:id', requirePermission('roles', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, description, permissions } = req.body;
+    const { name, description, permissions } = req.body || {};
+    const current = await prisma.role.findUnique({ where: { id: req.params.id }, include: { permissions: true } });
+    if (!current) return res.status(404).json({ error: 'Role not found' });
+    const { rows, error } = permissionRows(permissions);
+    if (error) return res.status(400).json({ error });
+    // Neither a role above the editor's own access, nor one made so.
+    const refusal = roleCeilingRefusal(req.user, current)
+      || roleCeilingRefusal(req.user, { name: name ?? current.name, permissions: rows ?? current.permissions });
+    if (refusal) return res.status(403).json({ error: refusal });
 
-    // Update role and recreate permissions
-    if (permissions) {
-      await prisma.permission.deleteMany({ where: { roleId: req.params.id } });
-    }
-
-    const role = await prisma.role.update({
+    // Replace the permissions and update the role together.
+    const writes = [];
+    if (rows) writes.push(prisma.permission.deleteMany({ where: { roleId: req.params.id } }));
+    writes.push(prisma.role.update({
       where: { id: req.params.id },
       data: {
         name,
         description,
-        ...(permissions && { permissions: { create: permissions.map(p => ({ module: p.module, level: p.level })) } }),
+        ...(rows && { permissions: { create: rows } }),
       },
       include: { permissions: true },
-    });
+    }));
+    const role = (await prisma.$transaction(writes)).pop();
     res.json(role);
   } catch (err) { next(err); }
 });
@@ -136,6 +211,10 @@ router.put('/roles/:id', requirePermission('roles', 'full'), async (req, res, ne
 router.delete('/roles/:id', requirePermission('roles', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const current = await prisma.role.findUnique({ where: { id: req.params.id }, include: { permissions: true } });
+    if (!current) return res.status(404).json({ error: 'Role not found' });
+    const refusal = roleCeilingRefusal(req.user, current);
+    if (refusal) return res.status(403).json({ error: refusal });
     const usersWithRole = await prisma.user.count({ where: { roleId: req.params.id } });
     if (usersWithRole > 0) return res.status(400).json({ error: 'Cannot delete role with assigned users' });
     await prisma.role.delete({ where: { id: req.params.id } });

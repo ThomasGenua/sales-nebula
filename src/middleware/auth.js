@@ -18,6 +18,7 @@ const { resolveJwtSecret } = require('../utils/secrets');
 const { ACCESS_COOKIE, readCookie, csrfValid, needsCsrf } = require('../utils/sessionCookies');
 const { hashApiKey } = require('../utils/apiKeys');
 const { ACCESS_TOKEN_PREFIX, findAccessGrant, appTokenRefusal } = require('../services/oauth');
+const { isAdmin } = require('./rowSecurity');
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
@@ -162,6 +163,33 @@ const LEVELS = { none: 0, read: 1, edit: 2, full: 3 };
 function hasPermission(user, module, level) {
   const perm = user?.role?.permissions?.find(p => p.module === module);
   return (LEVELS[perm?.level] || 0) >= (LEVELS[level] || 0);
+}
+
+// ─── NOBODY GRANTS MORE THAN THEY HOLD ───
+
+/**
+ * Why `granter` may not hand out, or act on an account holding, a role with
+ * this name and these permissions, or null when they may. No module may go
+ * above the granter's own level, and only an administrator may deal in an
+ * administrator role, since row security lets a role named Admin see every
+ * record whatever its permissions.
+ */
+function roleCeilingRefusal(granter, role) {
+  if (isAdmin(granter)) return null;
+  if (isAdmin({ role: { name: role?.name } })) return 'Only an administrator can grant or manage an administrator role';
+  const over = (role?.permissions || []).find(p => (LEVELS[p.level] || 0) > (LEVELS[
+    granter?.role?.permissions?.find(g => g.module === p.module)?.level
+  ] || 0));
+  return over ? `That needs more access than you have yourself (${over.module}: ${over.level})` : null;
+}
+
+/** Why `granter` may not give someone the role `roleId`, or null. */
+async function roleGrantRefusal(prisma, granter, roleId) {
+  const role = roleId
+    ? await prisma.role.findUnique({ where: { id: String(roleId) }, include: { permissions: true } })
+    : null;
+  if (!role) return 'Role not found';
+  return roleCeilingRefusal(granter, role);
 }
 
 // ─── API KEY RATE LIMIT ───
@@ -395,6 +423,9 @@ module.exports = {
   requirePermission,
   hasPermission,
   portalRefusal,
+  roleCeilingRefusal,
+  roleGrantRefusal,
+  PERMISSION_LEVELS: LEVELS,
   signToken,
   signAccessToken,
   signRefreshToken,
