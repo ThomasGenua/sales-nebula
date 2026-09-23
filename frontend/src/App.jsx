@@ -1879,8 +1879,11 @@ function SettingsPage() {
     email: user?.email || "",
     timezone: user?.timezone || "",
     locale: user?.locale || "",
+    currentPassword: "",
   });
   const zoneOptions = useMemo(() => timeZones(), []);
+  // A new sign-in address takes the current password (the API insists).
+  const emailChanging = !demoMode && profile.email.trim().toLowerCase() !== (user?.email || "").toLowerCase();
   const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1893,6 +1896,7 @@ function SettingsPage() {
       email: user?.email || "",
       timezone: user?.timezone || "",
       locale: user?.locale || "",
+      currentPassword: "",
     });
   }, [user?.id, user?.firstName, user?.lastName, user?.email, user?.timezone, user?.locale]);
 
@@ -1925,8 +1929,10 @@ function SettingsPage() {
           email: profile.email,
           timezone: profile.timezone,
           locale: profile.locale,
+          ...(emailChanging && { currentPassword: profile.currentPassword }),
         },
       });
+      setProfile(p => ({ ...p, currentPassword: "" }));
       updateUser?.(updated);
       setToast({ message: "Profile updated", type: "success" });
     } catch (e) {
@@ -2004,6 +2010,10 @@ function SettingsPage() {
               <Input label="First Name" value={profile.firstName} onChange={v => setProfile(p => ({ ...p, firstName: v }))} />
               <Input label="Last Name" value={profile.lastName} onChange={v => setProfile(p => ({ ...p, lastName: v }))} />
               <Input label="Email" value={profile.email} onChange={v => setProfile(p => ({ ...p, email: v }))} type="email" className="sm:col-span-2" />
+              {emailChanging && (
+                <Input label="Current password (to change your email)" value={profile.currentPassword}
+                  onChange={v => setProfile(p => ({ ...p, currentPassword: v }))} type="password" autoComplete="current-password" className="sm:col-span-2" />
+              )}
               <Select label="Time zone" value={profile.timezone} onChange={v => setProfile(p => ({ ...p, timezone: v }))}
                 placeholder="Browser default" options={zoneOptions} />
               <Select label="Date & number format" value={profile.locale} onChange={v => setProfile(p => ({ ...p, locale: v }))}

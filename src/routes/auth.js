@@ -226,10 +226,10 @@ router.get('/me', authenticate, async (req, res, next) => {
 });
 
 // PUT /api/auth/me — update own profile (no users:full required)
-router.put('/me', authenticate, async (req, res, next) => {
+router.put('/me', authenticate, limiters.auth, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { firstName, lastName, email, avatar, timezone, locale } = req.body || {};
+    const { firstName, lastName, email, avatar, timezone, locale, currentPassword } = req.body || {};
     const data = {};
     if (typeof firstName === 'string' && firstName.trim()) data.firstName = firstName.trim();
     if (typeof lastName === 'string' && lastName.trim()) data.lastName = lastName.trim();
@@ -251,11 +251,27 @@ router.put('/me', authenticate, async (req, res, next) => {
       return res.status(400).json({ error: 'No profile fields to update' });
     }
 
+    // Changing the sign-in address takes the password. Anyone holding a
+    // session could otherwise move the account to an address they control and
+    // reset the password from it.
+    let previousEmail = null;
     if (data.email) {
-      const clash = await prisma.user.findFirst({
-        where: { email: data.email, NOT: { id: req.userId } },
-      });
-      if (clash) return res.status(409).json({ error: 'Email already in use' });
+      const current = await prisma.user.findUnique({ where: { id: req.userId }, select: { email: true, password: true } });
+      if (data.email === current.email) {
+        delete data.email;
+      } else {
+        if (typeof currentPassword !== 'string' || !(await bcrypt.compare(currentPassword, current.password))) {
+          return res.status(403).json({ error: 'Enter your current password to change your email address', code: 'PASSWORD_REQUIRED' });
+        }
+        const clash = await prisma.user.findFirst({
+          where: { email: data.email, NOT: { id: req.userId } },
+        });
+        if (clash) return res.status(409).json({ error: 'Email already in use' });
+        previousEmail = current.email;
+      }
+    }
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'No profile fields to update' });
     }
 
     const user = await prisma.user.update({
@@ -263,7 +279,13 @@ router.put('/me', authenticate, async (req, res, next) => {
       data,
       include: { role: { include: { permissions: true } } },
     });
-    await audit(prisma, { action: 'update', module: 'auth', details: 'Updated own profile', userId: req.userId });
+    await audit(prisma, { action: 'update', module: 'auth', details: previousEmail ? `Changed own email from ${previousEmail} to ${user.email}` : 'Updated own profile', userId: req.userId });
+    if (previousEmail) {
+      // The old address hears about it, so a change nobody asked for is noticed.
+      const { sendEmailChangedNotice } = require('../utils/mail');
+      await sendEmailChangedNotice({ to: previousEmail, firstName: user.firstName, newEmail: user.email })
+        .catch(err => console.error('[email-changed-notice]', err.message));
+    }
     const { password: _, ...safeUser } = user;
     res.json(safeUser);
   } catch (err) { next(err); }

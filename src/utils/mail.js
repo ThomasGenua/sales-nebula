@@ -28,6 +28,11 @@ function appUrl(pathname) {
   return `${appBaseUrl()}${path}`;
 }
 
+/** Text for an HTML body. Names are typed by people, so they are not markup. */
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function wrapHtml(title, bodyHtml) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"/><title>${title}</title></head>
@@ -75,7 +80,7 @@ async function sendVerificationEmail({ to, firstName, verifyUrl }) {
   const text = `Hi ${name},\n\nConfirm your email to continue your Sales Nebula access request:\n${verifyUrl}\n\nThis link expires in 48 hours.\n`;
   const html = wrapHtml(
     'Confirm your email',
-    `<p>Hi ${name},</p>
+    `<p>Hi ${escapeHtml(name)},</p>
      <p>Thanks for requesting access to <strong style="color:#F0EDE5">Sales Nebula</strong>. Confirm your email to continue:</p>
      <p style="padding:18px 0;"><a href="${verifyUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Verify email</a></p>
      <p style="font-size:13px;color:#7E8598;">Or paste this link:<br/><a href="${verifyUrl}" style="color:#F5A623;word-break:break-all;">${verifyUrl}</a></p>
@@ -91,7 +96,7 @@ async function sendInviteEmail({ to, firstName, inviteUrl, message }) {
   const text = `Hi ${name},\n\nYou have been invited to Sales Nebula. Set your password here:\n${inviteUrl}\n${note}\nThis invite expires in 7 days.\n`;
   const html = wrapHtml(
     'You are invited',
-    `<p>Hi ${name},</p>
+    `<p>Hi ${escapeHtml(name)},</p>
      <p>You have been invited to join <strong style="color:#F0EDE5">Sales Nebula</strong>. Set your password to open your workspace:</p>
      ${message ? `<p style="background:#0E1630;border-radius:8px;padding:12px;color:#C8C2B4;">${String(message).replace(/</g, '&lt;')}</p>` : ''}
      <p style="padding:18px 0;"><a href="${inviteUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Accept invite</a></p>
@@ -108,7 +113,7 @@ async function sendWelcomeEmail({ to, firstName }) {
   const text = `Hi ${name},\n\nYour Sales Nebula account is ready. Sign in here:\n${loginUrl}\n\nWelcome aboard.\n`;
   const html = wrapHtml(
     'Welcome aboard',
-    `<p>Hi ${name},</p>
+    `<p>Hi ${escapeHtml(name)},</p>
      <p>Your <strong style="color:#F0EDE5">Sales Nebula</strong> account is ready. Sign in and start moving deals.</p>
      <p style="padding:18px 0;"><a href="${loginUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Open Sales Nebula</a></p>`
   );
@@ -121,7 +126,7 @@ async function sendPasswordResetEmail({ to, firstName, resetUrl }) {
   const text = `Hi ${name},\n\nReset your Sales Nebula password using this link (expires in 1 hour):\n${resetUrl}\n\nIf you did not request this, you can ignore this email.\n`;
   const html = wrapHtml(
     'Reset your password',
-    `<p>Hi ${name},</p>
+    `<p>Hi ${escapeHtml(name)},</p>
      <p>We received a request to reset your Sales Nebula password.</p>
      <p style="padding:18px 0;"><a href="${resetUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Reset password</a></p>
      <p style="font-size:13px;color:#7E8598;">Or paste this link:<br/><a href="${resetUrl}" style="color:#F5A623;word-break:break-all;">${resetUrl}</a></p>
@@ -130,8 +135,23 @@ async function sendPasswordResetEmail({ to, firstName, resetUrl }) {
   return sendMail({ to, subject, text, html });
 }
 
+/** Tell the old address that the account's email has changed. */
+async function sendEmailChangedNotice({ to, firstName, newEmail }) {
+  const name = firstName || 'there';
+  const subject = 'Your Sales Nebula email address was changed';
+  const text = `Hi ${name},\n\nThe email address on your Sales Nebula account was changed to ${newEmail}.\n\nIf you did not do this, contact your administrator straight away: whoever made the change can now reset the password from that address.\n`;
+  const html = wrapHtml(
+    'Your email address was changed',
+    `<p>Hi ${escapeHtml(name)},</p>
+     <p>The email address on your Sales Nebula account was changed to <strong style="color:#F0EDE5">${escapeHtml(newEmail)}</strong>.</p>
+     <p style="font-size:13px;color:#7E8598;">If you did not do this, contact your administrator straight away: whoever made the change can now reset the password from that address.</p>`
+  );
+  return sendMail({ to, subject, text, html });
+}
+
 module.exports = {
   sendMail,
+  sendEmailChangedNotice,
   sendVerificationEmail,
   sendInviteEmail,
   sendWelcomeEmail,
