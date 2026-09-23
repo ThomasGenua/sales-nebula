@@ -48,7 +48,7 @@ router.get('/accounts/:id', authenticate, requirePermission('admin', 'read'), as
   } catch (err) { next(err); }
 });
 
-router.post('/accounts', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/accounts', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { name, provider, protocol, host, port, username, password, useTls, mailbox, pollIntervalMinutes,
@@ -100,7 +100,7 @@ router.post('/accounts', authenticate, requirePermission('admin', 'edit'), audit
   } catch (err) { next(err); }
 });
 
-router.put('/accounts/:id', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.put('/accounts/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { id, createdAt, passwordSet, messageCount, recentPolls, ...data } = req.body;
@@ -211,7 +211,7 @@ router.post('/accounts/:id/poll', authenticate, requirePermission('admin', 'edit
 // ── MICROSOFT GRAPH ───────────────────────────────────────────────────
 
 /** Where to send an administrator to grant this mailbox's consent. */
-router.get('/accounts/:id/microsoft/authorize-url', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.get('/accounts/:id/microsoft/authorize-url', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const account = await prisma.inboundEmailAccount.findFirst({ where: { id: req.params.id, deletedAt: null } });
@@ -238,7 +238,7 @@ router.get('/accounts/:id/microsoft/authorize-url', authenticate, requirePermiss
 });
 
 /** Finish the consent flow: swap the code for tokens and store them encrypted. */
-router.post('/accounts/:id/microsoft/connect', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/accounts/:id/microsoft/connect', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const account = await prisma.inboundEmailAccount.findFirst({ where: { id: req.params.id, deletedAt: null } });
@@ -257,7 +257,7 @@ router.post('/accounts/:id/microsoft/connect', authenticate, requirePermission('
 });
 
 /** Forget the tokens without deleting the account. */
-router.post('/accounts/:id/microsoft/disconnect', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/accounts/:id/microsoft/disconnect', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const account = await prisma.inboundEmailAccount.findFirst({ where: { id: req.params.id, deletedAt: null } });
@@ -273,7 +273,7 @@ router.post('/accounts/:id/microsoft/disconnect', authenticate, requirePermissio
 });
 
 /** Reply on the original thread, from the mailbox that received it. */
-router.post('/messages/:id/reply', authenticate, auditMiddleware, async (req, res, next) => {
+router.post('/messages/:id/reply', authenticate, requirePermission('cases', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const body = String(req.body?.body ?? req.body?.comment ?? '').trim();
@@ -305,8 +305,10 @@ router.post('/messages/:id/reply', authenticate, auditMiddleware, async (req, re
 });
 
 // Accounts whose poll interval has elapsed, with their decrypted passwords for
-// the mail worker. Any signed-in user could read every mailbox password here.
-router.get('/accounts/due/poll', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+// the mail worker. Any signed-in user could read every mailbox password here,
+// and then anyone with admin: edit, which the default Sales Rep role has. It
+// takes admin: full, as does anything that sets a mailbox's credentials.
+router.get('/accounts/due/poll', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const accounts = await prisma.inboundEmailAccount.findMany({ where: { deletedAt: null, active: true, status: { not: 'Disabled' } } });
@@ -320,8 +322,12 @@ router.get('/accounts/due/poll', authenticate, requirePermission('admin', 'edit'
 });
 
 // ── MESSAGES ──────────────────────────────────────────────────────────
+// Customer mail, answered from the support mailbox: reading it takes cases:
+// read, and replying, converting or ignoring it cases: edit. All four took a
+// session alone, so anyone could read every inbound message or send mail as
+// the company.
 
-router.get('/messages', authenticate, async (req, res, next) => {
+router.get('/messages', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { accountId, status, search, page = 1, limit = 50 } = req.query;
@@ -338,7 +344,7 @@ router.get('/messages', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/messages/:id/convert', authenticate, auditMiddleware, async (req, res, next) => {
+router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { target } = req.body;
@@ -380,7 +386,7 @@ router.post('/messages/:id/convert', authenticate, auditMiddleware, async (req, 
   } catch (err) { next(err); }
 });
 
-router.post('/messages/:id/ignore', authenticate, async (req, res, next) => {
+router.post('/messages/:id/ignore', authenticate, requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const message = await prisma.inboundEmailMessage.update({ where: { id: req.params.id }, data: { status: 'Ignored' } });

@@ -16,7 +16,11 @@ const SECURABLE_MODULES = [
 
 // ── GROUPS ────────────────────────────────────────────────────────────
 
-router.get('/', authenticate, async (req, res, next) => {
+// Security groups decide who sees which records. Changing them took only
+// admin: edit, which the default Sales Rep role has, so a rep could join any
+// group, or put any record into theirs, and read or edit it. Changing them
+// now takes admin: full; looking at them, admin: read (it took nothing).
+router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { search, active, page = 1, limit = 50 } = req.query;
@@ -35,7 +39,7 @@ router.get('/', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const group = await prisma.securityGroup.findFirst({
@@ -57,7 +61,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { name, description, parentGroupId, isNonInheritable, isPrimaryGroup, autoAssign, userIds } = req.body;
@@ -89,7 +93,7 @@ router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddlewa
   } catch (err) { next(err); }
 });
 
-router.put('/:id', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { id, createdAt, members, records, childGroups, parentGroup, roleLinks, _count, recordsByModule, ...data } = req.body;
@@ -134,7 +138,7 @@ router.delete('/:id', authenticate, requirePermission('admin', 'full'), auditMid
 });
 
 // Group hierarchy tree
-router.get('/tree/all', authenticate, async (req, res, next) => {
+router.get('/tree/all', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const groups = await prisma.securityGroup.findMany({
@@ -157,7 +161,7 @@ router.get('/tree/all', authenticate, async (req, res, next) => {
 
 // ── MEMBERSHIP ────────────────────────────────────────────────────────
 
-router.get('/:id/members', authenticate, async (req, res, next) => {
+router.get('/:id/members', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const members = await prisma.securityGroupUser.findMany({
@@ -174,7 +178,7 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/members', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/members', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { userIds, isGroupAdmin, primaryGroup } = req.body;
@@ -198,7 +202,7 @@ router.post('/:id/members', authenticate, requirePermission('admin', 'edit'), au
   } catch (err) { next(err); }
 });
 
-router.delete('/:id/members/:userId', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.delete('/:id/members/:userId', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const result = await prisma.securityGroupUser.deleteMany({ where: { securityGroupId: req.params.id, userId: req.params.userId } });
@@ -230,7 +234,7 @@ router.get('/user/:userId/groups', authenticate, async (req, res, next) => {
 
 // ── RECORD ASSIGNMENT ─────────────────────────────────────────────────
 
-router.get('/:id/records', authenticate, async (req, res, next) => {
+router.get('/:id/records', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, page = 1, limit = 100 } = req.query;
@@ -244,7 +248,7 @@ router.get('/:id/records', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/records', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordIds, accessLevel = 'Full' } = req.body;
@@ -266,7 +270,7 @@ router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), au
   } catch (err) { next(err); }
 });
 
-router.delete('/:id/records', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.delete('/:id/records', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordIds } = req.body;
@@ -280,7 +284,7 @@ router.delete('/:id/records', authenticate, requirePermission('admin', 'edit'), 
 });
 
 // Which groups control a given record
-router.get('/record/:module/:recordId', authenticate, async (req, res, next) => {
+router.get('/record/:module/:recordId', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const assignments = await prisma.securityGroupRecord.findMany({
@@ -298,7 +302,7 @@ router.get('/record/:module/:recordId', authenticate, async (req, res, next) => 
 });
 
 // Mass assign across a filtered set
-router.post('/mass-assign', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/mass-assign', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, securityGroupIds, filters, accessLevel = 'Full', limit = 1000 } = req.body;
@@ -345,7 +349,7 @@ router.get('/rules/list', authenticate, requirePermission('admin', 'read'), asyn
   } catch (err) { next(err); }
 });
 
-router.post('/rules', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/rules', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { name, module, conditions, securityGroupId, priority, applyOnCreate, applyOnUpdate } = req.body;
@@ -368,7 +372,7 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), auditMid
   } catch (err) { next(err); }
 });
 
-router.put('/rules/:ruleId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.put('/rules/:ruleId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { id, createdAt, ...data } = req.body;
@@ -377,7 +381,7 @@ router.put('/rules/:ruleId', authenticate, requirePermission('admin', 'edit'), a
   } catch (err) { next(err); }
 });
 
-router.delete('/rules/:ruleId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.delete('/rules/:ruleId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     await prisma.securityGroupRule.update({ where: { id: req.params.ruleId }, data: { deletedAt: new Date(), active: false } });

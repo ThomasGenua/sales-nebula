@@ -5,6 +5,11 @@ const { invalidateOrgWideDefaultCache, invalidateHierarchyCache } = require('../
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'edit'));
 
+// Org-wide defaults, the role hierarchy and field permissions decide who sees
+// what; each change to them takes admin: full. admin: edit, which the default
+// Sales Rep role has, was enough to open every record to everyone, or to set
+// the hierarchy so one saw another's records.
+
 // ─── VALIDATION RULES ───
 router.get('/validation-rules', async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.validationRule.findMany({ orderBy: { module: 'asc' } }) }); }
@@ -103,7 +108,7 @@ router.get('/owd', async (req, res, next) => {
 const ACCESS_LEVELS = ['Private', 'ReadOnly', 'ReadWrite', 'FullAccess'];
 const GRANT_MODES = ['hierarchy', 'criteria'];
 
-router.put('/owd/:module', async (req, res, next) => {
+router.put('/owd/:module', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const { internalAccess, externalAccess, grantAccessUsing } = req.body;
     if (internalAccess !== undefined && !ACCESS_LEVELS.includes(internalAccess)) {
@@ -141,7 +146,7 @@ router.get('/field-permissions', async (req, res, next) => {
     res.json({ data: await req.app.locals.prisma.fieldPermission.findMany({ where }) });
   } catch (err) { next(err); }
 });
-router.post('/field-permissions', async (req, res, next) => {
+router.post('/field-permissions', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const fp = await req.app.locals.prisma.fieldPermission.upsert({
       where: { roleId_module_field: { roleId: req.body.roleId, module: req.body.module, field: req.body.field } },
@@ -151,7 +156,7 @@ router.post('/field-permissions', async (req, res, next) => {
     res.json(fp);
   } catch (err) { next(err); }
 });
-router.post('/field-permissions/bulk', async (req, res, next) => {
+router.post('/field-permissions/bulk', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const { permissions } = req.body;
     const results = [];
@@ -172,7 +177,7 @@ router.get('/role-hierarchy', async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.roleHierarchy.findMany({ orderBy: { level: 'asc' } }) }); }
   catch (err) { next(err); }
 });
-router.put('/role-hierarchy/:roleId', async (req, res, next) => {
+router.put('/role-hierarchy/:roleId', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { roleId } = req.params;
