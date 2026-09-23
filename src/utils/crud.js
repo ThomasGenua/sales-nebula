@@ -11,11 +11,17 @@ const {
   checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
 } = require('../services/recordRules');
 
+// The model behind each CRUD module, for code outside its router that must
+// check a record by module name (the WebSocket's record rooms).
+const crudModels = new Map();
+const crudModelFor = moduleName => crudModels.get(moduleName) || null;
+
 /**
  * Creates a standard CRUD router for a Prisma model.
  * Enhanced with: field-level audit, optimistic locking, Prisma error handling, input validation.
  */
 function createCrudRouter(modelName, moduleName, options = {}) {
+  crudModels.set(moduleName, modelName);
   const router = Router();
   const {
     include: requestedInclude = {},
@@ -378,4 +384,4 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   return router;
 }
 
-module.exports = { createCrudRouter };
+module.exports = { createCrudRouter, crudModelFor };

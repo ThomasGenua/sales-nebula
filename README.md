@@ -501,6 +501,10 @@ Sales Nebula is also an OAuth 2.0 authorization server for third-party apps, usi
 
 Scopes: `read` allows GET requests, `write` allows any request, and both stay within the user's own permissions, so `write` granted by an administrator includes administration. Whatever its scopes, an app token cannot use `/api/auth` (other than `GET /api/auth/me`), `/api/security` (MFA devices, SSO, sessions), API keys, or `/api/connected-apps`, so an app cannot change anyone's sign-in or authorize itself or another app. Users see and revoke the apps they have authorized under Settings, Security; revoking or disabling an app ends every grant to it.
 
+### Real-Time Updates (WebSocket)
+
+Socket.io runs on the API server. A client connects with a session access token (`auth: { token }`, or the `sn_access` cookie); connected-app tokens and API keys are not accepted. Every socket joins its user's room for notifications and approval requests. `join:module` (a module name) needs read permission on the module, and `join:record` (`{ module, recordId }`) needs a record the user can see; both answer an optional ack with `{ ok }`. Record events (`record:created`, `record:updated`, `record:deleted`, `deal:stageChanged`) carry the module and record id only; fetch the record through the API.
+
 ### Security Features
 
 - Account lockout after configurable failed login attempts (default: 5)

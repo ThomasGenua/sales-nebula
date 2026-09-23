@@ -68,7 +68,7 @@ async function start() {
   if (cache.client) setRedisClient(cache.client);
 
   try { storage.init(); } catch (e) { logger.warn({ error: e.message }, 'Storage init failed, using local'); }
-  try { initWebSocket(server); } catch (e) { logger.warn({ error: e.message }, 'WebSocket init failed'); }
+  try { initWebSocket(server, prisma); } catch (e) { logger.warn({ error: e.message }, 'WebSocket init failed'); }
   try { initJobQueue(prisma); } catch (e) { logger.warn({ error: e.message }, 'Job queue init failed'); }
 
   server.listen(PORT, () => {
