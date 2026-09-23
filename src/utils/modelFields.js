@@ -223,6 +223,8 @@ const RELATION_OVERRIDES = {
 };
 
 /** Attach the manually resolved relations, one query per relation. */
+const SAFE_USER_SELECT = { id: true, firstName: true, lastName: true, email: true, avatar: true };
+
 async function hydrateIncludes(prisma, records, manual) {
   const rows = Array.isArray(records) ? records : records ? [records] : [];
   if (!rows.length || !manual.length) return records;
@@ -243,9 +245,12 @@ async function hydrateIncludes(prisma, records, manual) {
     const ids = [...new Set(rows.map(r => r[fkField]).filter(Boolean))];
     let byId = new Map();
     if (ids.length && prisma[delegate]?.findMany) {
+      // A user comes back as who they are, never whole: a bare include of an
+      // owner or assignee would otherwise carry their password hash out.
+      const shape = select ? { ...select, id: true } : delegate === 'user' ? SAFE_USER_SELECT : null;
       const found = await prisma[delegate].findMany({
         where: { id: { in: ids } },
-        ...(select ? { select: { ...select, id: true } } : {}),
+        ...(shape ? { select: shape } : {}),
       }).catch(() => []);
       byId = new Map(found.map(f => [f.id, f]));
     }
