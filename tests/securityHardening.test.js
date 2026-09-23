@@ -107,7 +107,7 @@ describe('MFA is enforced at login', () => {
 
   it('enrols a TOTP device and returns a usable secret', async () => {
     const user = await createTestUser({ email: 'enrol@test.com' });
-    const res = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp' });
+    const res = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp', currentPassword: 'Test123!@' });
 
     expect(res.status).toBe(201);                       // previously threw: base32 is not a Node encoding
     expect(res.body.secret).toMatch(/^[A-Z2-7]+$/);
@@ -117,7 +117,7 @@ describe('MFA is enforced at login', () => {
 
   it('rejects a made-up code when confirming enrolment', async () => {
     const user = await createTestUser({ email: 'confirm@test.com' });
-    const enrol = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp' });
+    const enrol = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp', currentPassword: 'Test123!@' });
 
     const bad = await request(app).post('/api/security/mfa/verify')
       .set(authHeader(user.token)).send({ deviceId: enrol.body.deviceId, code: '000000' });
@@ -131,7 +131,7 @@ describe('MFA is enforced at login', () => {
 
   it('withholds the session until the code is supplied', async () => {
     const user = await createTestUser({ email: 'gated@test.com' });
-    const enrol = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp' });
+    const enrol = await request(app).post('/api/security/mfa/enroll').set(authHeader(user.token)).send({ type: 'totp', currentPassword: 'Test123!@' });
     await request(app).post('/api/security/mfa/verify')
       .set(authHeader(user.token)).send({ deviceId: enrol.body.deviceId, code: currentCode(enrol.body.secret) });
 
