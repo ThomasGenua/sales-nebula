@@ -2,8 +2,15 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { moduleAccess, recordAccess } = require('../middleware/access');
 
 const router = Router();
+
+// Mounted at /api/deals behind the deals CRUD router. Every route here names
+// a deal, which must be one the caller can see (or change, for a write);
+// these took any deal id with authenticate() alone.
+router.use(authenticate, moduleAccess('deals'));
+router.param('id', recordAccess('deals', 'deal'));
 
 // Deal contact roles
 router.get('/:id/contact-roles', authenticate, async (req, res, next) => {
@@ -29,7 +36,12 @@ router.post('/:id/contact-roles', authenticate, requirePermission('deals', 'edit
 });
 
 router.delete('/:id/contact-roles/:roleId', authenticate, requirePermission('deals', 'edit'), async (req, res, next) => {
-  try { await req.app.locals.prisma.dealContactRole.delete({ where: { id: req.params.roleId } }); res.json({ success: true }); } catch (err) { next(err); }
+  try {
+    // A role on this deal: any role on any deal went by id.
+    const { count } = await req.app.locals.prisma.dealContactRole.deleteMany({ where: { id: req.params.roleId, dealId: req.params.id } });
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 // Deal products (line items with more detail)

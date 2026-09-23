@@ -264,6 +264,7 @@ async function authenticateApiKey(req, res, next) {
     req.user = owner;
     req.isApiKey = true;
     req.apiKeyPermissions = keyRecord.permissions;
+    req.authenticatedBy = 'apiKey';
     next();
   } catch (err) {
     return res.status(401).json({ error: 'API key validation failed' });
@@ -304,6 +305,7 @@ async function authenticateAppToken(req, res, next, token) {
     req.isAppToken = true;
     req.connectedAppId = grant.appId;
     req.oauthScopes = grant.scopes;
+    req.authenticatedBy = 'appToken';
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Token validation failed' });
@@ -327,6 +329,10 @@ async function loadUser(req, userId) {
 
 // ─── JWT AUTH MIDDLEWARE ───
 async function authenticate(req, res, next) {
+  // Once per request: a request that passes through two routers mounted at
+  // one path (deals, then dealExtras) must not be counted, or checked, twice.
+  if (req.authenticatedBy) return next();
+
   // Check API key first
   if (req.headers['x-api-key']) return authenticateApiKey(req, res, next);
 
@@ -374,6 +380,7 @@ async function authenticate(req, res, next) {
     if (!user.active) return res.status(403).json({ error: 'Account disabled' });
     if (refusedToPortalAccount(req, res, user)) return;
     req.user = user;
+    req.authenticatedBy = 'session';
 
     next();
   } catch (err) {
@@ -385,6 +392,35 @@ async function authenticate(req, res, next) {
 }
 
 // ─── PERMISSION MIDDLEWARE ───
+
+/**
+ * The caller's level on a module: their role's, capped by an API key's
+ * grants. An API key reaches no further than the modules it was granted,
+ * [{ module, level }], and never past its owner's own access. The grant was
+ * stored and ignored, so a "contacts: read" key had its creator's full
+ * rights. A key granted nothing carries its owner's access, as keys always
+ * have.
+ */
+function effectiveLevel(req, user, module) {
+  const perm = user?.role?.permissions?.find(p => p.module === module);
+  let userLevel = perm ? LEVELS[perm.level] || 0 : 0;
+  const grants = req.isApiKey && Array.isArray(req.apiKeyPermissions) ? req.apiKeyPermissions : [];
+  if (grants.length) {
+    const grant = grants.find(g => g.module === module || g.module === '*');
+    userLevel = Math.min(userLevel, grant ? LEVELS[grant.level] || 0 : 0);
+  }
+  return userLevel;
+}
+
+/**
+ * Whether the request may act on a module at `level`, for routes that learn
+ * the module from the request (bulk, export, reports) and so cannot name it
+ * in requirePermission().
+ */
+function permits(req, module, level) {
+  return !!req.user?.active && effectiveLevel(req, req.user, module) >= (LEVELS[level] || 0);
+}
+
 function requirePermission(module, minLevel) {
   const levels = LEVELS;
   return async (req, res, next) => {
@@ -394,17 +430,7 @@ function requirePermission(module, minLevel) {
         return res.status(403).json({ error: 'Account disabled' });
       }
       const perm = user.role.permissions.find(p => p.module === module);
-      let userLevel = perm ? levels[perm.level] || 0 : 0;
-      // An API key reaches no further than the modules it was granted,
-      // [{ module, level }], and never past its owner's own access. The grant
-      // was stored and ignored, so a "contacts: read" key had its creator's
-      // full rights. A key granted nothing carries its owner's access, as
-      // keys always have.
-      const grants = req.isApiKey && Array.isArray(req.apiKeyPermissions) ? req.apiKeyPermissions : [];
-      if (grants.length) {
-        const grant = grants.find(g => g.module === module || g.module === '*');
-        userLevel = Math.min(userLevel, grant ? levels[grant.level] || 0 : 0);
-      }
+      const userLevel = effectiveLevel(req, user, module);
       if (userLevel < (levels[minLevel] || 0)) {
         return res.status(403).json({ error: `Insufficient permissions for ${module}` });
       }
@@ -422,6 +448,7 @@ module.exports = {
   authenticateApiKey,
   requirePermission,
   hasPermission,
+  permits,
   portalRefusal,
   roleCeilingRefusal,
   roleGrantRefusal,

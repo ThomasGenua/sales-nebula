@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
+const { moduleAccess, recordAccess } = require('../middleware/access');
 const { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
 const { createNumbered } = require('./numbering');
@@ -50,6 +51,14 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   // Apply auth + audit to all routes
   router.use(authenticate, auditMiddleware);
+
+  // Every route here answers to the module's permission and row security,
+  // the standard ones below and those a module adds (customRoutes, or routes
+  // appended to the router it gets back). The added ones had authenticate()
+  // alone, so a user with no access to deals could read a deal's timeline
+  // and emails, merge and delete accounts, or edit another rep's line items.
+  router.use(moduleAccess(moduleName));
+  router.param('id', recordAccess(moduleName, modelName));
 
   const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
 
