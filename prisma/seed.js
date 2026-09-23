@@ -911,8 +911,7 @@ async function main() {
   }
 
   // ─── SALES PATH ───
-  // The API reads a path's stages from SalesPathStage; the SalesPathStep rows
-  // this used to write were never shown anywhere.
+  // A path's stages live in SalesPathStage, which is what the API reads.
   const dealPath = await prisma.salesPath.create({ data: { name: 'Deal Path', module: 'deals', active: true } });
   await prisma.salesPathStage.createMany({ data: [
     { salesPathId: dealPath.id, name: 'Prospecting', position: 0, guidance: 'Research the company and identify key stakeholders. Prepare a compelling value proposition.', fields: ['name', 'accountId', 'value'], successCriteria: 'Initial meeting scheduled' },

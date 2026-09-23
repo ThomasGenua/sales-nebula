@@ -1846,7 +1846,6 @@ model SalesPath {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  steps SalesPathStep[]
   deletedAt   DateTime?
   // Written by the routes, never migrated until now.
   createdById String?
@@ -1854,18 +1853,6 @@ model SalesPath {
 
 }
 
-model SalesPathStep {
-  id          String   @id @default(uuid())
-  pathId      String
-  path        SalesPath @relation(fields: [pathId], references: [id], onDelete: Cascade)
-  stageName   String   // Prospecting, Qualification, etc.
-  stepOrder   Int
-  guidance    String?  // coaching text
-  keyFields   Json?    // fields to highlight at this stage
-  successCriteria String? // what success looks like
-
-  @@index([pathId])
-}
 
 // ═══════════════════════════════════════
 // MACROS
