@@ -18,6 +18,9 @@ router.use(authenticate, auditMiddleware);
 // ─── MODULE METADATA ───
 // Maps module names to Prisma models and their available fields
 const { Prisma } = require('@prisma/client');
+const { permits } = require('../middleware/auth');
+const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
+const { modelHasField } = require('../utils/modelFields');
 
 /**
  * Pick the fields that stand in for a related record's label.
@@ -241,6 +244,39 @@ function buildWhere(filters = []) {
   return conditions.length ? { AND: conditions } : {};
 }
 
+const isPlain = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+const plainValue = v => isPlain(v) || (Array.isArray(v) && v.every(isPlain));
+
+/**
+ * A report definition kept to its module's own fields, with plain filter
+ * values. Columns, filters, grouping, sorting and aggregations could name any
+ * field: a column called "owner" returned each record's whole owner row,
+ * password hash included, and a filter could compare inside related rows.
+ */
+function withinModule(report) {
+  const config = MODULE_CONFIG[report.module];
+  const known = f => typeof f === 'string' && Object.prototype.hasOwnProperty.call(config.fields, f);
+  const list = v => (Array.isArray(v) ? v : []);
+  return {
+    ...report,
+    columns: list(report.columns).filter(c => known(c?.field)),
+    filters: list(report.filters).filter(f => known(f?.field) && plainValue(f.value ?? null)),
+    groupBy: list(report.groupBy).filter(known),
+    sortBy: list(report.sortBy).filter(sort => known(sort?.field))
+      .map(sort => ({ field: sort.field, direction: sort.direction === 'desc' ? 'desc' : 'asc' })),
+    aggregations: list(report.aggregations)
+      .filter(a => known(a?.field) && ['count', 'sum', 'avg', 'min', 'max'].includes(a.function || 'count')),
+    limit: Math.min(Math.max(parseInt(report.limit, 10) || 10000, 1), 10000),
+  };
+}
+
+/** Whether the caller may run a report on this module; otherwise answer. */
+function mayRun(req, res, module) {
+  if (!MODULE_CONFIG[module]) { res.status(400).json({ error: `Invalid module: ${module}` }); return false; }
+  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
+  return true;
+}
+
 // Build Prisma orderBy from sort config
 function buildOrderBy(sortBy = []) {
   if (!sortBy.length) return [{ createdAt: 'desc' }];
@@ -436,8 +472,9 @@ router.post('/:id/execute', async (req, res, next) => {
     const report = await prisma.report.findUnique({ where: { id: req.params.id } });
     if (!report) return res.status(404).json({ error: 'Report not found' });
     if (!report.isPublic && report.createdById !== req.userId) return res.status(403).json({ error: 'Access denied' });
+    if (!mayRun(req, res, report.module)) return;
 
-    const result = await executeReport(prisma, report);
+    const result = await executeReport(prisma, report, req);
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -449,23 +486,29 @@ router.post('/execute', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { module, columns, filters, groupBy, aggregations, sortBy, limit, reportType } = req.body;
     if (!module) return res.status(400).json({ error: 'module required' });
-    if (!MODULE_CONFIG[module]) return res.status(400).json({ error: `Invalid module: ${module}` });
+    // Any signed-in user could run any module's report, over every row.
+    if (!mayRun(req, res, module)) return;
 
     const reportDef = { module, columns: columns || [], filters: filters || [], groupBy: groupBy || [], aggregations: aggregations || [], sortBy: sortBy || [], limit, reportType: reportType || 'tabular' };
-    const result = await executeReport(prisma, reportDef);
+    const result = await executeReport(prisma, reportDef, req);
     res.json(result);
   } catch (err) { next(err); }
 });
 
 // ─── Core report execution engine ───
-async function executeReport(prisma, report) {
-  const config = MODULE_CONFIG[report.module];
-  if (!config) throw new Error(`Unknown module: ${report.module}`);
+// Runs as the requesting user: over the live rows their row security lets
+// them see. Reports read every row, deleted ones included, whoever asked.
+async function executeReport(prisma, definition, req) {
+  const config = MODULE_CONFIG[definition.module];
+  if (!config) throw new Error(`Unknown module: ${definition.module}`);
 
   const model = prisma[config.model];
   if (!model) throw new Error(`Prisma model not found: ${config.model}`);
 
-  const where = buildWhere(report.filters);
+  const report = withinModule(definition);
+  const accessFilter = await buildAccessFilter(prisma, req.user, report.module, { modelName: config.model });
+  const live = modelHasField(config.model, 'deletedAt') ? { deletedAt: null } : {};
+  const where = applyAccessFilter({ ...buildWhere(report.filters), ...live }, accessFilter);
   const orderBy = buildOrderBy(report.sortBy);
   const startTime = Date.now();
 
@@ -505,7 +548,7 @@ async function executeReport(prisma, report) {
     }
 
     // Also return raw data for drill-down
-    const rows = await model.findMany({ where, orderBy, take: report.limit || 1000 });
+    const rows = await model.findMany({ where, orderBy, take: Math.min(report.limit, 1000) });
     result.rows = rows;
     result.totalCount = rows.length;
   }
@@ -572,9 +615,12 @@ router.post('/:id/export', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const report = await prisma.report.findUnique({ where: { id: req.params.id } });
     if (!report) return res.status(404).json({ error: 'Report not found' });
+    // As for running it: this exported anyone's private report.
+    if (!report.isPublic && report.createdById !== req.userId) return res.status(403).json({ error: 'Access denied' });
+    if (!mayRun(req, res, report.module)) return;
 
     const format = req.body.format || 'csv';
-    const result = await executeReport(prisma, report);
+    const result = await executeReport(prisma, report, req);
     const rows = result.rows || [];
 
     if (format === 'json') {
@@ -607,7 +653,8 @@ router.post('/preview', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const reportDef = { ...req.body, limit: 25, reportType: req.body.reportType || 'tabular' };
     if (!reportDef.module) return res.status(400).json({ error: 'module required' });
-    const result = await executeReport(prisma, reportDef);
+    if (!mayRun(req, res, reportDef.module)) return;
+    const result = await executeReport(prisma, reportDef, req);
     res.json(result);
   } catch (err) { next(err); }
 });
