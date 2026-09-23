@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -19,7 +20,6 @@ router.get('/', authenticate, async (req, res, next) => {
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
   } catch (err) { next(err); }
 });
-
 
 router.post('/', authenticate, requirePermission('territories', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
@@ -126,16 +126,8 @@ router.get('/models', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Analytics/stats endpoint
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'territories', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'territories' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'territories', model: 'territory' });
 
 // Analytics / Stats
 router.get('/analytics/summary', authenticate, async (req, res, next) => {

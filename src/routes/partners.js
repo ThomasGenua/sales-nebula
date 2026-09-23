@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('partner', 'partners', {
   include: {
@@ -120,15 +121,8 @@ router.get('/:id/commissions', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'partners', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'partners' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'partners', model: 'partner' });
 
 // Partner activities
 router.get('/:id/activities', authenticate, async (req, res, next) => {

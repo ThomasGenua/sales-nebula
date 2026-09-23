@@ -6,6 +6,7 @@ const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { statusRoutes } = require('../utils/moduleStatus');
 const router = Router();
 
 // ─── SSO CONFIG ───
@@ -149,22 +150,8 @@ router.get('/encryption/keys', authenticate, requirePermission('admin', 'read'),
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'security', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'security', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'security' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'security', analytics: true });
 
 // Threat detection - suspicious activity analysis
 router.get('/threats', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {

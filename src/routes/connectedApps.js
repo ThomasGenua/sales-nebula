@@ -5,6 +5,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
 const { auditMiddleware } = require('../middleware/audit');
 const { resolveJwtSecret } = require('../utils/secrets');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -113,15 +114,8 @@ router.post('/:id/refresh-token', authenticate, requirePermission('admin', 'full
   } catch (err) { next(err); }
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'connectedApps', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'connectedApps' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'connectedApps', model: 'connectedApp' });
 
 // App usage analytics
 router.get('/:id/analytics', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {

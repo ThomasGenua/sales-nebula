@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -105,22 +106,8 @@ router.get('/stats', authenticate, requirePermission('admin', 'read'), async (re
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'webToCase', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'webToCase', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'webToCase' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'cases', model: 'case', where: { origin: 'Web' }, analytics: true });
 
 // Form validation rules
 router.get('/validation-rules', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
@@ -149,21 +136,6 @@ router.get('/analytics', authenticate, requirePermission('admin', 'read'), async
   } catch (err) { next(err); }
 });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'WebToCase';
-    // Generic stats endpoint
-    const stats = {
-      module: 'webToCase',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

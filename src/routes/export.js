@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -107,15 +108,8 @@ router.get('/templates', authenticate, async (req, res, next) => {
   res.json(templates);
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'export', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'export' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'export', model: 'scheduledExport' });
 
 // Export progress
 router.get('/progress/:jobId', authenticate, async (req, res, next) => {

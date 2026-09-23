@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -121,38 +122,9 @@ router.get('/availability', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'scheduler', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'scheduler', model: 'appointment', analytics: true });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'scheduler', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'scheduler' }); } catch (err) { next(err); }
-});
-
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'Scheduler';
-    // Generic stats endpoint
-    const stats = {
-      module: 'scheduler',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
