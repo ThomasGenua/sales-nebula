@@ -71,8 +71,10 @@ function renderPage(path, go) {
   if (path === "/app" || path.startsWith("/app/") || path === "/login") return <App go={go} startOnLogin={path === "/login"} />;
   if (path === "/") return <Landing go={go} />;
 
-  // Unknown path: send signed-in users to the product, everyone else home
-  const signedIn = !!localStorage.getItem("sn_token");
+  // Unknown path: send signed-in users to the product, everyone else home.
+  // The session cookies are unreadable by design; the CSRF cookie beside
+  // them is the sign that one exists.
+  const signedIn = /(?:^|;\s*)sn_csrf=/.test(document.cookie);
   return signedIn ? <App go={go} /> : <Landing go={go} />;
 }
 

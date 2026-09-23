@@ -48,36 +48,21 @@ router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (r
 router.post('/oauth/token', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { grant_type, client_id, client_secret, code, refresh_token } = req.body;
+    const { client_id, client_secret } = req.body;
     const app = await prisma.connectedApp.findUnique({ where: { clientId: client_id } });
     if (!app || !app.active || app.clientSecret !== client_secret) {
       return res.status(401).json({ error: 'invalid_client' });
     }
 
-    if (grant_type === 'authorization_code') {
-      // In a full implementation, 'code' would be validated against a stored authorization code
-      // For now, code = userId (simplified)
-      const userId = code;
-      const accessToken = jwt.sign({ userId, appId: app.id, scopes: app.scopes }, resolveJwtSecret(), { expiresIn: '1h' });
-      const refreshTok = crypto.randomBytes(32).toString('hex');
-      await prisma.oAuthToken.create({
-        data: { appId: app.id, userId, accessToken, refreshToken: refreshTok, scopes: app.scopes, expiresAt: new Date(Date.now() + 3600000) },
-      });
-      res.json({ access_token: accessToken, refresh_token: refreshTok, token_type: 'Bearer', expires_in: 3600, scope: app.scopes.join(' ') });
-    } else if (grant_type === 'refresh_token') {
-      const existing = await prisma.oAuthToken.findUnique({ where: { refreshToken: refresh_token } });
-      if (!existing) return res.status(400).json({ error: 'invalid_grant' });
-
-      const newAccess = jwt.sign({ userId: existing.userId, appId: app.id, scopes: existing.scopes }, resolveJwtSecret(), { expiresIn: '1h' });
-      const newRefresh = crypto.randomBytes(32).toString('hex');
-      await prisma.oAuthToken.update({
-        where: { id: existing.id },
-        data: { accessToken: newAccess, refreshToken: newRefresh, expiresAt: new Date(Date.now() + 3600000) },
-      });
-      res.json({ access_token: newAccess, refresh_token: newRefresh, token_type: 'Bearer', expires_in: 3600 });
-    } else {
-      res.status(400).json({ error: 'unsupported_grant_type' });
-    }
+    // There is no authorization endpoint, so there are no authorization codes:
+    // this took `code` to be a user id and signed a session-strength token for
+    // whichever user it named. Holding one app's client secret was enough to
+    // become any user, administrators included. Until a consent step exists
+    // that issues real codes, no grant is honoured.
+    return res.status(501).json({
+      error: 'unsupported_grant_type',
+      error_description: 'Connected-app OAuth has no authorization step yet, so it issues no tokens',
+    });
   } catch (err) { next(err); }
 });
 

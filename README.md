@@ -457,6 +457,15 @@ curl -X POST http://localhost:7544/api/auth/refresh \
   -d '{"refreshToken":"eyJ..."}'
 ```
 
+The browser app does not see either token. It signs in with
+`X-Session-Mode: cookie`, and the server sets them as httpOnly cookies
+(`sn_access`, and `sn_refresh`, which only `/api/auth` receives) that page
+scripts cannot read. A readable `sn_csrf` cookie comes with them: every
+cookie-authenticated `POST`, `PUT`, `PATCH` or `DELETE` must echo its value in
+an `X-CSRF-Token` header, which a forged cross-site request cannot do. Bearer
+tokens and API keys, as above, are unaffected. Signing out revokes both
+tokens. Only access tokens authenticate API calls; a refresh token cannot.
+
 ### Role-Based Access Control (RBAC)
 
 Permissions are defined per module at the role level with three tiers:

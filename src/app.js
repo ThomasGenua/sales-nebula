@@ -95,7 +95,7 @@ function createApp(prisma) {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID', 'If-Match'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID', 'If-Match', 'X-CSRF-Token', 'X-Session-Mode'],
     exposedHeaders: ['X-Request-ID', 'X-Cache', 'Retry-After'],
     maxAge: 86400,
   }));

@@ -82,54 +82,49 @@ function parseAppPath(pathname) {
 }
 function useAuth() { return useContext(AuthContext); }
 
+/** The CSRF token the server set beside the session cookies. */
+function csrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)sn_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 function AuthProvider({ children }) {
   const [demoMode, setDemoMode] = useState(() => localStorage.getItem("sn_demo_mode") === "true");
   const [user, setUser] = useState(() => localStorage.getItem("sn_demo_mode") === "true" ? DEMO_USER : null);
-  const [token, setToken] = useState(localStorage.getItem("sn_token"));
   const [loading, setLoading] = useState(true);
 
   // Set during render, before any child formats a date with it.
   useMemo(() => setUserPrefs(user), [user?.timezone, user?.locale]);
 
-  // One in-flight renewal shared by every 401 that lands at once, so a burst of
-  // parallel requests refreshes the session once instead of racing each other.
-  const renewal = useRef(null);
-
-  const clearSession = useCallback(() => {
-    setUser(null);
-    setToken(null);
+  // The session used to be two tokens in localStorage, readable by any script
+  // that found its way into the page. It is now a pair of httpOnly cookies
+  // the page cannot read at all; clear what an earlier version left behind.
+  useEffect(() => {
     localStorage.removeItem("sn_token");
     localStorage.removeItem("sn_refresh");
   }, []);
 
-  const applySession = useCallback((d) => {
-    setToken(d.token);
-    localStorage.setItem("sn_token", d.token);
-    // Login hands back a refresh token; it used to be dropped on the floor,
-    // which is why a session died the moment the 15 minute access token did.
-    if (d.refreshToken) localStorage.setItem("sn_refresh", d.refreshToken);
-    setUser(d.user);
-  }, []);
+  // One in-flight renewal shared by every 401 that lands at once, so a burst of
+  // parallel requests refreshes the session once instead of racing each other.
+  const renewal = useRef(null);
 
-  const renewAccessToken = useCallback(() => {
-    const refreshToken = localStorage.getItem("sn_refresh");
-    if (!refreshToken) return Promise.resolve(null);
+  const clearSession = useCallback(() => setUser(null), []);
+  const applySession = useCallback((d) => setUser(d.user), []);
+
+  // The refresh cookie only ever travels to /api/auth; spending it needs the
+  // CSRF token like any other change.
+  const renewSession = useCallback(() => {
     if (!renewal.current) {
+      const csrf = csrfToken();
       renewal.current = fetch(`${API}/auth/refresh`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken }),
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(csrf && { "X-CSRF-Token": csrf }) },
+        body: "{}",
       })
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => {
-          const next = d?.accessToken || d?.token || null;
-          if (next) {
-            localStorage.setItem("sn_token", next);
-            setToken(next);
-          }
-          return next;
-        })
-        .catch(() => null)
+        .then(r => r.ok)
+        .catch(() => false)
         .finally(() => { renewal.current = null; });
     }
     return renewal.current;
@@ -139,23 +134,29 @@ function AuthProvider({ children }) {
     if (demoMode) return demoApiFetch(path, opts);
 
     const { skipRefresh, rawBody, ...init } = opts;
-    const call = (bearer) => fetch(`${API}${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(bearer && { Authorization: `Bearer ${bearer}` }),
-        ...opts.headers,
-      },
-      ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
-    });
+    const method = String(init.method || "GET").toUpperCase();
+    // The session cookies ride along on their own; a request that changes
+    // anything also echoes the CSRF token, which a forged one cannot.
+    const call = () => {
+      const csrf = UNSAFE_METHODS.has(method) ? csrfToken() : null;
+      return fetch(`${API}${path}`, {
+        ...init,
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(csrf && { "X-CSRF-Token": csrf }),
+          ...opts.headers,
+        },
+        ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
+      });
+    };
 
-    let res = await call(token);
+    let res = await call();
 
     // Access tokens last 15 minutes. Spend the refresh token and retry once
     // rather than interrupting whatever the user was in the middle of.
     if (res.status === 401 && !skipRefresh) {
-      const renewed = await renewAccessToken();
-      if (renewed) res = await call(renewed);
+      if (await renewSession()) res = await call();
     }
 
     if (res.status === 401) {
@@ -169,31 +170,32 @@ function AuthProvider({ children }) {
     }
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
-  }, [token, demoMode, renewAccessToken, clearSession]);
+  }, [demoMode, renewSession, clearSession]);
 
   useEffect(() => {
     if (demoMode) { setUser(DEMO_USER); setLoading(false); return; }
-    if (!token) { setLoading(false); return; }
-    apiFetch("/auth/me").then(d => setUser(d.user || d)).catch(() => { setToken(null); localStorage.removeItem("sn_token"); }).finally(() => setLoading(false));
-  }, [token, demoMode, apiFetch]);
+    // Nothing to look up locally: if a session cookie exists it goes with the
+    // request, and a 401 just means signed out.
+    apiFetch("/auth/me").then(d => setUser(d.user || d)).catch(() => setUser(null)).finally(() => setLoading(false));
+  }, [demoMode, apiFetch]);
+
+  // Asks the server for a cookie session: the tokens stay out of the page.
+  const COOKIE_SESSION = { "X-Session-Mode": "cookie" };
 
   const login = async (email, password) => {
     if (email.trim().toLowerCase() === DEMO_LOGIN.email && password === DEMO_LOGIN.password) {
       localStorage.setItem("sn_demo_mode", "true");
-      localStorage.removeItem("sn_token");
       setDemoMode(true);
-      setToken(null);
       setUser(DEMO_USER);
       return;
     }
 
     // skipRefresh: a stale refresh token from a previous session must not be
     // spent trying to rescue a wrong password.
-    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true });
+    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true, headers: COOKIE_SESSION });
 
     // A verified MFA device means no session yet. The caller collects a code
-    // and finishes at /auth/mfa/verify; storing d.token here would write the
-    // string "undefined" into localStorage and silently strand the user.
+    // and finishes at /auth/mfa/verify.
     if (d.mfaRequired) {
       return { mfaRequired: true, mfaToken: d.mfaToken, devices: d.devices || [] };
     }
@@ -208,13 +210,14 @@ function AuthProvider({ children }) {
       method: "POST",
       body: { mfaToken, deviceId, code },
       skipRefresh: true,
+      headers: COOKIE_SESSION,
     });
     applySession(d);
   };
-  const logout = () => {
-    setUser(null); setToken(null); setDemoMode(false);
-    localStorage.removeItem("sn_token");
-    localStorage.removeItem("sn_refresh");
+  const logout = async () => {
+    // The server revokes both tokens and clears the cookies; the page cannot.
+    if (!demoMode) await apiFetch("/auth/logout", { method: "POST", skipRefresh: true }).catch(() => {});
+    setUser(null); setDemoMode(false);
     localStorage.removeItem("sn_demo_mode");
     window.history.pushState({}, "", "/");
     window.location.reload();
@@ -224,7 +227,7 @@ function AuthProvider({ children }) {
     setUser((current) => (current ? { ...current, ...partial } : current));
   };
 
-  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
 }
 
 function useApi(path, deps = []) {
