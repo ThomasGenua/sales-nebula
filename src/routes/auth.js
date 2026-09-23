@@ -306,7 +306,7 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
     }
 
     const prisma = req.app.locals.prisma;
-    const { email, password, firstName, lastName, roleId } = req.body;
+    const { email, password, firstName, lastName } = req.body;
 
     if (!email || !password || !firstName || !lastName) {
       return res.status(400).json({ error: 'All fields required' });
@@ -326,20 +326,18 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
     const existing = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (existing) return res.status(409).json({ error: 'Email already exists' });
 
-    // Fall back to the configured default role, and to nothing else. Picking
-    // "any role that exists" would hand an Administrator role to a self
-    // registrant on an installation that happens to have only that one.
-    let role = roleId;
-    if (!role) {
-      const defaultRole = await prisma.role.findFirst({ where: { name: DEFAULT_SIGNUP_ROLE } });
-      if (!defaultRole) {
-        return res.status(503).json({
-          error: `Self-registration is unavailable: no "${DEFAULT_SIGNUP_ROLE}" role is configured.`,
-          code: 'NO_DEFAULT_ROLE',
-        });
-      }
-      role = defaultRole.id;
+    // Always the configured default role. This took roleId from the body, so
+    // with open registration on, a stranger could sign up as an Admin; and
+    // picking "any role that exists" would hand an Administrator role to a
+    // self registrant on an installation that happens to have only that one.
+    const defaultRole = await prisma.role.findFirst({ where: { name: DEFAULT_SIGNUP_ROLE } });
+    if (!defaultRole) {
+      return res.status(503).json({
+        error: `Self-registration is unavailable: no "${DEFAULT_SIGNUP_ROLE}" role is configured.`,
+        code: 'NO_DEFAULT_ROLE',
+      });
     }
+    const role = defaultRole.id;
 
     const hash = await bcrypt.hash(password, 12); // Cost 12 for production
     const user = await prisma.user.create({

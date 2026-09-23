@@ -4,6 +4,7 @@ const path = require('path');
 const { v4: uuid } = require('uuid');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { summaryRoute } = require('../utils/moduleStatus');
 
@@ -25,6 +26,10 @@ const router = createCrudRouter('document', 'documents', {
       { category: { contains: q, mode: 'insensitive' } },
     ],
   }),
+  // The file columns describe the stored upload, and only the upload routes
+  // set them. Taken from a request body, filePath named any file on the
+  // server for /:id/download to send.
+  serverFields: ['filePath', 'fileSize', 'mimeType'],
 });
 
 // File upload
@@ -72,8 +77,15 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
     if (!doc) return res.status(404).json({ error: 'Document not found' });
+    // Only a file inside the upload directory, where multer writes them. A
+    // stored filePath could name any file the server can read (.env, keys).
+    const base = path.resolve(process.env.UPLOAD_DIR || './uploads');
+    const full = path.resolve(doc.filePath || '');
+    if (!doc.filePath || !(full === base || full.startsWith(base + path.sep))) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
     await prisma.document.update({ where: { id: req.params.id }, data: { downloadCount: (doc.downloadCount || 0) + 1 } });
-    res.download(doc.filePath, doc.fileName);
+    res.download(full, doc.fileName);
   } catch (err) { next(err); }
 });
 
@@ -100,8 +112,9 @@ router.post('/:id/version', authenticate, requirePermission('documents', 'edit')
 router.get('/category/:category', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Only documents the caller may see; this listed every one.
     const docs = await prisma.document.findMany({
-      where: { category: req.params.category, deletedAt: null },
+      where: await reachableWhere(req, 'documents', 'document', { category: req.params.category }),
       orderBy: { createdAt: 'desc' },
     });
     res.json(docs);
@@ -110,12 +123,16 @@ router.get('/category/:category', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Document sharing
+// Document sharing. The router has checked the caller can edit this
+// document, so a share hands out view or edit and nothing above that.
+const SHARE_LEVELS = ['view', 'edit'];
 router.post('/:id/share', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { shareWith, access } = req.body;
-    const updated = await prisma.document.update({ where: { id: req.params.id }, data: { sharedWith: shareWith, accessLevel: access || 'view' } });
+    const { shareWith } = req.body;
+    const access = req.body.access || 'view';
+    if (!SHARE_LEVELS.includes(access)) return res.status(400).json({ error: `access must be one of: ${SHARE_LEVELS.join(', ')}` });
+    const updated = await prisma.document.update({ where: { id: req.params.id }, data: { sharedWith: shareWith, accessLevel: access } });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -124,7 +141,8 @@ router.post('/:id/share', authenticate, async (req, res, next) => {
 router.get('/templates/list', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const templates = await prisma.document.findMany({ where: { isTemplate: true, deletedAt: null }, orderBy: { name: 'asc' } });
+    // Only templates the caller may see; this listed every one.
+    const templates = await prisma.document.findMany({ where: await reachableWhere(req, 'documents', 'document', { isTemplate: true }), orderBy: { name: 'asc' } });
     res.json(templates);
   } catch (err) { next(err); }
 });
@@ -133,9 +151,13 @@ router.get('/templates/list', authenticate, async (req, res, next) => {
 router.post('/from-template/:templateId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const template = await prisma.document.findUnique({ where: { id: req.params.templateId } });
+    // The router checks a param named `id`, not this one, so any document
+    // (its file included) could be copied by id and then downloaded.
+    const template = await prisma.document.findFirst({ where: await reachableWhere(req, 'documents', 'document', { id: req.params.templateId }) });
     if (!template) return res.status(404).json({ error: 'Template not found' });
     const { id, createdAt, updatedAt, ...data } = template;
+    // Prisma refuses a bare null for a Json column; left out, it stays NULL.
+    if (data.sharedWith === null) delete data.sharedWith;
     const doc = await prisma.document.create({ data: { ...data, name: req.body.name || `${template.name} (Copy)`, isTemplate: false, createdById: req.user.id } });
     res.status(201).json(doc);
   } catch (err) { next(err); }

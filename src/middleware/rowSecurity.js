@@ -154,12 +154,19 @@ function isAdmin(user) {
 /** Ownership columns a record may carry. Not every model has both. */
 const OWNER_FIELDS = ['ownerId', 'assignedId'];
 
-/** The ownership columns this model actually declares, via Prisma metadata. */
+/**
+ * The ownership columns this model actually declares, via Prisma metadata.
+ * A model with neither (a document) is owned by whoever created it, and one
+ * with no such column at all has no owner, only group grants. Both used to
+ * be filtered on an ownerId they do not have, which Prisma refuses, so every
+ * restricted query on them failed.
+ */
 function ownerFieldsFor(prisma, modelName) {
   const fields = modelName && prisma[modelName]?.fields;
   if (!fields) return ['ownerId'];
   const present = OWNER_FIELDS.filter(f => f in fields);
-  return present.length ? present : ['ownerId'];
+  if (present.length) return present;
+  return 'createdById' in fields ? ['createdById'] : [];
 }
 
 /**
@@ -249,7 +256,7 @@ function rowSecurity(module, opts = {}) {
         if (!owdRestricts(owd, level)) return true;
 
         const fields = ownerFieldsFor(prisma, opts.modelName);
-        if (!opts.modelName || !prisma[opts.modelName]?.findUnique) return false;
+        if (!fields.length || !opts.modelName || !prisma[opts.modelName]?.findUnique) return false;
         const record = await prisma[opts.modelName].findUnique({
           where: { id: recordId },
           select: Object.fromEntries(fields.map(f => [f, true])),

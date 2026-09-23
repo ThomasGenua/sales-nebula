@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { pickModelFields } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
@@ -49,10 +49,12 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
     // so a plain "2026-12-31" from a date input does not 500 the create.
     const { data } = pickModelFields('quote', rest);
 
+    // The items were written with name and price, which quote items do not
+    // have, so a quote with lines never saved.
     const quote = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
       data: {
         ...data,
-        items: { create: items?.map(i => ({ productId: i.productId, name: i.name, quantity: i.quantity, price: i.price, discount: i.discount || 0 })) || [] },
+        items: { create: Array.isArray(items) ? items.map(i => lineItemFields(i)) : [] },
       },
       include,
     });
@@ -64,21 +66,20 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
 router.put('/:id', requirePermission('quotes', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, id, createdAt, updatedAt, ...data } = req.body;
+    const { items, id, createdAt, updatedAt, ...rest } = req.body || {};
+    // Real columns only, and no nested writes: the body went to Prisma whole.
+    const { data } = pickModelFields('quote', rest);
+    const lines = Array.isArray(items) ? items.map(i => lineItemFields(i)) : null;
 
-    // Delete old items and recreate
-    if (items) {
-      await prisma.quoteItem.deleteMany({ where: { quoteId: req.params.id } });
-    }
-
-    const quote = await prisma.quote.update({
+    // Replace the items and update the quote together.
+    const writes = [];
+    if (lines) writes.push(prisma.quoteItem.deleteMany({ where: { quoteId: req.params.id } }));
+    writes.push(prisma.quote.update({
       where: { id: req.params.id },
-      data: {
-        ...data,
-        ...(items && { items: { create: items.map(i => ({ productId: i.productId, name: i.name, quantity: i.quantity, price: i.price, discount: i.discount || 0 })) } }),
-      },
+      data: { ...data, ...(lines && { items: { create: lines } }) },
       include,
-    });
+    }));
+    const quote = (await prisma.$transaction(writes)).pop();
     await req.audit({ action: 'update', module: 'quotes', recordId: quote.id });
     res.json(quote);
   } catch (err) { next(err); }

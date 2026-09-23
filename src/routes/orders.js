@@ -2,6 +2,10 @@ const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
+const { lineItemFields } = require('../utils/modelFields');
+
+/** The order's lines as sent, each cut down to the columns an item has. */
+const orderLines = req => (Array.isArray(req.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
 
 const include = {
   account: { select: { id: true, name: true } },
@@ -18,12 +22,18 @@ const router = createCrudRouter('order', 'orders', {
     ],
   }),
   numbering: ORDER_NUMBER,
-  beforeCreate: async (data) => {
-    if (data.items) {
-      data.subtotal = data.items.reduce((s, i) => s + (i.unitPrice * i.quantity), 0);
-      data.total = data.subtotal + (data.tax || 0) - (data.discount || 0);
+  beforeCreate: async (data, req) => {
+    const lines = orderLines(req);
+    if (lines.length) {
+      data.subtotal = lines.reduce((sum, line) => sum + line.total, 0);
+      data.total = data.subtotal + (Number(data.tax) || 0) - (Number(data.discount) || 0);
     }
     return data;
+  },
+  // The items went to Prisma exactly as sent, as a bare list it rejected.
+  nestedWrites: async (req, operation) => {
+    const lines = operation === 'create' ? orderLines(req) : [];
+    return lines.length ? { items: { create: lines } } : {};
   },
 });
 

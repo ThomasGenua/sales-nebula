@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { authenticate, requirePermission, validatePassword, signAccessToken, signRefreshToken } = require('../middleware/auth');
+const { authenticate, requirePermission, validatePassword, signAccessToken, signRefreshToken, roleGrantRefusal } = require('../middleware/auth');
 const { wantsCookieSession, setSessionCookies } = require('../utils/sessionCookies');
 const { auditMiddleware } = require('../middleware/audit');
 const { createLimiter } = require('../middleware/rateLimit');
@@ -204,7 +204,7 @@ router.post('/resend', signupLimiter, async (req, res, next) => {
 
 // ── ADMIN REVIEW ──────────────────────────────────────────────────────
 
-router.get('/requests', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/requests', authenticate, requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { status, search, page = 1, limit = 50 } = req.query;
@@ -237,7 +237,7 @@ router.get('/requests', authenticate, requirePermission('admin', 'read'), async 
   } catch (err) { next(err); }
 });
 
-router.get('/requests/stats', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/requests/stats', authenticate, requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const days = parseInt(req.query.days, 10) || 30;
@@ -270,7 +270,7 @@ router.get('/requests/stats', authenticate, requirePermission('admin', 'read'), 
 });
 
 // Approve a request, which issues an invite rather than creating a user
-router.post('/requests/:id/approve', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/requests/:id/approve', authenticate, requirePermission('users', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const request = await prisma.signupRequest.findUnique({ where: { id: req.params.id } });
@@ -287,6 +287,8 @@ router.post('/requests/:id/approve', authenticate, requirePermission('admin', 'e
       roleId = fallback?.id;
     }
     if (!roleId) return res.status(400).json({ error: 'roleId required; no default role exists' });
+    const refusal = await roleGrantRefusal(prisma, req.user, roleId);
+    if (refusal) return res.status(403).json({ error: refusal });
 
     const { raw, hash } = makeToken();
     const invite = await prisma.userInvite.create({
@@ -319,7 +321,7 @@ router.post('/requests/:id/approve', authenticate, requirePermission('admin', 'e
   } catch (err) { next(err); }
 });
 
-router.post('/requests/:id/reject', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/requests/:id/reject', authenticate, requirePermission('users', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const request = await prisma.signupRequest.findUnique({ where: { id: req.params.id } });
@@ -335,8 +337,12 @@ router.post('/requests/:id/reject', authenticate, requirePermission('admin', 'ed
 });
 
 // ── INVITES ───────────────────────────────────────────────────────────
+// Inviting someone, or approving their request, makes an account, so it takes
+// what creating a user takes (users: full), and only for a role within the
+// inviter's own access. It took admin: edit, which the default Sales Rep role
+// has, and any roleId: a rep could invite their own address as an Admin.
 
-router.get('/invites', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/invites', authenticate, requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const where = {};
@@ -357,7 +363,7 @@ router.get('/invites', authenticate, requirePermission('admin', 'read'), async (
   } catch (err) { next(err); }
 });
 
-router.post('/invites', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/invites', authenticate, requirePermission('users', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { email, firstName, lastName, roleId, message } = req.body;
@@ -377,6 +383,8 @@ router.post('/invites', authenticate, requirePermission('admin', 'edit'), auditM
       role = fallback?.id;
     }
     if (!role) return res.status(400).json({ error: 'roleId required; no default role exists' });
+    const refusal = await roleGrantRefusal(prisma, req.user, role);
+    if (refusal) return res.status(403).json({ error: refusal });
 
     const { raw, hash } = makeToken();
     const invite = await prisma.userInvite.create({
@@ -397,7 +405,7 @@ router.post('/invites', authenticate, requirePermission('admin', 'edit'), auditM
   } catch (err) { next(err); }
 });
 
-router.post('/invites/:id/revoke', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/invites/:id/revoke', authenticate, requirePermission('users', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const invite = await prisma.userInvite.findUnique({ where: { id: req.params.id } });
@@ -410,7 +418,7 @@ router.post('/invites/:id/revoke', authenticate, requirePermission('admin', 'edi
   } catch (err) { next(err); }
 });
 
-router.post('/invites/:id/resend', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.post('/invites/:id/resend', authenticate, requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const invite = await prisma.userInvite.findUnique({ where: { id: req.params.id } });
@@ -524,7 +532,7 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
 });
 
 // Housekeeping: mark lapsed invites and requests
-router.post('/maintenance/expire', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.post('/maintenance/expire', authenticate, requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const now = new Date();

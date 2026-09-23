@@ -1,16 +1,23 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 // The app integrates Claude only; these templates named gpt-4.
 const { aiModel } = require('../services/claude');
 
 const router = Router();
 
-router.get('/', authenticate, async (req, res, next) => {
+// The module whose records each agent type's run returns.
+const RUN_MODULES = { SDR: 'leads', DealCoach: 'deals', ServiceAgent: 'cases' };
+
+// An agent's configuration (its system prompt and tools), its conversations
+// and its past runs' output are admin reads, as its writes are admin's. These
+// took a session alone.
+router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const agents = await prisma.aiAgent.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } }); res.json(agents); } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.findUnique({ where: { id: req.params.id } }); if (!a) return res.status(404).json({ error: 'Not found' }); res.json(a); } catch (err) { next(err); }
 });
 
@@ -49,6 +56,11 @@ router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) =>
     const prisma = req.app.locals.prisma;
     const agent = await prisma.aiAgent.findUnique({ where: { id: req.params.id } });
     if (!agent || !agent.active) return res.status(400).json({ error: 'Agent not found or inactive' });
+    // A run returned the top new leads or open cases across the org to anyone
+    // signed in. It now takes read on the module it returns, and lists only
+    // records the caller can see.
+    const module = RUN_MODULES[agent.type];
+    if (module && !permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
     const { input, context } = req.body;
     const run = await prisma.aiAgentRun.create({
       data: { agentId: req.params.id, trigger: 'manual', input: input || {}, context: context || {}, status: 'Running', startedAt: new Date(), triggeredById: req.user.id },
@@ -56,13 +68,13 @@ router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) =>
     // Execute agent logic based on type
     let output = {};
     if (agent.type === 'SDR') {
-      const leads = await prisma.lead.findMany({ where: { status: 'New', deletedAt: null }, take: 10, orderBy: { score: 'desc' } });
+      const leads = await prisma.lead.findMany({ where: await reachableWhere(req, 'leads', 'lead', { status: 'New' }), take: 10, orderBy: { score: 'desc' } });
       output = { action: 'lead_prioritization', leads: leads.map(l => ({ id: l.id, name: `${l.firstName} ${l.lastName}`, score: l.score })), recommendation: `Found ${leads.length} new leads to prioritize` };
     } else if (agent.type === 'DealCoach') {
       const deals = await prisma.deal.findMany({ where: { ownerId: req.user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] }, deletedAt: null }, take: 5, orderBy: { value: 'desc' } });
       output = { action: 'deal_coaching', deals: deals.map(d => ({ id: d.id, name: d.name, stage: d.stage, value: d.value })), recommendation: 'Focus on highest-value deals first' };
     } else if (agent.type === 'ServiceAgent') {
-      const cases = await prisma.case.findMany({ where: { status: { in: ['New', 'Open'] }, deletedAt: null }, take: 10, orderBy: { priority: 'asc' } });
+      const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', { status: { in: ['New', 'Open'] } }), take: 10, orderBy: { priority: 'asc' } });
       output = { action: 'case_triage', cases: cases.map(c => ({ id: c.id, subject: c.subject, priority: c.priority })), recommendation: `${cases.length} cases need attention` };
     } else {
       output = { action: 'generic', message: 'Agent execution completed' };
@@ -74,7 +86,8 @@ router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) =>
 });
 
 // Run history
-router.get('/:id/runs', authenticate, async (req, res, next) => {
+// Past runs' output names the leads and cases each run found for whoever ran it.
+router.get('/:id/runs', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const runs = await prisma.aiAgentRun.findMany({
@@ -107,7 +120,7 @@ router.get('/:id/metrics', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Agent conversations
-router.get('/:id/conversations', authenticate, async (req, res, next) => {
+router.get('/:id/conversations', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const conversations = await prisma.aiAgentConversation.findMany({

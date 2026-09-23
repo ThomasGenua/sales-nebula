@@ -1,9 +1,21 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { scalarSelect, modelHasField } = require('../utils/modelFields');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
+
+/*
+ * Exports took a session alone and read every row of fifteen modules, deleted
+ * ones on request, with any columns: `fields: ["owner"]` returned each
+ * record's owner row, password hash included. An export now takes read
+ * permission on the module, reaches only the caller's rows, and returns the
+ * model's own columns. Deleted rows are for administrators.
+ */
+const plain = v => ['string', 'number', 'boolean'].includes(typeof v);
 
 const EXPORTABLE_MODULES = {
   contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
@@ -18,16 +30,20 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { module, format = 'json', filters, fields, limit = 10000, includeDeleted } = req.body;
     if (!module || !EXPORTABLE_MODULES[module]) return res.status(400).json({ error: `Invalid module. Options: ${Object.keys(EXPORTABLE_MODULES).join(', ')}` });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
     const modelName = EXPORTABLE_MODULES[module];
-    const where = includeDeleted ? {} : { deletedAt: null };
+    const filter = {};
     if (filters) {
-      if (filters.createdAfter) where.createdAt = { ...(where.createdAt || {}), gte: new Date(filters.createdAfter) };
-      if (filters.createdBefore) where.createdAt = { ...(where.createdAt || {}), lte: new Date(filters.createdBefore) };
-      if (filters.ownerId) where.ownerId = filters.ownerId;
-      if (filters.status) where.status = filters.status;
+      if (filters.createdAfter) filter.createdAt = { ...(filter.createdAt || {}), gte: new Date(filters.createdAfter) };
+      if (filters.createdBefore) filter.createdAt = { ...(filter.createdAt || {}), lte: new Date(filters.createdBefore) };
+      if (plain(filters.ownerId) && modelHasField(modelName, 'ownerId')) filter.ownerId = String(filters.ownerId);
+      if (plain(filters.status) && modelHasField(modelName, 'status')) filter.status = String(filters.status);
     }
-    const select = fields?.length ? fields.reduce((acc, f) => { acc[f] = true; return acc; }, { id: true }) : undefined;
-    const data = await prisma[modelName].findMany({ where, ...(select && { select }), take: Math.min(+limit, 50000), orderBy: { createdAt: 'desc' } });
+    let where = await reachableWhere(req, module, modelName, filter);
+    // Deleted rows too, for administrators who ask.
+    if (includeDeleted && isAdmin(req.user)) where = filter;
+    const select = scalarSelect(modelName, fields);
+    const data = await prisma[modelName].findMany({ where, ...(select && { select }), take: Math.min(Math.max(parseInt(limit, 10) || 10000, 1), 50000), orderBy: { createdAt: 'desc' } });
     await req.audit({ action: 'read', module: 'export', recordId: module, details: `Exported ${data.length} ${module} records (${format})` });
 
     if (format === 'csv') {
@@ -48,11 +64,19 @@ router.get('/:module', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module } = req.params;
-    if (!EXPORTABLE_MODULES[module]) return res.status(400).json({ error: `Invalid module. Options: ${Object.keys(EXPORTABLE_MODULES).join(', ')}` });
-    const { limit = 1000, offset = 0, format = 'json', status } = req.query;
-    const where = { deletedAt: null };
-    if (status) where.status = status;
-    const data = await prisma[EXPORTABLE_MODULES[module]].findMany({ where, take: +limit, skip: +offset, orderBy: { createdAt: 'desc' } });
+    // Not a module: on to /history, /templates and the rest, which this
+    // route used to swallow.
+    if (!EXPORTABLE_MODULES[module]) return next();
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    const modelName = EXPORTABLE_MODULES[module];
+    const { limit = 1000, offset = 0, status } = req.query;
+    const filter = plain(status) && modelHasField(modelName, 'status') ? { status: String(status) } : {};
+    const data = await prisma[modelName].findMany({
+      where: await reachableWhere(req, module, modelName, filter),
+      take: Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000),
+      skip: Math.max(parseInt(offset, 10) || 0, 0),
+      orderBy: { createdAt: 'desc' },
+    });
     res.json({ module, count: data.length, offset: +offset, data });
   } catch (err) { next(err); }
 });
@@ -63,7 +87,8 @@ router.get('/', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const modules = [];
     for (const [key, model] of Object.entries(EXPORTABLE_MODULES)) {
-      try { const count = await prisma[model].count({ where: { deletedAt: null } }); modules.push({ module: key, model, recordCount: count }); }
+      if (!permits(req, key, 'read')) continue;
+      try { const count = await prisma[model].count({ where: await reachableWhere(req, key, model) }); modules.push({ module: key, model, recordCount: count }); }
       catch (e) { modules.push({ module: key, model, recordCount: 0 }); }
     }
     res.json({ availableModules: modules });
@@ -74,8 +99,9 @@ router.get('/', authenticate, async (req, res, next) => {
 router.get('/history', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // The caller's own exports; everyone's, for administrators.
     const history = await prisma.auditLog.findMany({
-      where: { module: 'export' }, orderBy: { createdAt: 'desc' }, take: 50,
+      where: { module: 'export', ...(isAdmin(req.user) ? {} : { userId: req.userId }) }, orderBy: { createdAt: 'desc' }, take: 50,
       select: { id: true, details: true, userId: true, createdAt: true },
     });
     res.json(history);

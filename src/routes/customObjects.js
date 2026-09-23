@@ -6,6 +6,23 @@ const { pickModelFields } = require('../utils/modelFields');
 
 const router = Router();
 
+// Columns the server sets on a record, which its values may not carry.
+const SERVER_FIELDS = new Set(['id', 'customObjectId', 'objectId', 'data', 'ownerId', 'createdById', 'createdAt', 'updatedAt', 'deletedAt']);
+const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * A record's own field values: the request's `data` object, or the body itself
+ * from clients that post fields flat; null when neither is an object. The raw
+ * body was stored as is, so a record's values could claim its id, object or
+ * creator.
+ */
+function recordValues(body) {
+  if (!isPlainObject(body)) return null;
+  const values = body.data == null ? body : body.data;
+  if (!isPlainObject(values)) return null;
+  return Object.fromEntries(Object.entries(values).filter(([key]) => !SERVER_FIELDS.has(key)));
+}
+
 router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -88,7 +105,10 @@ router.delete('/:id/fields/:fieldId', authenticate, requirePermission('admin', '
 });
 
 // Records CRUD (dynamic data stored as JSON)
-router.get('/:id/records', authenticate, async (req, res, next) => {
+// Objects are defined under admin, and there is no per-object permission, so
+// their records answer to admin too: read to look, edit to change. These took
+// a session alone.
+router.get('/:id/records', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, search } = req.query;
@@ -101,25 +121,29 @@ router.get('/:id/records', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/records', authenticate, auditMiddleware, async (req, res, next) => {
+router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const values = recordValues(req.body);
+    if (!values) return res.status(400).json({ error: 'data must be an object' });
     const record = await prisma.customRecord.create({
-      data: { customObjectId: req.params.id, data: req.body.data || req.body, createdById: req.user.id },
+      data: { customObjectId: req.params.id, data: values, createdById: req.user.id },
     });
     res.status(201).json(record);
   } catch (err) { next(err); }
 });
 
-router.put('/:id/records/:recordId', authenticate, auditMiddleware, async (req, res, next) => {
+router.put('/:id/records/:recordId', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const record = await prisma.customRecord.update({ where: { id: req.params.recordId }, data: { data: req.body.data || req.body } });
+    const values = recordValues(req.body);
+    if (!values) return res.status(400).json({ error: 'data must be an object' });
+    const record = await prisma.customRecord.update({ where: { id: req.params.recordId }, data: { data: values } });
     res.json(record);
   } catch (err) { next(err); }
 });
 
-router.delete('/:id/records/:recordId', authenticate, async (req, res, next) => {
+router.delete('/:id/records/:recordId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try { await req.app.locals.prisma.customRecord.update({ where: { id: req.params.recordId }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
@@ -136,7 +160,7 @@ router.get('/:id/schema', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Search records of a custom object
-router.get('/:id/records/search', authenticate, async (req, res, next) => {
+router.get('/:id/records/search', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { q, limit = 25 } = req.query;
@@ -177,7 +201,7 @@ router.post('/:id/records/validate', authenticate, async (req, res, next) => {
 });
 
 // Bulk import records
-router.post('/:id/records/import', authenticate, auditMiddleware, async (req, res, next) => {
+router.post('/:id/records/import', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { records } = req.body;
@@ -185,7 +209,9 @@ router.post('/:id/records/import', authenticate, auditMiddleware, async (req, re
     let created = 0, errors = 0;
     for (const rec of records.slice(0, 500)) {
       try {
-        await prisma.customObjectRecord.create({ data: { objectId: req.params.id, data: rec, createdById: req.user.id } });
+        const values = recordValues(rec);
+        if (!values) { errors++; continue; }
+        await prisma.customObjectRecord.create({ data: { objectId: req.params.id, data: values, createdById: req.user.id } });
         created++;
       } catch (e) { errors++; }
     }

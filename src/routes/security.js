@@ -3,21 +3,33 @@ const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
+const bcrypt = require('bcryptjs');
+const { limiters } = require('../middleware/rateLimit');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
 const router = Router();
 
 // ─── SSO CONFIG ───
+// The client secret and signing certificate are written, never read back:
+// listing configs returned them whole at admin: read, which the default Read
+// Only role has. Responses say whether one is set.
+const presentSso = ({ clientSecret, certificateData, ...config }) => ({
+  ...config, hasClientSecret: !!clientSecret, hasCertificate: !!certificateData,
+});
+const ssoFields = body => {
+  const { id, createdAt, updatedAt, ...rest } = body || {};
+  return pickModelFields('ssoConfig', rest).data;
+};
 router.get('/sso', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.ssoConfig.findMany() }); } catch (err) { next(err); }
+  try { res.json({ data: (await req.app.locals.prisma.ssoConfig.findMany()).map(presentSso) }); } catch (err) { next(err); }
 });
 router.post('/sso', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.ssoConfig.create({ data: req.body })); } catch (err) { next(err); }
+  try { res.status(201).json(presentSso(await req.app.locals.prisma.ssoConfig.create({ data: ssoFields(req.body) }))); } catch (err) { next(err); }
 });
 router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: req.body })); } catch (err) { next(err); }
+  try { res.json(presentSso(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: ssoFields(req.body) }))); } catch (err) { next(err); }
 });
 // SSO login endpoint
 /**
@@ -42,13 +54,32 @@ router.post('/sso/login', async (req, res) => {
 });
 
 // ─── MFA ───
+
+/**
+ * Adding or removing a second factor takes the account's password, as a new
+ * sign-in email does. With a session alone, a thief could lock the owner out
+ * behind a device of their own, or strip the one the owner has.
+ */
+async function passwordConfirmed(req) {
+  const { currentPassword } = req.body || {};
+  if (typeof currentPassword !== 'string' || !currentPassword) return false;
+  const user = await req.app.locals.prisma.user.findUnique({ where: { id: req.userId }, select: { password: true } });
+  return !!user && bcrypt.compare(currentPassword, user.password);
+}
+
+const passwordRequired = res => res.status(403).json({
+  error: 'Enter your current password to change two-factor authentication',
+  code: 'PASSWORD_REQUIRED',
+});
+
 router.get('/mfa/devices', authenticate, async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.mfaDevice.findMany({ where: { userId: req.userId }, select: { id: true, type: true, verified: true, lastUsedAt: true, createdAt: true } }) }); }
   catch (err) { next(err); }
 });
-router.post('/mfa/enroll', authenticate, async (req, res, next) => {
+router.post('/mfa/enroll', authenticate, limiters.auth, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await passwordConfirmed(req))) return passwordRequired(res);
     const { type = 'totp' } = req.body;
     // crypto's Buffer has no 'base32' encoding, so the previous call threw
     // "Unknown encoding: base32" and enrolment never once succeeded.
@@ -115,9 +146,15 @@ router.post('/mfa/challenge', async (req, res, next) => {
     res.json({ challengeId: challenge.id, expiresIn: 300 });
   } catch (err) { next(err); }
 });
-router.delete('/mfa/devices/:id', authenticate, async (req, res, next) => {
-  try { await req.app.locals.prisma.mfaDevice.delete({ where: { id: req.params.id } }); res.json({ success: true }); }
-  catch (err) { next(err); }
+// Only the caller's own device. This deleted any account's device by id, so
+// anyone signed in could strip an administrator's second factor.
+router.delete('/mfa/devices/:id', authenticate, limiters.auth, async (req, res, next) => {
+  try {
+    if (!(await passwordConfirmed(req))) return passwordRequired(res);
+    const { count } = await req.app.locals.prisma.mfaDevice.deleteMany({ where: { id: req.params.id, userId: req.userId } });
+    if (!count) return res.status(404).json({ error: 'Device not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 // ─── ENCRYPTION POLICIES ───

@@ -1,11 +1,14 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
 const router = Router();
 router.use(authenticate);
 
 // Unified Profiles
-router.get('/profiles', async (req, res, next) => {
+// Profiles carry people's emails, phones and identifiers; these reads (and
+// resolve, which returns one by email) took a session alone.
+router.get('/profiles', requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const { email, segment, minScore, limit = 50 } = req.query;
     const where = {};
@@ -15,14 +18,15 @@ router.get('/profiles', async (req, res, next) => {
     res.json({ data: await req.app.locals.prisma.unifiedProfile.findMany({ where, take: Math.min(parseInt(limit), 200), orderBy: { score: 'desc' } }) });
   } catch (err) { next(err); }
 });
-router.get('/profiles/:id', async (req, res, next) => {
+router.get('/profiles/:id', requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const profile = await req.app.locals.prisma.unifiedProfile.findUnique({ where: { id: req.params.id } });
     if (!profile) return res.status(404).json({ error: 'Not found' });
     res.json(profile);
   } catch (err) { next(err); }
 });
-router.post('/profiles/resolve', async (req, res, next) => {
+// Finds or creates a profile, so it takes the gate merge uses for profile writes.
+router.post('/profiles/resolve', requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { email, phone, contactId, leadId } = req.body;
@@ -95,9 +99,12 @@ router.post('/streams/:id/ingest', async (req, res, next) => {
 module.exports = router;
 
 // Customer profile
-router.get('/profiles/:contactId', authenticate, async (req, res, next) => {
+// GET /profiles/:id above answers first, so this is not reached; guarded as a
+// contact read all the same, in case the order changes.
+router.get('/profiles/:contactId', authenticate, requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await canReach(req, 'contacts', 'contact', req.params.contactId))) return res.status(404).json({ error: 'Not found' });
     const contact = await prisma.contact.findUnique({ where: { id: req.params.contactId }, include: { account: { select: { name: true, industry: true } } } });
     if (!contact) return res.status(404).json({ error: 'Not found' });
     const [deals, cases, activities, events] = await Promise.all([
@@ -124,7 +131,9 @@ router.post('/events', authenticate, async (req, res, next) => {
 });
 
 // Segment contacts
-router.post('/segments/evaluate', authenticate, async (req, res, next) => {
+// Listed any contact's name and email for anyone signed in; now contacts read,
+// and only contacts the caller can see.
+router.post('/segments/evaluate', authenticate, requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { criteria } = req.body;
@@ -132,13 +141,16 @@ router.post('/segments/evaluate', authenticate, async (req, res, next) => {
     if (criteria?.leadSource) where.leadSource = criteria.leadSource;
     if (criteria?.hasDeals) where.deals = { some: { deletedAt: null } };
     if (criteria?.city) where.mailingCity = { contains: criteria.city, mode: 'insensitive' };
-    const contacts = await prisma.contact.findMany({ where, select: { id: true, firstName: true, lastName: true, email: true }, take: 500 });
+    const contacts = await prisma.contact.findMany({ where: await reachableWhere(req, 'contacts', 'contact', where), select: { id: true, firstName: true, lastName: true, email: true }, take: 500 });
     res.json({ criteria, matchCount: contacts.length, contacts: contacts.slice(0, 50) });
   } catch (err) { next(err); }
 });
 
 // Segment builder
-router.post('/segments/:id/evaluate', authenticate, async (req, res, next) => {
+// Returned any contact's name and email for anyone signed in; now contacts
+// read, and the sample holds only contacts the caller can see. The stored
+// memberCount stays the segment's size, not one user's view of it.
+router.post('/segments/:id/evaluate', authenticate, requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const segment = await prisma.segment.findUnique({ where: { id: req.params.id } });
@@ -149,8 +161,11 @@ router.post('/segments/:id/evaluate', authenticate, async (req, res, next) => {
     if (criteria.status) where.status = criteria.status;
     if (criteria.industry) where.industry = criteria.industry;
     if (criteria.createdAfter) where.createdAt = { gte: new Date(criteria.createdAfter) };
-    const contacts = await prisma.contact.findMany({ where, take: 1000, select: { id: true, firstName: true, lastName: true, email: true } });
-    await prisma.segment.update({ where: { id: segment.id }, data: { memberCount: contacts.length, lastEvaluatedAt: new Date() } });
+    const [memberCount, contacts] = await Promise.all([
+      prisma.contact.count({ where }),
+      prisma.contact.findMany({ where: await reachableWhere(req, 'contacts', 'contact', where), take: 1000, select: { id: true, firstName: true, lastName: true, email: true } }),
+    ]);
+    await prisma.segment.update({ where: { id: segment.id }, data: { memberCount, lastEvaluatedAt: new Date() } });
     res.json({ segmentId: segment.id, matchCount: contacts.length, sample: contacts.slice(0, 20) });
   } catch (err) { next(err); }
 });
@@ -174,21 +189,27 @@ router.get('/journeys/:id/analytics', authenticate, async (req, res, next) => {
 });
 
 // Profile unification
-router.post('/profiles/unify', authenticate, async (req, res, next) => {
+// A person's contact, lead, cases and activity, by email, went to anyone
+// signed in. It now takes contacts and leads read, and finds only records the
+// caller can see; cases only with cases read.
+router.post('/profiles/unify', authenticate, requirePermission('contacts', 'read'), requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
+    const byEmail = { email: { equals: email, mode: 'insensitive' } };
     const [contact, lead] = await Promise.all([
-      prisma.contact.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null } }),
-      prisma.lead.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null } }),
+      prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', byEmail) }),
+      prisma.lead.findFirst({ where: await reachableWhere(req, 'leads', 'lead', byEmail) }),
     ]);
     // A campaign member names its contact or lead by id; it has no relation
     // to filter through, so look the person up first.
     const memberOf = [contact && { contactId: contact.id }, lead && { leadId: lead.id }].filter(Boolean);
     const [cases, activities, campaignMembers] = await Promise.all([
-      prisma.case.findMany({ where: { contactEmail: email }, select: { id: true, subject: true, status: true } }),
-      prisma.activity.findMany({ where: { OR: [{ contact: { email } }] }, take: 10 }),
+      permits(req, 'cases', 'read')
+        ? prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', { contactEmail: email }), select: { id: true, subject: true, status: true } })
+        : [],
+      prisma.activity.findMany({ where: { contact: { is: await reachableWhere(req, 'contacts', 'contact', { email }) } }, take: 10 }),
       memberOf.length ? prisma.campaignMember.findMany({ where: { OR: memberOf }, include: { campaign: { select: { name: true } } } }) : [],
     ]);
     res.json({ email, contact, lead, cases, recentActivities: activities, campaigns: campaignMembers, unifiedAt: new Date() });

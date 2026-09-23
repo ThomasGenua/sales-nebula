@@ -4,7 +4,10 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
-const { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId } = require('./modelFields');
+const { moduleAccess, recordAccess, reachableWhere } = require('../middleware/access');
+const {
+  pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
+} = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
 const { createNumbered } = require('./numbering');
 const {
@@ -36,7 +39,25 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     // { field, prefix, width }: the record's human-readable number, which the
     // server assigns on create (see utils/numbering).
     numbering,
+    // (req, 'create') => nested writes the router builds itself, from fields
+    // it has checked; nothing nested comes from the request body.
+    nestedWrites,
+    // Columns only the module's own routes write (a document's stored file),
+    // never taken from a request body.
+    serverFields = [],
   } = options;
+
+  // What the server sets and a request body never does: the id, the
+  // timestamps, the soft-delete marker, who created the record, and the
+  // module's serverFields. A chosen id need not look like one, and the record
+  // check on /:id routes passes anything that does not; deletedAt let edit
+  // permission delete, or restore, what DELETE needs full permission for.
+  const SERVER_SET = ['id', 'createdAt', 'updatedAt', 'deletedAt', 'createdById', '_version', ...serverFields];
+  const fromClient = body => {
+    const data = { ...(body && typeof body === 'object' && !Array.isArray(body) ? body : {}) };
+    for (const key of SERVER_SET) delete data[key];
+    return data;
+  };
 
   // Relations the model really has go to Prisma; `account` on a model with only
   // `accountId` is loaded separately, so the response keeps its shape.
@@ -47,6 +68,14 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   // Apply auth + audit to all routes
   router.use(authenticate, auditMiddleware);
+
+  // Every route here answers to the module's permission and row security,
+  // the standard ones below and those a module adds (customRoutes, or routes
+  // appended to the router it gets back). The added ones had authenticate()
+  // alone, so a user with no access to deals could read a deal's timeline
+  // and emails, merge and delete accounts, or edit another rep's line items.
+  router.use(moduleAccess(moduleName));
+  router.param('id', recordAccess(moduleName, modelName));
 
   const guard = (opts = {}) => rowSecurity(moduleName, { ...opts, modelName });
 
@@ -124,7 +153,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   router.post('/', requirePermission(moduleName, 'edit'), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
-      let data = { ...req.body };
+      let data = fromClient(req.body);
 
       if (validate) {
         const { valid, errors } = validate(data);
@@ -168,9 +197,15 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         if (!data[field] && req.userId) data[field] = req.userId;
         break;
       }
+      // The creator is whoever made it; row security reads it as the owner
+      // of a record with no owner column (a document).
+      if (modelHasField(modelName, 'createdById') && req.userId) data.createdById = req.userId;
 
-      // A key the model does not have used to 500 the whole request.
-      const { data: createData, ignored } = pickModelFields(modelName, data);
+      // A key the model does not have used to 500 the whole request. Relation
+      // keys go too; a router whose records take nested rows (order items)
+      // builds them itself, from checked fields, in nestedWrites.
+      const { data: pickedData, ignored } = pickModelFields(modelName, data);
+      const createData = nestedWrites ? { ...pickedData, ...(await nestedWrites(req, 'create')) } : pickedData;
       const record = numbering
         ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
         : await prisma[modelName].create({ data: createData, include });
@@ -216,13 +251,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   router.put('/:id', idParam, requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
-      let data = { ...req.body };
-
-      // Strip protected fields
-      delete data.id;
-      delete data.createdAt;
-      delete data.updatedAt;
-      delete data._version;
+      let data = fromClient(req.body);
 
       // Optimistic locking check
       const expectedVersion = req.body._version || req.headers['if-match'];
@@ -348,6 +377,8 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   });
 
   // BULK DELETE - POST /bulk-delete
+  // Only rows the caller could delete one at a time. This deleted whatever
+  // ids it was sent, other reps' records included.
   router.post('/bulk-delete', requirePermission(moduleName, 'full'), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
@@ -355,24 +386,29 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       if (!ids || !Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'ids array required' });
       if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
 
-      const result = await prisma[modelName].deleteMany({ where: { id: { in: ids } } });
+      const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) } }, 'Full');
+      const result = await prisma[modelName].deleteMany({ where });
       await req.audit({ action: 'delete', module: moduleName, details: `Bulk deleted ${result.count} ${moduleName}` });
       res.json({ success: true, deleted: result.count });
     } catch (err) { next(err); }
   });
 
   // BULK UPDATE - POST /bulk-update
+  // The record's own plain columns, on rows the caller could edit one at a
+  // time. The body went to updateMany whole, on any ids: another rep's
+  // records, who owns them, a document's stored file path.
   router.post('/bulk-update', requirePermission(moduleName, 'edit'), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
       const { ids, data } = req.body;
-      if (!ids || !Array.isArray(ids) || !data) return res.status(400).json({ error: 'ids array and data required' });
+      if (!ids || !Array.isArray(ids) || !data || typeof data !== 'object') return res.status(400).json({ error: 'ids array and data required' });
       if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
 
-      // Strip dangerous fields
-      delete data.id; delete data.createdAt; delete data.updatedAt; delete data.password;
+      const changes = editableFields(modelName, fromClient(data));
+      if (!Object.keys(changes).length) return res.status(400).json({ error: 'No fields in data that a bulk update may change' });
 
-      const result = await prisma[modelName].updateMany({ where: { id: { in: ids } }, data });
+      const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) } }, 'Edit');
+      const result = await prisma[modelName].updateMany({ where, data: changes });
       await req.audit({ action: 'update', module: moduleName, details: `Bulk updated ${result.count} ${moduleName}` });
       res.json({ success: true, updated: result.count });
     } catch (err) { next(err); }

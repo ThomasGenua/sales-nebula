@@ -1,5 +1,6 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
 const {
   buildIndexEntry, projectRecord, parseQuery, rankResults,
   buildSnippet, tokenize, expandSynonyms, suggestCorrections,
@@ -14,6 +15,38 @@ const MODEL_FOR = {
   contracts: 'contract', documents: 'document', projects: 'project',
   campaigns: 'campaign', prospects: 'prospect', bugs: 'bug',
 };
+
+// The permission each indexed module answers to, where it is not its own.
+const PERMISSION_FOR = { prospects: 'leads', bugs: 'cases' };
+const permissionModule = module => PERMISSION_FOR[module] || module;
+
+/**
+ * The index entries whose record this user may read. The index holds a copy
+ * of every record's title and text, and search, suggestions and snippets
+ * answered from all of it: other reps' contacts, deals and cases, emails and
+ * phone numbers included.
+ */
+async function readableEntries(req, entries) {
+  const byModule = new Map();
+  for (const entry of entries) {
+    if (!byModule.has(entry.module)) byModule.set(entry.module, []);
+    byModule.get(entry.module).push(entry);
+  }
+  const keep = new Set();
+  for (const [module, list] of byModule) {
+    const model = MODEL_FOR[module];
+    const permission = permissionModule(module);
+    if (!model || !permits(req, permission, 'read')) continue;
+    const ids = [...new Set(list.map(e => e.recordId))];
+    const visible = await req.app.locals.prisma[model].findMany({
+      where: await reachableWhere(req, permission, model, { id: { in: ids } }),
+      select: { id: true },
+    });
+    const allowed = new Set(visible.map(v => v.id));
+    for (const entry of list) if (allowed.has(entry.recordId)) keep.add(entry);
+  }
+  return entries.filter(entry => keep.has(entry));
+}
 
 /** Write one record's index entry and its postings. */
 async function indexRecord(prisma, module, record) {
@@ -111,7 +144,7 @@ router.get('/', authenticate, async (req, res, next) => {
     if (parsed.filters.owner) indexWhere.ownerId = parsed.filters.owner;
     if (parsed.filters.status) indexWhere.status = parsed.filters.status;
 
-    const documents = await prisma.searchIndex.findMany({ where: indexWhere, take: 2000 });
+    const documents = await readableEntries(req, await prisma.searchIndex.findMany({ where: indexWhere, take: 2000 }));
     const byIndexId = new Map(documents.map(d => [d.id, d]));
 
     const postingsByIndex = new Map();
@@ -194,7 +227,8 @@ router.get('/suggest', authenticate, async (req, res, next) => {
       matches.push(...contains);
     }
 
-    res.json(matches.map(m => ({ ...m, url: `/${m.module}/${m.recordId}` })));
+    const readable = await readableEntries(req, matches);
+    res.json(readable.map(m => ({ ...m, url: `/${m.module}/${m.recordId}` })));
   } catch (err) { next(err); }
 });
 
@@ -225,8 +259,11 @@ router.post('/index/:module/:recordId', authenticate, async (req, res, next) => 
     const prisma = req.app.locals.prisma;
     const model = MODEL_FOR[req.params.module];
     if (!model) return res.status(400).json({ error: `Module ${req.params.module} is not indexable` });
+    // A record the caller can change; anyone could (re)index any record.
+    const permission = permissionModule(req.params.module);
+    if (!permits(req, permission, 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${permission}` });
 
-    const record = await prisma[model].findUnique({ where: { id: req.params.recordId } });
+    const record = await prisma[model].findFirst({ where: await reachableWhere(req, permission, model, { id: req.params.recordId }, 'Edit') });
     if (!record) return res.status(404).json({ error: 'Record not found' });
 
     const result = await indexRecord(prisma, req.params.module, record);
@@ -234,7 +271,8 @@ router.post('/index/:module/:recordId', authenticate, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-router.delete('/index/:module/:recordId', authenticate, async (req, res, next) => {
+// Dropping entries is index management; anyone could empty the index.
+router.delete('/index/:module/:recordId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const entry = await prisma.searchIndex.findFirst({ where: { module: req.params.module, recordId: req.params.recordId } });
@@ -321,7 +359,7 @@ router.post('/queue/drain', authenticate, requirePermission('admin', 'edit'), as
   } catch (err) { next(err); }
 });
 
-router.post('/queue', authenticate, async (req, res, next) => {
+router.post('/queue', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordId, operation } = req.body;

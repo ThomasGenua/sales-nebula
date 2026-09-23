@@ -13,8 +13,29 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { SAFE_METHODS, moduleAccess, canReach } = require('../middleware/access');
+const { buildAccessFilter } = require('../middleware/rowSecurity');
 
 const router = Router();
+
+// Consent rows and exports are contacts' personal data: contacts read to look,
+// contacts edit to record, and a contact a route names must be one the caller
+// can reach. All but /bulk took a session alone, for any contact.
+router.use(authenticate, moduleAccess('contacts'));
+router.param('contactId', async (req, res, next, contactId) => {
+  try {
+    const minLevel = SAFE_METHODS.has(req.method) ? 'Read' : 'Edit';
+    if (await canReach(req, 'contacts', 'contact', contactId, minLevel)) return next();
+    res.status(404).json({ error: 'Contact not found' });
+  } catch (err) { next(err); }
+});
+
+/** For a contact named in the body: 404 unless the caller may change it. */
+async function editableContact(req, res, contactId) {
+  if (await canReach(req, 'contacts', 'contact', contactId, 'Edit')) return true;
+  res.status(404).json({ error: 'Contact not found' });
+  return false;
+}
 
 const GRANTED = 'OptIn';
 const WITHDRAWN = 'OptOut';
@@ -54,6 +75,15 @@ router.get('/', authenticate, async (req, res, next) => {
     if (leadId) where.leadId = leadId;
     if (type) where.consentType = type;
 
+    // A row-restricted caller sees rows only for the contacts they can reach.
+    // ConsentRecord has no relation to Contact, so those are looked up first;
+    // rows with no contact (a lead or an email alone) are not scoped here.
+    const filter = await buildAccessFilter(prisma, req.user, 'contacts', { modelName: 'contact' });
+    if (filter) {
+      const visible = await prisma.contact.findMany({ where: filter, select: { id: true } });
+      where.OR = [{ contactId: null }, { contactId: { in: visible.map(c => c.id) } }];
+    }
+
     const [rows, total] = await Promise.all([
       prisma.consentRecord.findMany({
         where, orderBy: { createdAt: 'desc' }, take, skip: ((+page || 1) - 1) * take,
@@ -87,6 +117,7 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const subject = subjectFrom(req.body);
     if (!subject) return res.status(400).json({ error: 'One of contactId, leadId, personAccountId or email is required' });
     if (!type) return res.status(400).json({ error: 'type is required' });
+    if (subject.contactId && !(await editableContact(req, res, subject.contactId))) return;
 
     const record = await prisma.consentRecord.create({
       data: {
@@ -176,6 +207,7 @@ router.post('/opt-out', authenticate, auditMiddleware, async (req, res, next) =>
     const prisma = req.app.locals.prisma;
     const { contactId, types } = req.body;
     if (!contactId) return res.status(400).json({ error: 'contactId required' });
+    if (!(await editableContact(req, res, contactId))) return;
 
     const allTypes = Array.isArray(types) && types.length
       ? types
@@ -209,6 +241,7 @@ router.post('/data-request', authenticate, auditMiddleware, async (req, res, nex
     if (!['export', 'delete', 'erasure'].includes(requestType)) {
       return res.status(400).json({ error: 'requestType must be export or erasure' });
     }
+    if (!(await editableContact(req, res, contactId))) return;
 
     const contact = await prisma.contact.findUnique({ where: { id: contactId } });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });

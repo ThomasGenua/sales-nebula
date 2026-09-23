@@ -1,5 +1,21 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
+
+/**
+ * Whose activities a list shows: the caller's own, or another user's for an
+ * admin or that user's manager. `?userId=` used to return anyone's. Null
+ * when the caller may not see that user's.
+ */
+async function listedUserId(req) {
+  const userId = req.query.userId ? String(req.query.userId) : req.userId;
+  if (userId === req.userId || isAdmin(req.user)) return userId;
+  const reports = await subordinateUserIds(req.app.locals.prisma, req.user);
+  return reports.includes(userId) ? userId : null;
+}
+
+const NOT_YOURS = 'You can only list your own activities or those of people who report to you';
 
 module.exports = createCrudRouter('activity', 'activities', {
   include: {
@@ -19,15 +35,16 @@ module.exports = createCrudRouter('activity', 'activities', {
     router.get('/overdue/list', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
+        const userId = await listedUserId(req);
+        if (!userId) return res.status(403).json({ error: NOT_YOURS });
         const where = {
           date: { lt: new Date() },
           status: { notIn: ['Completed', 'Cancelled'] },
+          assignedId: userId,
         };
-        if (req.query.userId) where.assignedId = req.query.userId;
-        else where.assignedId = req.userId;
 
         const activities = await prisma.activity.findMany({
-          where,
+          where: await reachableWhere(req, 'activities', 'activity', where),
           include: {
             contact: { select: { id: true, firstName: true, lastName: true } },
             deal: { select: { id: true, name: true, stage: true } },
@@ -65,16 +82,18 @@ module.exports = createCrudRouter('activity', 'activities', {
     router.get('/calendar/range', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const { start, end, userId } = req.query;
+        const { start, end } = req.query;
         if (!start || !end) return res.status(400).json({ error: 'start and end dates required' });
+        const userId = await listedUserId(req);
+        if (!userId) return res.status(403).json({ error: NOT_YOURS });
 
         const where = {
           date: { gte: new Date(start), lte: new Date(end) },
+          assignedId: userId,
         };
-        if (userId) where.assignedId = userId;
 
         const activities = await prisma.activity.findMany({
-          where,
+          where: await reachableWhere(req, 'activities', 'activity', where),
           include: {
             contact: { select: { id: true, firstName: true, lastName: true } },
             deal: { select: { id: true, name: true } },

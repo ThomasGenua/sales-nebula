@@ -1,8 +1,21 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { editableFields } = require('../utils/modelFields');
 
 const router = Router();
+
+/**
+ * `where`, narrowed to the live prospects this user may see ('Read') or
+ * change ('Edit', 'Full'), by the row security of leads, whose permission
+ * prospects answer to. Every prospect, contact details included, went to
+ * anyone signed in, and any editor could change or delete anyone's.
+ */
+const visibleProspects = (req, where = {}, minLevel = 'Read') => reachableWhere(req, 'leads', 'prospect', where, minLevel);
+
+// Set by conversion and merging, never by an edit.
+const CONVERSION_FIELDS = ['convertedLeadId', 'convertedContactId', 'convertedAt', 'duplicateOfId'];
 
 /** Normalize an email for comparison and suppression checks. */
 function normalizeEmail(email) {
@@ -45,7 +58,7 @@ async function isSuppressed(prisma, email) {
 
 // ── PROSPECTS ─────────────────────────────────────────────────────────
 
-router.get('/', authenticate, async (req, res, next) => {
+router.get('/', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { search, status, source, ownerId, industry, minScore, converted, page = 1, limit = 50, sortBy = 'createdAt', sortDir = 'desc' } = req.query;
@@ -64,19 +77,20 @@ router.get('/', authenticate, async (req, res, next) => {
     if (minScore) where.score = { gte: +minScore };
     if (converted === 'true') where.convertedAt = { not: null };
     if (converted === 'false') where.convertedAt = null;
+    const visible = await visibleProspects(req, where);
 
     const [data, total] = await Promise.all([
-      prisma.prospect.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: { [sortBy]: sortDir } }),
-      prisma.prospect.count({ where }),
+      prisma.prospect.findMany({ where: visible, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: { [sortBy]: sortDir } }),
+      prisma.prospect.count({ where: visible }),
     ]);
     res.json({ data, total, page: +page, limit: +limit });
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const prospect = await prisma.prospect.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    const prospect = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id, deletedAt: null }) });
     if (!prospect) return res.status(404).json({ error: 'Prospect not found' });
 
     const memberships = await prisma.prospectListEntry.findMany({
@@ -122,19 +136,24 @@ router.post('/', authenticate, requirePermission('leads', 'edit'), auditMiddlewa
 router.put('/:id', authenticate, requirePermission('leads', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, lists, suppressed, ...data } = req.body;
+    const existing = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id }, 'Edit') });
+    if (!existing) return res.status(404).json({ error: 'Prospect not found' });
+
+    // Its own columns, less its owner, conversion and deletion: the body went
+    // to Prisma whole, so an editor could take a prospect over, mark it
+    // converted, or delete it (deletedAt) without leads:full.
+    const data = editableFields('prospect', req.body);
+    for (const key of CONVERSION_FIELDS) delete data[key];
     if (data.email) {
       data.email = normalizeEmail(data.email);
       if (!isValidEmail(data.email)) return res.status(400).json({ error: 'email is not a valid address' });
     }
     if (data.firstName || data.lastName) {
-      const existing = await prisma.prospect.findUnique({ where: { id: req.params.id } });
-      data.fullName = [data.firstName ?? existing?.firstName, data.lastName ?? existing?.lastName].filter(Boolean).join(' ');
+      data.fullName = [data.firstName ?? existing.firstName, data.lastName ?? existing.lastName].filter(Boolean).join(' ');
     }
-    const merged = { ...(await prisma.prospect.findUnique({ where: { id: req.params.id } })), ...data };
-    data.score = scoreProspect(merged);
+    data.score = scoreProspect({ ...existing, ...data });
 
-    const prospect = await prisma.prospect.update({ where: { id: req.params.id }, data });
+    const prospect = await prisma.prospect.update({ where: { id: existing.id }, data });
     res.json(prospect);
   } catch (err) { next(err); }
 });
@@ -142,7 +161,11 @@ router.put('/:id', authenticate, requirePermission('leads', 'edit'), async (req,
 router.delete('/:id', authenticate, requirePermission('leads', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.prospect.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    const { count } = await prisma.prospect.updateMany({
+      where: await visibleProspects(req, { id: req.params.id }, 'Full'),
+      data: { deletedAt: new Date() },
+    });
+    if (!count) return res.status(404).json({ error: 'Prospect not found' });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
@@ -204,7 +227,8 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
     const { target = 'lead' } = req.body;
     if (!['lead', 'contact'].includes(target)) return res.status(400).json({ error: 'target must be lead or contact' });
 
-    const prospect = await prisma.prospect.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    // Converting copies the prospect's details into the response.
+    const prospect = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id }, 'Edit') });
     if (!prospect) return res.status(404).json({ error: 'Prospect not found' });
     if (prospect.convertedAt) return res.status(409).json({ error: 'Prospect has already been converted', convertedAt: prospect.convertedAt });
 
@@ -245,17 +269,21 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
 });
 
 // Merge duplicates, keeping the surviving record's non-empty fields
-router.post('/:id/merge', authenticate, requirePermission('leads', 'edit'), auditMiddleware, async (req, res, next) => {
+// It deletes the duplicates, so it takes the full permission DELETE does.
+router.post('/:id/merge', authenticate, requirePermission('leads', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { duplicateIds } = req.body;
     if (!Array.isArray(duplicateIds) || !duplicateIds.length) return res.status(400).json({ error: 'duplicateIds array required' });
     if (duplicateIds.includes(req.params.id)) return res.status(400).json({ error: 'Cannot merge a record into itself' });
 
-    const survivor = await prisma.prospect.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    // Both sides must be within reach: merging copied a duplicate's details
+    // into the survivor, so naming someone else's prospect read and retired
+    // it. A duplicate is deleted, so it takes the row access DELETE does.
+    const survivor = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id }, 'Edit') });
     if (!survivor) return res.status(404).json({ error: 'Prospect not found' });
 
-    const duplicates = await prisma.prospect.findMany({ where: { id: { in: duplicateIds }, deletedAt: null } });
+    const duplicates = await prisma.prospect.findMany({ where: await visibleProspects(req, { id: { in: duplicateIds.map(String) } }, 'Full') });
     const filled = { ...survivor };
     for (const dupe of duplicates) {
       for (const [k, v] of Object.entries(dupe)) {
@@ -279,11 +307,11 @@ router.post('/:id/merge', authenticate, requirePermission('leads', 'edit'), audi
   } catch (err) { next(err); }
 });
 
-router.get('/duplicates/find', authenticate, async (req, res, next) => {
+router.get('/duplicates/find', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const prospects = await prisma.prospect.findMany({
-      where: { deletedAt: null, email: { not: null } },
+      where: await visibleProspects(req, { deletedAt: null, email: { not: null } }),
       select: { id: true, email: true, firstName: true, lastName: true, accountName: true, score: true, createdAt: true },
       take: 10000,
     });
@@ -352,9 +380,11 @@ router.get('/lists/:id/members', authenticate, async (req, res, next) => {
       prisma.prospectListEntry.count({ where: { listId: req.params.id } }),
     ]);
 
+    // A member's prospect record only where the caller may read it: any list,
+    // filled from every prospect, handed all of them to anyone signed in.
     const prospectIds = entries.map(e => e.prospectId).filter(Boolean);
-    const prospects = prospectIds.length
-      ? await prisma.prospect.findMany({ where: { id: { in: prospectIds } } })
+    const prospects = prospectIds.length && permits(req, 'leads', 'read')
+      ? await prisma.prospect.findMany({ where: await visibleProspects(req, { id: { in: prospectIds } }) })
       : [];
     const byId = new Map(prospects.map(p => [p.id, p]));
 
@@ -502,11 +532,11 @@ router.post('/suppression/check', authenticate, async (req, res, next) => {
 
 // ── ANALYTICS ─────────────────────────────────────────────────────────
 
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
+router.get('/analytics/summary', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const prospects = await prisma.prospect.findMany({
-      where: { deletedAt: null },
+      where: await visibleProspects(req, { deletedAt: null }),
       select: { status: true, source: true, industry: true, score: true, convertedAt: true, emailOptOut: true, email: true, country: true },
       take: 20000,
     });

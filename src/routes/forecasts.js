@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
+const { pickModelFields } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = Router();
@@ -11,6 +13,40 @@ const include = {
   territory: { select: { id: true, name: true } },
   items: { include: { deal: { select: { id: true, name: true, stage: true, value: true, probability: true, closeDate: true, account: { select: { id: true, name: true } } } } } },
 };
+
+/** Whether the caller is an admin or sits above `userId` in the role hierarchy. */
+async function managesUser(req, userId) {
+  if (isAdmin(req.user)) return true;
+  return (await subordinateUserIds(req.app.locals.prisma, req.user)).includes(userId);
+}
+
+/**
+ * A forecast is changed by its owner (userId), a manager above them or an
+ * admin, and approved only by a manager or an admin, never its owner.
+ * deals:edit, which every rep holds, was the only check, so a rep could
+ * approve their own forecast and edit or delete a colleague's.
+ */
+function forecastAccess({ approve = false } = {}) {
+  return async (req, res, next) => {
+    try {
+      const forecast = await req.app.locals.prisma.forecast.findUnique({ where: { id: req.params.id }, select: { userId: true } });
+      if (!forecast) return res.status(404).json({ error: 'Not found' });
+      const isOwner = forecast.userId === req.userId;
+      if (approve && isOwner) return res.status(403).json({ error: 'You cannot approve your own forecast' });
+      if (isOwner || await managesUser(req, forecast.userId)) return next();
+      res.status(403).json({
+        error: approve
+          ? 'Only a manager of the forecast owner or an admin can approve it'
+          : 'Only the forecast owner, their manager or an admin can change it',
+      });
+    } catch (err) { next(err); }
+  };
+}
+
+// What PUT may change. The body went to Prisma whole, so a caller could hand
+// a forecast to someone else or mark it Approved. Status moves through submit
+// and approve; the totals are summed from the items.
+const EDITABLE_FIELDS = ['name', 'period', 'periodStart', 'periodEnd', 'quotaAmount', 'territoryId', 'notes'];
 
 // LIST forecasts
 router.get('/', requirePermission('deals', 'read'), async (req, res, next) => {
@@ -40,7 +76,15 @@ router.get('/:id', requirePermission('deals', 'read'), async (req, res, next) =>
 router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { period, periodStart, periodEnd, quotaAmount, territoryId, ...rest } = req.body;
+    const { period, periodStart, periodEnd, quotaAmount, territoryId, userId, status, ...rest } = req.body;
+
+    // The creator owns it unless a manager or admin files it for a report, and
+    // it starts Open. `rest` overrode both, so a rep could file an Approved
+    // forecast, or one in a colleague's name.
+    const forecastUserId = userId || req.userId;
+    if (forecastUserId !== req.userId && !(await managesUser(req, forecastUserId))) {
+      return res.status(403).json({ error: 'You can only create forecasts for yourself or your reports' });
+    }
 
     // Get open deals closing in this period
     const deals = await prisma.deal.findMany({
@@ -81,11 +125,15 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
         period,
         periodStart: new Date(periodStart),
         periodEnd: new Date(periodEnd),
-        userId: req.userId,
+        userId: forecastUserId,
         quotaAmount: quotaAmount || 0,
         commit, bestCase, pipeline, closed,
         territoryId: territoryId || null,
-        ...rest,
+        // Only the fields PUT may change: `rest` could also override the
+        // totals summed above, or carry nested writes.
+        ...pickModelFields('forecast', Object.fromEntries(
+          EDITABLE_FIELDS.filter(f => rest[f] !== undefined && !['period', 'periodStart', 'periodEnd', 'quotaAmount', 'territoryId'].includes(f)).map(f => [f, rest[f]])
+        )).data,
         items: { create: items },
       },
       include,
@@ -97,22 +145,31 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
 });
 
 // UPDATE forecast
-router.put('/:id', requirePermission('deals', 'edit'), async (req, res, next) => {
+router.put('/:id', requirePermission('deals', 'edit'), forecastAccess(), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, id, createdAt, updatedAt, user, territory, ...data } = req.body;
+    const body = req.body || {};
+    const { data } = pickModelFields('forecast', Object.fromEntries(
+      EDITABLE_FIELDS.filter(f => body[f] !== undefined).map(f => [f, body[f]])
+    ));
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data, include });
     res.json(forecast);
   } catch (err) { next(err); }
 });
 
 // UPDATE forecast item (recategorize or override)
-router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), async (req, res, next) => {
+router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), forecastAccess(), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { category, overrideAmount, notes } = req.body;
+    // An item of the forecast in the path: any forecast's items went by id.
+    const onForecast = await prisma.forecastItem.findFirst({
+      where: { id: req.params.itemId, forecastId: req.params.id },
+      select: { id: true },
+    });
+    if (!onForecast) return res.status(404).json({ error: 'Not found' });
     const item = await prisma.forecastItem.update({
-      where: { id: req.params.itemId },
+      where: { id: onForecast.id },
       data: { ...(category && { category }), ...(overrideAmount !== undefined && { overrideAmount }), ...(notes && { notes }) },
       include: { deal: true },
     });
@@ -130,7 +187,7 @@ router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), async (req,
 });
 
 // SUBMIT forecast
-router.post('/:id/submit', requirePermission('deals', 'edit'), async (req, res, next) => {
+router.post('/:id/submit', requirePermission('deals', 'edit'), forecastAccess(), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data: { status: 'Submitted' }, include });
@@ -140,7 +197,7 @@ router.post('/:id/submit', requirePermission('deals', 'edit'), async (req, res, 
 });
 
 // APPROVE forecast
-router.post('/:id/approve', requirePermission('deals', 'edit'), async (req, res, next) => {
+router.post('/:id/approve', requirePermission('deals', 'edit'), forecastAccess({ approve: true }), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data: { status: 'Approved' }, include });
@@ -226,7 +283,7 @@ router.get('/stats/rollup', requirePermission('deals', 'read'), async (req, res,
 });
 
 // DELETE
-router.delete('/:id', requirePermission('deals', 'full'), async (req, res, next) => {
+router.delete('/:id', requirePermission('deals', 'full'), forecastAccess(), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     await prisma.forecast.delete({ where: { id: req.params.id } });

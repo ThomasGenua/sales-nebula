@@ -476,6 +476,8 @@ Permissions are defined per module at the role level with three tiers:
 | `edit` | Create and update records |
 | `full` | All operations including delete and admin actions |
 
+Nobody grants more than they hold. Creating or inviting a user, approving a signup, changing someone's role, or creating or editing a role is refused when the role involved has a higher level on any module than the person making the change, and only an administrator can grant or manage the Admin role or change an administrator's account. Invites and signup approvals take `users: full`, as creating a user does.
+
 Each user is assigned one role. The role contains a set of `Permission` records, each specifying a module name and access level. The `requirePermission(module, level)` middleware enforces these at the route level.
 
 ### API Key Authentication

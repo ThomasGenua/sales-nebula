@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { pickModelFields } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
@@ -48,8 +48,9 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
     // Same reason as the shared CRUD router: one stray key (an "amount" that the
     // model spells subtotal/total) made Prisma reject the entire input.
     const { data } = pickModelFields('invoice', rest);
+    // Each line cut down to an invoice item's columns; they went in as sent.
     const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
-      data: { ...data, items: { create: items || [] } },
+      data: { ...data, items: { create: Array.isArray(items) ? items.map(i => lineItemFields(i, { discount: false })) : [] } },
       include,
     });
     await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id });
@@ -60,13 +61,18 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
 router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, id, createdAt, updatedAt, ...data } = req.body;
-    if (items) await prisma.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } });
-    const invoice = await prisma.invoice.update({
+    const { items, id, createdAt, updatedAt, ...rest } = req.body || {};
+    // Real columns only, and no nested writes: the body went to Prisma whole.
+    const { data } = pickModelFields('invoice', rest);
+    const lines = Array.isArray(items) ? items.map(i => lineItemFields(i, { discount: false })) : null;
+    const writes = [];
+    if (lines) writes.push(prisma.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } }));
+    writes.push(prisma.invoice.update({
       where: { id: req.params.id },
-      data: { ...data, ...(items && { items: { create: items } }) },
+      data: { ...data, ...(lines && { items: { create: lines } }) },
       include,
-    });
+    }));
+    const invoice = (await prisma.$transaction(writes)).pop();
     res.json(invoice);
   } catch (err) { next(err); }
 });

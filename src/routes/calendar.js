@@ -2,6 +2,8 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { editableFields } = require('../utils/modelFields');
 const {
   parseRRule, expandRecurrence, describeRRule,
   buildICalendar, parseICalendar, findFreeSlots, mergeIntervals,
@@ -81,6 +83,42 @@ async function expandEventsInRange(prisma, where, rangeStart, rangeEnd, opts = {
   return occurrences.sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
 }
 
+// ── WHO SEES AND CHANGES AN EVENT ─────────────────────────────────────
+// An event is its owner's and its invitees'. These routes took any event id,
+// and the list returned every user's calendar to anyone signed in.
+
+// What its owner marked private stays with the people in the event, even
+// when an admin looks across everyone's calendars.
+const PRIVATE_VISIBILITY = ['Private', 'Confidential'];
+
+/** Events the user owns or is invited to (an edited occurrence, through its series). */
+function participantWhere(userId) {
+  return {
+    OR: [
+      { ownerId: userId },
+      { invitees: { some: { userId } } },
+      { parentEvent: { is: { invitees: { some: { userId } } } } },
+    ],
+  };
+}
+
+/** Events the user may see: their own and their invitations; for an admin, anyone's not marked private. */
+function visibleEventWhere(user) {
+  if (!isAdmin(user)) return participantWhere(user.id);
+  return { OR: [participantWhere(user.id), { visibility: { notIn: PRIVATE_VISIBILITY } }] };
+}
+
+/** Events the user may change: those they own or organize, or any for an admin. */
+function editableEventWhere(user) {
+  if (isAdmin(user)) return {};
+  return { OR: [{ ownerId: user.id }, { invitees: { some: { userId: user.id, isOrganizer: true } } }] };
+}
+
+/** A live event by id, when `scope` lets the user at it; null otherwise. */
+function findEvent(prisma, id, scope, args = {}) {
+  return prisma.calendarEvent.findFirst({ where: { AND: [{ id: String(id), deletedAt: null }, scope] }, ...args });
+}
+
 // ── EVENTS ────────────────────────────────────────────────────────────
 
 // List / expand events in a date range
@@ -102,7 +140,10 @@ router.get('/events', authenticate, async (req, res, next) => {
     if (contactId) where.contactId = contactId;
     if (dealId) where.dealId = dealId;
 
-    const events = await expandEventsInRange(prisma, where, rangeStart, rangeEnd, {
+    // Filters narrow what the caller may see; with none, that is their own
+    // events and the ones they are invited to (for an admin, anyone's not
+    // marked private).
+    const events = await expandEventsInRange(prisma, { AND: [where, visibleEventWhere(req.user)] }, rangeStart, rangeEnd, {
       include: { invitees: true, reminders: true },
     });
 
@@ -137,7 +178,8 @@ router.get('/view/:mode', authenticate, async (req, res, next) => {
       return res.status(400).json({ error: 'mode must be day, week, month, or agenda' });
     }
 
-    const where = req.query.all === 'true' ? {} : { ownerId: req.user.id };
+    // Everyone's calendar is an admin's view; all=true showed it to anyone.
+    const where = req.query.all === 'true' && isAdmin(req.user) ? visibleEventWhere(req.user) : { ownerId: req.user.id };
     const events = await expandEventsInRange(prisma, where, rangeStart, rangeEnd, { include: { invitees: true } });
 
     // Bucket by ISO date for direct grid rendering
@@ -157,8 +199,7 @@ router.get('/events/:id', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const [baseId, occurrenceIso] = req.params.id.split('::');
 
-    const event = await prisma.calendarEvent.findFirst({
-      where: { id: baseId, deletedAt: null },
+    const event = await findEvent(prisma, baseId, visibleEventWhere(req.user), {
       include: { invitees: true, reminders: true, bookings: { include: { resource: true } }, exceptions: true },
     });
     if (!event) return res.status(404).json({ error: 'Event not found' });
@@ -265,17 +306,22 @@ router.put('/events/:id', authenticate, requirePermission('activities', 'edit'),
     const [baseId, occurrenceIso] = req.params.id.split('::');
     const scope = req.body.scope || (occurrenceIso ? 'occurrence' : 'series');
 
-    const master = await prisma.calendarEvent.findFirst({ where: { id: baseId, deletedAt: null } });
+    // Its owner's or organizer's to change; activities:edit alone changed anyone's.
+    const master = await findEvent(prisma, baseId, editableEventWhere(req.user));
     if (!master) return res.status(404).json({ error: 'Event not found' });
 
-    const { scope: _s, invitees: _i, reminders: _r, resourceIds: _rid, ...fields } = req.body;
+    const { scope: _s, invitees: _i, reminders: _r, resourceIds: _rid, ...body } = req.body;
+    // The event's own columns, less its owner and its place in a series:
+    // relation keys and parentEventId let a caller pull other people's events
+    // into their own series, and so into their calendar.
+    const fields = editableFields('calendarEvent', body);
+    for (const key of ['parentEventId', 'originalStart', 'isException', 'externalUid']) delete fields[key];
     if (fields.startAt) fields.startAt = new Date(fields.startAt);
     if (fields.endAt) fields.endAt = new Date(fields.endAt);
     if (fields.startAt && fields.endAt && fields.endAt <= fields.startAt) {
       return res.status(400).json({ error: 'endAt must be after startAt' });
     }
     if (fields.rrule && !parseRRule(fields.rrule)) return res.status(400).json({ error: 'Invalid RRULE' });
-    delete fields.id; delete fields.ownerId; delete fields.createdAt;
 
     // Single occurrence of a series: materialize an exception record
     if (scope === 'occurrence' && occurrenceIso && master.isRecurring) {
@@ -350,7 +396,8 @@ router.delete('/events/:id', authenticate, requirePermission('activities', 'edit
     const [baseId, occurrenceIso] = req.params.id.split('::');
     const scope = req.query.scope || (occurrenceIso ? 'occurrence' : 'series');
 
-    const master = await prisma.calendarEvent.findFirst({ where: { id: baseId, deletedAt: null } });
+    // Its owner's or organizer's to delete; activities:edit alone deleted anyone's.
+    const master = await findEvent(prisma, baseId, editableEventWhere(req.user));
     if (!master) return res.status(404).json({ error: 'Event not found' });
 
     if (scope === 'occurrence' && occurrenceIso && master.isRecurring) {
@@ -372,7 +419,7 @@ router.delete('/events/:id', authenticate, requirePermission('activities', 'edit
 });
 
 // Move / resize (drag-and-drop support)
-router.patch('/events/:id/move', authenticate, auditMiddleware, async (req, res, next) => {
+router.patch('/events/:id/move', authenticate, requirePermission('activities', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [baseId] = req.params.id.split('::');
@@ -381,6 +428,10 @@ router.patch('/events/:id/move', authenticate, auditMiddleware, async (req, res,
     const s = new Date(startAt), e = new Date(endAt);
     if (e <= s) return res.status(400).json({ error: 'endAt must be after startAt' });
 
+    // This moved anyone's event with a session alone.
+    if (!(await findEvent(prisma, baseId, editableEventWhere(req.user), { select: { id: true } }))) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
     const updated = await prisma.calendarEvent.update({ where: { id: baseId }, data: { startAt: s, endAt: e } });
     const rems = await prisma.reminder.findMany({ where: { eventId: baseId, status: 'Pending' } });
     for (const r of rems) {
@@ -397,20 +448,25 @@ router.get('/events/:id/invitees', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [baseId] = req.params.id.split('::');
+    // Who is in an event is as private as the event.
+    if (!(await findEvent(prisma, baseId, visibleEventWhere(req.user), { select: { id: true } }))) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
     const invitees = await prisma.eventInvitee.findMany({ where: { eventId: baseId }, orderBy: [{ isOrganizer: 'desc' }, { createdAt: 'asc' }] });
     const summary = invitees.reduce((acc, i) => { acc[i.responseStatus] = (acc[i.responseStatus] || 0) + 1; return acc; }, {});
     res.json({ total: invitees.length, summary, invitees });
   } catch (err) { next(err); }
 });
 
-router.post('/events/:id/invitees', authenticate, auditMiddleware, async (req, res, next) => {
+router.post('/events/:id/invitees', authenticate, requirePermission('activities', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [baseId] = req.params.id.split('::');
     const list = Array.isArray(req.body) ? req.body : (req.body.invitees || [req.body]);
     if (!list.length) return res.status(400).json({ error: 'invitees required' });
 
-    const event = await prisma.calendarEvent.findFirst({ where: { id: baseId, deletedAt: null } });
+    // The organizer's to invite to; anyone could add themselves to any event.
+    const event = await findEvent(prisma, baseId, editableEventWhere(req.user));
     if (!event) return res.status(404).json({ error: 'Event not found' });
 
     const created = [];
@@ -456,10 +512,16 @@ router.post('/events/:id/respond', authenticate, auditMiddleware, async (req, re
   } catch (err) { next(err); }
 });
 
-router.delete('/events/:eventId/invitees/:inviteeId', authenticate, async (req, res, next) => {
+router.delete('/events/:eventId/invitees/:inviteeId', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const invitee = await prisma.eventInvitee.findUnique({ where: { id: req.params.inviteeId } });
+    // An invitee of this event, which the caller organizes: this took any
+    // invitee id and never looked at the event.
+    const [baseId] = req.params.eventId.split('::');
+    if (!(await findEvent(prisma, baseId, editableEventWhere(req.user), { select: { id: true } }))) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    const invitee = await prisma.eventInvitee.findFirst({ where: { id: req.params.inviteeId, eventId: baseId } });
     if (!invitee) return res.status(404).json({ error: 'Invitee not found' });
     if (invitee.isOrganizer) return res.status(400).json({ error: 'Cannot remove the organizer' });
     await prisma.eventInvitee.delete({ where: { id: req.params.inviteeId } });
@@ -601,7 +663,8 @@ router.post('/reminders', authenticate, async (req, res, next) => {
 
     let triggerAt;
     if (eventId) {
-      const ev = await prisma.calendarEvent.findFirst({ where: { id: eventId, deletedAt: null } });
+      // A reminder hands back its event's title, place and link (/reminders/due).
+      const ev = await findEvent(prisma, eventId, visibleEventWhere(req.user));
       if (!ev) return res.status(404).json({ error: 'Event not found' });
       triggerAt = new Date(new Date(ev.startAt).getTime() - minutesBefore * 60000);
     } else {
@@ -765,10 +828,15 @@ router.post('/resources/:id/book', authenticate, auditMiddleware, async (req, re
   } catch (err) { next(err); }
 });
 
-router.post('/bookings/:id/cancel', authenticate, async (req, res, next) => {
+router.post('/bookings/:id/cancel', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const booking = await prisma.resourceBooking.update({ where: { id: req.params.id }, data: { status: 'Cancelled' } });
+    // The booker's to cancel, or the organizer's of the event it is for; this
+    // cancelled anyone's booking with a session alone.
+    const whose = isAdmin(req.user) ? {} : { OR: [{ bookedById: req.user.id }, { event: { is: editableEventWhere(req.user) } }] };
+    const found = await prisma.resourceBooking.findFirst({ where: { id: req.params.id, ...whose }, select: { id: true } });
+    if (!found) return res.status(404).json({ error: 'Booking not found' });
+    const booking = await prisma.resourceBooking.update({ where: { id: found.id }, data: { status: 'Cancelled' } });
     res.json(booking);
   } catch (err) { next(err); }
 });
@@ -892,8 +960,8 @@ router.get('/events/:id/export.ics', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const [baseId] = req.params.id.split('::');
-    const event = await prisma.calendarEvent.findFirst({
-      where: { id: baseId, deletedAt: null },
+    // The same event GET /events/:id would show, and no other.
+    const event = await findEvent(prisma, baseId, visibleEventWhere(req.user), {
       include: { invitees: true, reminders: true },
     });
     if (!event) return res.status(404).json({ error: 'Event not found' });

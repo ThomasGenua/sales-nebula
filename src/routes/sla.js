@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const {
   DEFAULT_SCHEDULE, DEFAULT_SLA_TARGETS,
   isWithinBusinessHours, businessMinutesBetween, businessHoursBetween,
@@ -263,11 +264,13 @@ router.get('/status', authenticate, async (req, res, next) => {
 });
 
 // ── CASE SLA ──────────────────────────────────────────────────────────
+// Case data: the cases permission, and only cases row security lets the
+// caller see. These answered anyone signed in, about every case.
 
-router.get('/cases/:id', authenticate, async (req, res, next) => {
+router.get('/cases/:id', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const c = await prisma.case.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    const c = await prisma.case.findFirst({ where: await reachableWhere(req, 'cases', 'case', { id: req.params.id }) });
     if (!c) return res.status(404).json({ error: 'Case not found' });
 
     const config = await loadProfile(prisma, req.query.businessHoursId);
@@ -295,7 +298,7 @@ router.get('/cases/:id', authenticate, async (req, res, next) => {
 });
 
 // SLA board across open cases
-router.get('/cases', authenticate, async (req, res, next) => {
+router.get('/cases', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { status, priority, ownerId, slaStatus, limit = 100 } = req.query;
@@ -306,7 +309,7 @@ router.get('/cases', authenticate, async (req, res, next) => {
     if (priority) where.priority = priority;
     if (ownerId) where.ownerId = ownerId;
 
-    const cases = await prisma.case.findMany({ where, take: Math.min(+limit, 500), orderBy: { createdAt: 'asc' } });
+    const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', where), take: Math.min(+limit, 500), orderBy: { createdAt: 'asc' } });
     const config = await loadProfile(prisma, req.query.businessHoursId);
 
     const rows = [];
@@ -414,14 +417,15 @@ router.put('/targets', authenticate, requirePermission('admin', 'edit'), auditMi
   } catch (err) { next(err); }
 });
 
-router.get('/report', authenticate, async (req, res, next) => {
+router.get('/report', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const days = parseInt(req.query.days, 10) || 30;
     const since = new Date(Date.now() - days * 86400000);
     const config = await loadProfile(prisma, req.query.businessHoursId);
 
-    const cases = await prisma.case.findMany({ where: { deletedAt: null, createdAt: { gte: since } }, take: 5000 });
+    // Over the cases the caller can see, as GET /cases is.
+    const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', { createdAt: { gte: since } }), take: 5000 });
 
     const byPriority = {};
     let met = 0, missed = 0, open = 0;

@@ -1,15 +1,36 @@
 const { Router } = require('express');
 const { auditMiddleware } = require("../middleware/audit");
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
+const { canReach } = require('../middleware/access');
+const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
+const { crudModelFor } = require('../utils/crud');
 
 const router = Router();
 router.use(authenticate);
+
+/**
+ * Whether the caller may read a record's history: the module's read
+ * permission, and a record they can see. Otherwise answers and returns false.
+ * These took any record id with authenticate() alone, so anyone read any
+ * record's activities, emails, notes, cases, audit log and chatter.
+ */
+async function readableRecord(req, res, module, id) {
+  const modelName = crudModelFor(module);
+  if (!modelName) { res.status(400).json({ error: `No timeline for ${module}` }); return false; }
+  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
+  // canReach passes any id in a module nothing restricts, and the audit log,
+  // chatter and feed match on the id alone, so the id must be this module's.
+  const exists = await req.app.locals.prisma[modelName].findFirst({ where: { id: String(id) }, select: { id: true } });
+  if (!exists || !(await canReach(req, module, modelName, id))) { res.status(404).json({ error: 'Not found' }); return false; }
+  return true;
+}
 
 // GET /api/timeline/:module/:recordId - Unified activity timeline for any record
 router.get('/:module/:recordId', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordId } = req.params;
+    if (!(await readableRecord(req, res, module, recordId))) return;
     const { limit = 50, before } = req.query;
     const take = Math.min(parseInt(limit) || 50, 200);
     const cursor = before ? { createdAt: { lt: new Date(before) } } : {};
@@ -98,6 +119,7 @@ router.get('/record/:module/:id/unified', authenticate, async (req, res, next) =
   try {
     const prisma = req.app.locals.prisma;
     const { module, id } = req.params;
+    if (!(await readableRecord(req, res, module, id))) return;
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId', cases: 'caseId' }[module] || 'parentId';
     const [activities, notes, feedItems, emails] = await Promise.all([
       prisma.activity.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
@@ -120,6 +142,7 @@ router.get('/stats/:module/:id', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, id } = req.params;
+    if (!(await readableRecord(req, res, module, id))) return;
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId' }[module] || 'parentId';
     const [actCount, noteCount, emailCount, lastActivity] = await Promise.all([
       prisma.activity.count({ where: { [parentField]: id, deletedAt: null } }).catch(() => 0),
@@ -136,6 +159,7 @@ router.get('/:module/:id/analytics', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, id } = req.params;
+    if (!(await readableRecord(req, res, module, id))) return;
     const events = await prisma.timelineEvent.findMany({ where: { parentModule: module, parentId: id, deletedAt: null } });
     const byType = {};
     const byMonth = {};
@@ -156,9 +180,20 @@ router.get('/aggregate', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, ids, limit = 50 } = req.query;
-    const where = { deletedAt: null };
-    if (module) where.parentModule = module;
-    if (ids) where.parentId = { in: ids.split(',') };
+    // This returned every record's events, in every module, to anyone signed
+    // in. Now: one module the caller may read, and only records they can see.
+    const modelName = crudModelFor(module);
+    if (!modelName) return res.status(400).json({ error: 'module must name a record module' });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    const where = { deletedAt: null, parentModule: module };
+    const requested = ids ? { id: { in: ids.split(',') } } : {};
+    const filter = await buildAccessFilter(prisma, req.user, module, { modelName });
+    if (filter) {
+      const visible = await prisma[modelName].findMany({ where: applyAccessFilter(requested, filter), select: { id: true } });
+      where.parentId = { in: visible.map(r => r.id) };
+    } else if (ids) {
+      where.parentId = requested.id;
+    }
     const events = await prisma.timelineEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit,
       select: { id: true, type: true, title: true, body: true, parentModule: true, parentId: true, createdAt: true, metadata: true } });
     res.json({ count: events.length, events });

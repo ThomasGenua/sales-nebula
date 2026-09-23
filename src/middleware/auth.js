@@ -18,6 +18,7 @@ const { resolveJwtSecret } = require('../utils/secrets');
 const { ACCESS_COOKIE, readCookie, csrfValid, needsCsrf } = require('../utils/sessionCookies');
 const { hashApiKey } = require('../utils/apiKeys');
 const { ACCESS_TOKEN_PREFIX, findAccessGrant, appTokenRefusal } = require('../services/oauth');
+const { isAdmin } = require('./rowSecurity');
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
@@ -120,6 +121,77 @@ function signToken(userId, role) {
   return signAccessToken(userId, role);
 }
 
+// ─── CUSTOMER PORTAL ACCOUNTS ───
+// A portal account (User.isPortalUser) belongs to a customer's contact. It
+// signs in like staff, and its session used to open every route that checks
+// only for one: search, feeds, notes, calendars, timelines. It now reaches
+// its own account and the portal, and nothing else.
+const PORTAL_ROUTES = [
+  { method: 'GET', path: '/api/auth/me' },
+  { method: 'PUT', path: '/api/auth/me' },
+  { method: 'POST', path: '/api/auth/change-password' },
+  { prefix: '/api/security/mfa' },
+  { prefix: '/api/portal/my' },
+  { method: 'GET', path: '/api/portal/config' },
+  { method: 'PUT', pattern: /^\/api\/portal\/users\/[^/]+\/profile$/ },
+];
+
+/** Why a portal account may not make this request, or null when it may. */
+function portalRefusal(req) {
+  const path = `${req.baseUrl || ''}${req.path || ''}`.toLowerCase().replace(/\/+$/, '');
+  const method = req.method === 'HEAD' ? 'GET' : req.method;
+  const allowed = PORTAL_ROUTES.some(route => {
+    if (route.prefix) return path === route.prefix || path.startsWith(`${route.prefix}/`);
+    if (route.method !== method) return false;
+    return route.pattern ? route.pattern.test(path) : path === route.path;
+  });
+  return allowed ? null : 'Customer portal accounts can only use the portal';
+}
+
+/** Refuse a portal account anything outside the portal. True when it did. */
+function refusedToPortalAccount(req, res, user) {
+  if (!user?.isPortalUser) return false;
+  const refusal = portalRefusal(req);
+  if (!refusal) return false;
+  res.status(403).json({ error: refusal, code: 'PORTAL_ACCOUNT' });
+  return true;
+}
+
+const LEVELS = { none: 0, read: 1, edit: 2, full: 3 };
+
+/** Whether a user's role grants at least `level` on a module, as requirePermission decides. */
+function hasPermission(user, module, level) {
+  const perm = user?.role?.permissions?.find(p => p.module === module);
+  return (LEVELS[perm?.level] || 0) >= (LEVELS[level] || 0);
+}
+
+// ─── NOBODY GRANTS MORE THAN THEY HOLD ───
+
+/**
+ * Why `granter` may not hand out, or act on an account holding, a role with
+ * this name and these permissions, or null when they may. No module may go
+ * above the granter's own level, and only an administrator may deal in an
+ * administrator role, since row security lets a role named Admin see every
+ * record whatever its permissions.
+ */
+function roleCeilingRefusal(granter, role) {
+  if (isAdmin(granter)) return null;
+  if (isAdmin({ role: { name: role?.name } })) return 'Only an administrator can grant or manage an administrator role';
+  const over = (role?.permissions || []).find(p => (LEVELS[p.level] || 0) > (LEVELS[
+    granter?.role?.permissions?.find(g => g.module === p.module)?.level
+  ] || 0));
+  return over ? `That needs more access than you have yourself (${over.module}: ${over.level})` : null;
+}
+
+/** Why `granter` may not give someone the role `roleId`, or null. */
+async function roleGrantRefusal(prisma, granter, roleId) {
+  const role = roleId
+    ? await prisma.role.findUnique({ where: { id: String(roleId) }, include: { permissions: true } })
+    : null;
+  if (!role) return 'Role not found';
+  return roleCeilingRefusal(granter, role);
+}
+
 // ─── API KEY RATE LIMIT ───
 // A key's rateLimit is requests per hour. It was stored and never enforced.
 // Counted in Redis when there is one, so every instance shares the count;
@@ -171,6 +243,7 @@ async function authenticateApiKey(req, res, next) {
     // disabled: routes without a permission check used to take such a key.
     const owner = await loadUser(req, keyRecord.createdById);
     if (!owner || !owner.active) return res.status(401).json({ error: 'API key owner is disabled' });
+    if (refusedToPortalAccount(req, res, owner)) return;
 
     if (keyRecord.rateLimit > 0) {
       const { count, resetAt } = await countApiKeyRequest(keyRecord.id);
@@ -191,6 +264,7 @@ async function authenticateApiKey(req, res, next) {
     req.user = owner;
     req.isApiKey = true;
     req.apiKeyPermissions = keyRecord.permissions;
+    req.authenticatedBy = 'apiKey';
     next();
   } catch (err) {
     return res.status(401).json({ error: 'API key validation failed' });
@@ -219,6 +293,7 @@ async function authenticateAppToken(req, res, next, token) {
     if (!owner || !owner.active) {
       return bearerError(401, 'invalid_token', 'The access token is invalid', { error: 'Invalid token' });
     }
+    if (refusedToPortalAccount(req, res, owner)) return;
     const refusal = appTokenRefusal(req, grant.scopes);
     if (refusal) {
       return bearerError(403, 'insufficient_scope', refusal, { error: refusal, code: 'INSUFFICIENT_SCOPE' });
@@ -230,6 +305,7 @@ async function authenticateAppToken(req, res, next, token) {
     req.isAppToken = true;
     req.connectedAppId = grant.appId;
     req.oauthScopes = grant.scopes;
+    req.authenticatedBy = 'appToken';
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Token validation failed' });
@@ -253,6 +329,10 @@ async function loadUser(req, userId) {
 
 // ─── JWT AUTH MIDDLEWARE ───
 async function authenticate(req, res, next) {
+  // Once per request: a request that passes through two routers mounted at
+  // one path (deals, then dealExtras) must not be counted, or checked, twice.
+  if (req.authenticatedBy) return next();
+
   // Check API key first
   if (req.headers['x-api-key']) return authenticateApiKey(req, res, next);
 
@@ -298,7 +378,9 @@ async function authenticate(req, res, next) {
     const user = await loadUser(req, decoded.userId);
     if (!user) return res.status(401).json({ error: 'Account no longer exists' });
     if (!user.active) return res.status(403).json({ error: 'Account disabled' });
+    if (refusedToPortalAccount(req, res, user)) return;
     req.user = user;
+    req.authenticatedBy = 'session';
 
     next();
   } catch (err) {
@@ -310,8 +392,37 @@ async function authenticate(req, res, next) {
 }
 
 // ─── PERMISSION MIDDLEWARE ───
+
+/**
+ * The caller's level on a module: their role's, capped by an API key's
+ * grants. An API key reaches no further than the modules it was granted,
+ * [{ module, level }], and never past its owner's own access. The grant was
+ * stored and ignored, so a "contacts: read" key had its creator's full
+ * rights. A key granted nothing carries its owner's access, as keys always
+ * have.
+ */
+function effectiveLevel(req, user, module) {
+  const perm = user?.role?.permissions?.find(p => p.module === module);
+  let userLevel = perm ? LEVELS[perm.level] || 0 : 0;
+  const grants = req.isApiKey && Array.isArray(req.apiKeyPermissions) ? req.apiKeyPermissions : [];
+  if (grants.length) {
+    const grant = grants.find(g => g.module === module || g.module === '*');
+    userLevel = Math.min(userLevel, grant ? LEVELS[grant.level] || 0 : 0);
+  }
+  return userLevel;
+}
+
+/**
+ * Whether the request may act on a module at `level`, for routes that learn
+ * the module from the request (bulk, export, reports) and so cannot name it
+ * in requirePermission().
+ */
+function permits(req, module, level) {
+  return !!req.user?.active && effectiveLevel(req, req.user, module) >= (LEVELS[level] || 0);
+}
+
 function requirePermission(module, minLevel) {
-  const levels = { none: 0, read: 1, edit: 2, full: 3 };
+  const levels = LEVELS;
   return async (req, res, next) => {
     try {
       const user = await loadUser(req, req.userId);
@@ -319,17 +430,7 @@ function requirePermission(module, minLevel) {
         return res.status(403).json({ error: 'Account disabled' });
       }
       const perm = user.role.permissions.find(p => p.module === module);
-      let userLevel = perm ? levels[perm.level] || 0 : 0;
-      // An API key reaches no further than the modules it was granted,
-      // [{ module, level }], and never past its owner's own access. The grant
-      // was stored and ignored, so a "contacts: read" key had its creator's
-      // full rights. A key granted nothing carries its owner's access, as
-      // keys always have.
-      const grants = req.isApiKey && Array.isArray(req.apiKeyPermissions) ? req.apiKeyPermissions : [];
-      if (grants.length) {
-        const grant = grants.find(g => g.module === module || g.module === '*');
-        userLevel = Math.min(userLevel, grant ? levels[grant.level] || 0 : 0);
-      }
+      const userLevel = effectiveLevel(req, user, module);
       if (userLevel < (levels[minLevel] || 0)) {
         return res.status(403).json({ error: `Insufficient permissions for ${module}` });
       }
@@ -346,6 +447,12 @@ module.exports = {
   authenticate,
   authenticateApiKey,
   requirePermission,
+  hasPermission,
+  permits,
+  portalRefusal,
+  roleCeilingRefusal,
+  roleGrantRefusal,
+  PERMISSION_LEVELS: LEVELS,
   signToken,
   signAccessToken,
   signRefreshToken,

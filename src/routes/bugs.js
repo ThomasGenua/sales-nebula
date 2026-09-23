@@ -1,6 +1,8 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
 
 const router = Router();
 
@@ -27,7 +29,9 @@ async function logChange(prisma, bugId, userId, field, from, to) {
 
 // ── BUGS ──────────────────────────────────────────────────────────────
 
-router.get('/', authenticate, async (req, res, next) => {
+// Bugs answer to the cases permission. Writes checked it; the reads here and
+// below took a session alone, so anyone signed in read every bug and release.
+router.get('/', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { search, status, severity, priority, type, assignedToId, releaseId, component, open, page = 1, limit = 50, sortBy = 'createdAt', sortDir = 'desc' } = req.query;
@@ -56,22 +60,24 @@ router.get('/', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const bug = await prisma.bug.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!bug) return res.status(404).json({ error: 'Bug not found' });
 
+    // Internal comments are for those who work bugs (cases edit) and admins.
+    const seesInternal = isAdmin(req.user) || permits(req, 'cases', 'edit');
     const [comments, watchers, history, duplicates] = await Promise.all([
-      prisma.bugComment.findMany({ where: { bugId: bug.id }, orderBy: { createdAt: 'asc' } }).catch(() => []),
+      prisma.bugComment.findMany({ where: { bugId: bug.id, ...(seesInternal ? {} : { isInternal: false }) }, orderBy: { createdAt: 'asc' } }).catch(() => []),
       prisma.bugWatcher.findMany({ where: { bugId: bug.id } }).catch(() => []),
       prisma.bugHistory.findMany({ where: { bugId: bug.id }, orderBy: { createdAt: 'desc' }, take: 50 }).catch(() => []),
       prisma.bug.findMany({ where: { duplicateOfId: bug.id, deletedAt: null }, select: { id: true, bugNumber: true, title: true } }).catch(() => []),
     ]);
 
-    // Cases reported against this defect
+    // Cases reported against this defect, of those the caller can see
     const linkedCases = await prisma.case.findMany({
-      where: { deletedAt: null, description: { contains: bug.bugNumber } },
+      where: await reachableWhere(req, 'cases', 'case', { description: { contains: bug.bugNumber } }),
       select: { id: true, caseNumber: true, subject: true, status: true },
       take: 20,
     }).catch(() => []);
@@ -240,7 +246,7 @@ router.post('/:id/watch', authenticate, async (req, res, next) => {
 
 // ── RELEASES ──────────────────────────────────────────────────────────
 
-router.get('/releases/all', authenticate, async (req, res, next) => {
+router.get('/releases/all', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const releases = await prisma.release.findMany({
@@ -294,7 +300,7 @@ router.put('/releases/:id', authenticate, requirePermission('admin', 'edit'), as
 });
 
 // Release notes assembled from the fixed bug list
-router.get('/releases/:id/notes', authenticate, async (req, res, next) => {
+router.get('/releases/:id/notes', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const release = await prisma.release.findFirst({ where: { id: req.params.id, deletedAt: null } });
@@ -323,7 +329,7 @@ router.get('/releases/:id/notes', authenticate, async (req, res, next) => {
 
 // ── ANALYTICS ─────────────────────────────────────────────────────────
 
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
+router.get('/analytics/summary', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const days = parseInt(req.query.days, 10) || 90;
@@ -368,7 +374,7 @@ router.get('/analytics/summary', authenticate, async (req, res, next) => {
 });
 
 // Open bugs weighted by age and severity, for triage ordering
-router.get('/analytics/triage', authenticate, async (req, res, next) => {
+router.get('/analytics/triage', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const bugs = await prisma.bug.findMany({

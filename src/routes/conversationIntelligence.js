@@ -1,18 +1,38 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { modelHasField } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
+
+// CallRecording has no deletedAt, and filtering on it failed every list.
+const live = modelHasField('callRecording', 'deletedAt') ? { deletedAt: null } : {};
+
+/**
+ * Whether the caller may see (or, with 'edit', change) the recordings on a
+ * deal: the deals permission, and a deal they can reach.
+ */
+async function reachesDeal(req, dealId, level = 'read') {
+  return !!dealId && permits(req, 'deals', level) && canReach(req, 'deals', 'deal', dealId, level === 'edit' ? 'Edit' : 'Read');
+}
+
+// Calls and their transcripts belong to whoever made them. These listed,
+// summarised and analysed anyone's, for anyone signed in. A caller now has
+// their own, plus those on a deal they can reach when they ask for one;
+// an administrator has all.
 
 // List recordings
 router.get('/recordings', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, userId, dealId } = req.query;
-    const where = { deletedAt: null };
+    let where = { ...live };
     if (userId) where.userId = userId;
     if (dealId) where.dealId = dealId;
+    if (!isAdmin(req.user) && !(await reachesDeal(req, dealId))) where = { AND: [where, { userId: req.user.id }] };
     const [data, total] = await Promise.all([
       prisma.callRecording.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit, skip: (+page - 1) * +limit }),
       prisma.callRecording.count({ where }),
@@ -39,7 +59,15 @@ router.post('/analyze', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { recordingId, transcript } = req.body;
-    const text = transcript || (recordingId ? (await prisma.callRecording.findUnique({ where: { id: recordingId } }))?.transcription : null);
+    // The analysis is written back onto the recording, so it must be one the
+    // caller may change: their own, or one on a deal they can edit.
+    let recording = null;
+    if (recordingId) {
+      recording = await prisma.callRecording.findUnique({ where: { id: recordingId } });
+      const mayChange = recording && (isAdmin(req.user) || recording.userId === req.user.id || await reachesDeal(req, recording.dealId, 'edit'));
+      if (!mayChange) return res.status(404).json({ error: 'Recording not found' });
+    }
+    const text = transcript || recording?.transcription;
     if (!text) return res.status(400).json({ error: 'transcript or recordingId required' });
     // Basic text analysis
     const wordCount = text.split(/\s+/).length;
@@ -69,7 +97,8 @@ router.get('/insights', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { from, to } = req.query;
-    const where = { deletedAt: null };
+    const where = { ...live };
+    if (!isAdmin(req.user)) where.userId = req.user.id;
     if (from || to) { where.createdAt = {}; if (from) where.createdAt.gte = new Date(from); if (to) where.createdAt.lte = new Date(to); }
     const recordings = await prisma.callRecording.findMany({ where });
     const analyzed = recordings.filter(r => r.analysis);
@@ -96,7 +125,7 @@ router.get('/trends', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
     const recordings = await prisma.callRecording.findMany({
-      where: { createdAt: { gte: thirtyDaysAgo } },
+      where: { createdAt: { gte: thirtyDaysAgo }, ...(isAdmin(req.user) ? {} : { userId: req.user.id }) },
       orderBy: { createdAt: 'asc' },
     });
     // Group by week

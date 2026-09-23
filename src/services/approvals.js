@@ -27,6 +27,7 @@
  */
 const { Prisma } = require('@prisma/client');
 const { logger } = require('./logger');
+const { plainFieldProblem } = require('../utils/modelFields');
 const { visibleWhere, isAdmin } = require('../middleware/rowSecurity');
 const { evaluateConditions, COMPARE_OPERATORS } = require('./workflowEngine');
 
@@ -135,11 +136,6 @@ async function closeOpenSteps(prisma, requestId) {
 
 // ─── FINAL ACTIONS ───
 
-// A final action sets a plain value, never who owns or links to a record:
-// those would let a process quietly hand records to someone else.
-const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
-const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
-
 const dmmfModel = modelName => Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === modelName.toLowerCase());
 
 /** Why `{ field, value }` cannot be set on this module's records, or null. */
@@ -147,26 +143,8 @@ function fieldUpdateProblem(module, config) {
   const modelName = APPROVAL_MODELS[module];
   if (!modelName) return `updateField works only for these modules: ${Object.keys(APPROVAL_MODELS).join(', ')}`;
   const { field, value } = config && typeof config === 'object' ? config : {};
-  const model = dmmfModel(modelName);
-  const foreignKeys = new Set(model.fields.flatMap(f => f.relationFromFields || []));
-  const def = model.fields.find(f => f.name === field);
-  if (!def || def.kind === 'object' || def.isId || def.isUpdatedAt || foreignKeys.has(field)
-      || PROTECTED_FIELDS.has(field) || /Id$/.test(field)) {
-    return `updateField needs a field a final action may set on ${module}; "${field}" is not one`;
-  }
-  if (value === null || value === undefined) {
-    return def.isRequired ? `${field} cannot be emptied` : null;
-  }
-  if (def.kind === 'enum') {
-    const values = Prisma.dmmf.datamodel.enums.find(e => e.name === def.type)?.values.map(v => v.name) || [];
-    return values.includes(value) ? null : `${field} must be one of: ${values.join(', ')}`;
-  }
-  const expected = VALUE_TYPES[def.type];
-  if (!expected) return `${field} is a ${def.type}, which a final action cannot set`;
-  if (typeof value !== expected || (def.type === 'Int' && !Number.isInteger(value))) {
-    return `${field} needs a ${def.type === 'Int' ? 'whole number' : expected} value`;
-  }
-  return null;
+  const problem = plainFieldProblem(modelName, field, value);
+  return problem ? `updateField on ${module}: ${problem}` : null;
 }
 
 // ─── ENTRY CONDITIONS ───

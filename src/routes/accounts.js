@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = createCrudRouter('account', 'accounts', {
@@ -72,53 +73,8 @@ const router = createCrudRouter('account', 'accounts', {
       } catch (err) { next(err); }
     });
 
-    // POST /api/accounts/:id/merge - Merge duplicate account into primary
-    router.post('/:id/merge', async (req, res, next) => {
-      try {
-        const prisma = req.app.locals.prisma;
-        const primaryId = req.params.id;
-        const { mergeId } = req.body;
-        if (!mergeId) return res.status(400).json({ error: 'mergeId required' });
-        if (primaryId === mergeId) return res.status(400).json({ error: 'Cannot merge account into itself' });
-
-        const [primary, duplicate] = await Promise.all([
-          prisma.account.findUnique({ where: { id: primaryId } }),
-          prisma.account.findUnique({ where: { id: mergeId } }),
-        ]);
-        if (!primary || !duplicate) return res.status(404).json({ error: 'One or both accounts not found' });
-
-        // Move all child records to primary
-        await Promise.all([
-          prisma.contact.updateMany({ where: { accountId: mergeId }, data: { accountId: primaryId } }),
-          prisma.deal.updateMany({ where: { accountId: mergeId }, data: { accountId: primaryId } }),
-          prisma.case.updateMany({ where: { accountId: mergeId }, data: { accountId: primaryId } }),
-          prisma.invoice.updateMany({ where: { accountId: mergeId }, data: { accountId: primaryId } }),
-          prisma.activity.updateMany({ where: { accountId: mergeId }, data: { accountId: primaryId } }),
-        ]);
-
-        // Fill empty fields on primary from duplicate
-        const fillFields = {};
-        ['industry', 'website', 'phone', 'address', 'city', 'state', 'country', 'description', 'billing'].forEach(f => {
-          if (!primary[f] && duplicate[f]) fillFields[f] = duplicate[f];
-        });
-        // Sum numeric fields
-        fillFields.revenue = (primary.revenue || 0) + (duplicate.revenue || 0);
-        fillFields.employees = Math.max(primary.employees || 0, duplicate.employees || 0);
-
-        await prisma.account.update({ where: { id: primaryId }, data: fillFields });
-
-        // Delete the duplicate
-        await prisma.account.delete({ where: { id: mergeId } });
-
-        await req.audit({ action: 'update', module: 'accounts', recordId: primaryId, details: `Merged account ${duplicate.name} into ${primary.name}` });
-
-        const result = await prisma.account.findUnique({ where: { id: primaryId }, include: {
-          contacts: { select: { id: true, firstName: true, lastName: true } },
-          deals: { select: { id: true, name: true, stage: true, value: true } },
-        }});
-        res.json(result);
-      } catch (err) { next(err); }
-    });
+    // POST /api/accounts/:id/merge is further down. An unguarded copy here was
+    // registered first, so it answered and the guarded one never ran.
 
     // POST /api/accounts/:id/clone
     router.post('/:id/clone', async (req, res, next) => {
@@ -190,8 +146,16 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
 router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { mergeFromId } = req.body;
-    if (!mergeFromId) return res.status(400).json({ error: 'mergeFromId required' });
+    // `mergeId` is what the unguarded copy took; its callers still land here.
+    const mergeFromId = req.body.mergeFromId ?? req.body.mergeId;
+    if (!mergeFromId || typeof mergeFromId !== 'string') return res.status(400).json({ error: 'mergeFromId required' });
+    // Into itself, a merge would only delete the account.
+    if (mergeFromId === req.params.id) return res.status(400).json({ error: 'Cannot merge account into itself' });
+    // The router checks :id alone. This account gives up its records and is
+    // deleted, so the caller needs the row access DELETE asks for.
+    if (!(await canReach(req, 'accounts', 'account', mergeFromId, 'Full'))) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
     const [primary, secondary] = await Promise.all([
       prisma.account.findUnique({ where: { id: req.params.id } }),
       prisma.account.findUnique({ where: { id: mergeFromId } }),

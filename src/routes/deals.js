@@ -190,7 +190,10 @@ module.exports = createCrudRouter('deal', 'deals', {
     router.delete('/:id/line-items/:itemId', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        await prisma.dealLineItem.delete({ where: { id: req.params.itemId } });
+        // Only an item on this deal. The router checks the deal in the path;
+        // the item id alone reached any deal's line items.
+        const { count } = await prisma.dealLineItem.deleteMany({ where: { id: req.params.itemId, dealId: req.params.id } });
+        if (!count) return res.status(404).json({ error: 'Not found' });
 
         // Recalculate deal value
         const allItems = await prisma.dealLineItem.findMany({ where: { dealId: req.params.id } });
@@ -216,6 +219,8 @@ module.exports = createCrudRouter('deal', 'deals', {
         data.stage = 'Qualification';
         data.closeDate = new Date(Date.now() + 30 * 86400000); // 30 days out
         data.ownerId = req.userId;
+        // Prisma refuses a bare null for a Json column; left out, it stays NULL.
+        if (data.competitors === null) delete data.competitors;
 
         const clone = await prisma.deal.create({
           data: {

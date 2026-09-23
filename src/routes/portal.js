@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, hasPermission, validatePassword } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 
@@ -43,6 +43,21 @@ router.get('/users', authenticate, requirePermission('admin', 'read'), async (re
   } catch (err) { next(err); }
 });
 
+/**
+ * The role portal accounts get: none of the staff permissions. An install
+ * without a role named like "Portal" failed every portal account with a
+ * missing roleId, and one whose name merely contained the word could hand
+ * customers a staff role. Portal accounts are held to the portal by
+ * authenticate() in any case.
+ */
+async function portalAccountRole(prisma) {
+  return prisma.role.upsert({
+    where: { name: 'Customer Portal' },
+    update: {},
+    create: { name: 'Customer Portal', description: 'Customer portal accounts: no staff access' },
+  });
+}
+
 // Create portal user from contact
 router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
@@ -55,13 +70,14 @@ router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMid
     if (!contact.email) return res.status(400).json({ error: 'Contact has no email address' });
     const existing = await prisma.user.findUnique({ where: { email: contact.email } });
     if (existing) return res.status(409).json({ error: 'User already exists with this email' });
-    const portalRole = await prisma.role.findFirst({ where: { name: { contains: 'Portal', mode: 'insensitive' } } });
+    const { valid, errors } = validatePassword(String(password));
+    if (!valid) return res.status(400).json({ error: errors.join('. ') });
+    const portalRole = await portalAccountRole(prisma);
     const hashedPassword = await bcrypt.hash(password, 12);
     const user = await prisma.user.create({
       data: {
         firstName: contact.firstName, lastName: contact.lastName, email: contact.email,
-        password: hashedPassword, isPortalUser: true, contactId: contact.id,
-        ...(portalRole && { roleId: portalRole.id }),
+        password: hashedPassword, isPortalUser: true, contactId: contact.id, roleId: portalRole.id,
       },
     });
     await req.audit({ action: 'create', module: 'portal', recordId: user.id, details: `Portal user created for contact ${contact.id}` });
@@ -73,8 +89,11 @@ router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMid
 router.post('/users/:id/deactivate', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const user = await prisma.user.update({ where: { id: req.params.id }, data: { active: false } });
-    await req.audit({ action: 'update', module: 'portal', recordId: user.id, details: 'Portal user deactivated' });
+    // Portal accounts only: this took any user id, so the admin: edit that
+    // the default Sales Rep role has was enough to disable an administrator.
+    const { count } = await prisma.user.updateMany({ where: { id: req.params.id, isPortalUser: true }, data: { active: false } });
+    if (!count) return res.status(404).json({ error: 'Portal user not found' });
+    await req.audit({ action: 'update', module: 'portal', recordId: req.params.id, details: 'Portal user deactivated' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -122,12 +141,30 @@ router.get('/knowledge', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Portal user profile update
+// Portal user profile update: the account itself, or an administrator. This
+// let anyone signed in rewrite any PortalUser row, while portal accounts are
+// Users, so it never reached them.
 router.put('/users/:id/profile', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { firstName, lastName, phone, timezone, language } = req.body;
-    const updated = await prisma.portalUser.update({ where: { id: req.params.id }, data: { firstName, lastName, phone, timezone, language } });
+    const self = req.params.id === req.user.id;
+    if (!self && !hasPermission(req.user, 'admin', 'edit')) return res.status(403).json({ error: 'Not your profile' });
+    const account = await prisma.user.findFirst({ where: { id: req.params.id, isPortalUser: true }, select: { id: true, contactId: true } });
+    if (!account) return res.status(404).json({ error: 'Portal user not found' });
+
+    const { firstName, lastName, phone } = req.body || {};
+    const data = {};
+    if (typeof firstName === 'string' && firstName.trim()) data.firstName = firstName.trim();
+    if (typeof lastName === 'string' && lastName.trim()) data.lastName = lastName.trim();
+    const updated = await prisma.user.update({
+      where: { id: account.id },
+      data,
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+    // The phone number lives on the customer's contact.
+    if (typeof phone === 'string' && account.contactId) {
+      await prisma.contact.update({ where: { id: account.contactId }, data: { phone: phone.trim() || null } });
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });

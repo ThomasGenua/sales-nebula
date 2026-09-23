@@ -1,9 +1,25 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { editableFields, modelHasField } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
+
+/*
+ * These took a session alone: anyone signed in could rewrite any columns
+ * (owners included) on, delete, or reassign up to 200 records at a time in
+ * fifteen modules. Each action now takes the module's permission and reaches
+ * only records the caller may change.
+ */
+
+/** The caller may act on `module` at `level`; otherwise answer and return false. */
+function allowed(req, res, module, level) {
+  if (permits(req, module, level)) return true;
+  res.status(403).json({ error: `Insufficient permissions for ${module}` });
+  return false;
+}
 
 const MODULE_MAP = {
   contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
@@ -28,14 +44,17 @@ router.post('/update', async (req, res, next) => {
     if (recordIds.length > 200) {
       return res.status(400).json({ error: 'Maximum 200 records per bulk operation' });
     }
-    if (!updates || Object.keys(updates).length === 0) {
+    if (!allowed(req, res, module, 'edit')) return;
+    const model = MODULE_MAP[module];
+    // The model's own columns; owners change through /reassign.
+    const data = editableFields(model, updates);
+    if (!Object.keys(data).length) {
       return res.status(400).json({ error: 'updates object required' });
     }
 
-    const model = MODULE_MAP[module];
     const result = await prisma[model].updateMany({
-      where: { id: { in: recordIds } },
-      data: updates,
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
+      data,
     });
 
     await req.audit({
@@ -63,11 +82,12 @@ router.post('/delete', async (req, res, next) => {
       return res.status(400).json({ error: 'Maximum 200 records per bulk operation' });
     }
 
+    if (!allowed(req, res, module, 'full')) return;
     const model = MODULE_MAP[module];
 
-    // Snapshot records for recycle bin
+    // Snapshot records for recycle bin: only those the caller may change.
     const records = await prisma[model].findMany({
-      where: { id: { in: recordIds } },
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
     });
 
     // Move to recycle bin
@@ -85,7 +105,7 @@ router.post('/delete', async (req, res, next) => {
 
     // Delete records
     const result = await prisma[model].deleteMany({
-      where: { id: { in: recordIds } },
+      where: { id: { in: records.map(r => r.id) } },
     });
 
     await req.audit({
@@ -96,7 +116,7 @@ router.post('/delete', async (req, res, next) => {
     // Fire webhooks
     try {
       const { fireWebhookEvent } = require('../services/webhooks');
-      await fireWebhookEvent(prisma, `${module}.bulk_deleted`, { ids: recordIds, count: result.count });
+      await fireWebhookEvent(prisma, `${module}.bulk_deleted`, { ids: records.map(r => r.id), count: result.count });
     } catch (e) { /* best-effort */ }
 
     res.json({ success: true, deleted: result.count });
@@ -119,18 +139,22 @@ router.post('/reassign', async (req, res, next) => {
       return res.status(400).json({ error: 'newOwnerId required' });
     }
 
-    // Verify new owner exists
-    const newOwner = await prisma.user.findUnique({ where: { id: newOwnerId }, select: { id: true, firstName: true, lastName: true } });
+    if (!allowed(req, res, module, 'edit')) return;
+    if (recordIds.length > 200) return res.status(400).json({ error: 'Maximum 200 records per bulk operation' });
+
+    // Verify new owner exists, and still works here
+    const newOwner = await prisma.user.findFirst({ where: { id: String(newOwnerId), active: true, isPortalUser: false }, select: { id: true, firstName: true, lastName: true } });
     if (!newOwner) return res.status(404).json({ error: 'New owner not found' });
 
     const model = MODULE_MAP[module];
 
-    // Determine owner field name
-    const ownerField = ['leads', 'cases'].includes(module) ? 'assignedId' : 'ownerId';
+    // The ownership column the model has.
+    const ownerField = modelHasField(model, 'ownerId') ? 'ownerId' : modelHasField(model, 'assignedId') ? 'assignedId' : null;
+    if (!ownerField) return res.status(400).json({ error: `${module} records have no owner to reassign` });
 
     const result = await prisma[model].updateMany({
-      where: { id: { in: recordIds } },
-      data: { [ownerField]: newOwnerId },
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
+      data: { [ownerField]: newOwner.id },
     });
 
     await req.audit({
@@ -148,15 +172,24 @@ router.post('/tag', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { module, recordIds, tagId } = req.body;
 
-    if (!module || !recordIds || !tagId) {
+    if (!module || !Array.isArray(recordIds) || !tagId) {
       return res.status(400).json({ error: 'module, recordIds, and tagId required' });
     }
+    if (!MODULE_MAP[module]) return res.status(400).json({ error: 'Invalid module' });
+    if (!allowed(req, res, module, 'edit')) return;
 
     const tag = await prisma.tag.findUnique({ where: { id: tagId } });
     if (!tag) return res.status(404).json({ error: 'Tag not found' });
 
+    // Only records the caller may change.
+    const model = MODULE_MAP[module];
+    const reachable = await prisma[model].findMany({
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.slice(0, 200).map(String) } }, 'Edit'),
+      select: { id: true },
+    });
+
     let created = 0;
-    for (const recordId of recordIds) {
+    for (const { id: recordId } of reachable) {
       try {
         await prisma.tagAssignment.create({
           data: { tagId, module, recordId },
@@ -177,12 +210,19 @@ router.post('/untag', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { module, recordIds, tagId } = req.body;
 
-    if (!module || !recordIds || !tagId) {
+    if (!module || !Array.isArray(recordIds) || !tagId) {
       return res.status(400).json({ error: 'module, recordIds, and tagId required' });
     }
+    if (!MODULE_MAP[module]) return res.status(400).json({ error: 'Invalid module' });
+    if (!allowed(req, res, module, 'edit')) return;
+    const model = MODULE_MAP[module];
+    const reachable = await prisma[model].findMany({
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.slice(0, 200).map(String) } }, 'Edit'),
+      select: { id: true },
+    });
 
     const result = await prisma.tagAssignment.deleteMany({
-      where: { tagId, module, recordId: { in: recordIds } },
+      where: { tagId, module, recordId: { in: reachable.map(r => r.id) } },
     });
 
     res.json({ success: true, untagged: result.count });
@@ -199,11 +239,22 @@ router.post('/add-to-campaign', async (req, res, next) => {
     if ((!contactIds || contactIds.length === 0) && (!leadIds || leadIds.length === 0)) {
       return res.status(400).json({ error: 'contactIds or leadIds required' });
     }
+    if (!allowed(req, res, 'campaigns', 'edit')) return;
+    if (!(await prisma.campaign.findFirst({ where: await reachableWhere(req, 'campaigns', 'campaign', { id: String(campaignId) }, 'Edit'), select: { id: true } }))) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    // Contacts and leads the caller can see; ids alone used to do.
+    const visible = async (module, model, ids) => (Array.isArray(ids) && ids.length && permits(req, module, 'read')
+      ? (await prisma[model].findMany({ where: await reachableWhere(req, module, model, { id: { in: ids.slice(0, 500).map(String) } }), select: { id: true } })).map(r => r.id)
+      : []);
+    const contacts = await visible('contacts', 'contact', contactIds);
+    const leads = await visible('leads', 'lead', leadIds);
 
     let added = 0;
     const all = [
-      ...(contactIds || []).map(id => ({ campaignId, contactId: id, status: 'Pending' })),
-      ...(leadIds || []).map(id => ({ campaignId, leadId: id, status: 'Pending' })),
+      ...contacts.map(id => ({ campaignId, contactId: id, status: 'Pending' })),
+      ...leads.map(id => ({ campaignId, leadId: id, status: 'Pending' })),
     ];
 
     for (const data of all) {

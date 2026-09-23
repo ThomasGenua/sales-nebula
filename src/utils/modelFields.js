@@ -1,7 +1,7 @@
 const { Prisma } = require('@prisma/client');
 
 /**
- * Keep only the keys a model actually declares.
+ * Keep only the scalar keys a model actually declares.
  *
  * Routes that spread req.body into a Prisma write turn any stray key into a
  * 500 — and worse, Prisma then reports the *wrong* field, because one unknown
@@ -9,8 +9,12 @@ const { Prisma } = require('@prisma/client');
  * the relation scalars instead. A client sending `assigneeId` for `assignedId`
  * got "Unknown argument `dealId`".
  *
- * Relation keys are kept so nested writes such as { items: { create: [...] } }
- * still work. Ignored keys are returned rather than dropped in silence.
+ * Relation keys are dropped too. Kept "so nested writes still work", they let
+ * a request reach any table joined to the record: on a deal, `{ owner: {
+ * update: { role: ... } } }` changed its owner's role, and longer chains went
+ * anywhere. A route that needs a nested write builds it from fields it has
+ * checked (see lineItemFields). Ignored keys are returned rather than dropped
+ * in silence.
  */
 function pickModelFields(modelName, data = {}) {
   const model = Prisma.dmmf.datamodel.models.find(
@@ -23,10 +27,116 @@ function pickModelFields(modelName, data = {}) {
   const ignored = [];
   for (const [key, value] of Object.entries(data)) {
     const field = byName.get(key);
-    if (!field) { ignored.push(key); continue; }
+    if (!field || field.kind === 'object') { ignored.push(key); continue; }
     kept[key] = coerce(field, value);
   }
   return { data: kept, ignored };
+}
+
+/**
+ * A quote, invoice or order line from a request, as the columns those item
+ * tables share, and nothing else. `price` and `name` are read as unitPrice
+ * and description, which is what the items actually store.
+ */
+function lineItemFields(item, { discount = true } = {}) {
+  const i = item && typeof item === 'object' ? item : {};
+  const quantity = Number.isInteger(Number(i.quantity)) && Number(i.quantity) > 0 ? Number(i.quantity) : 1;
+  const unitPrice = Number(i.unitPrice ?? i.price) || 0;
+  const off = discount ? Number(i.discount) || 0 : 0;
+  return {
+    productId: i.productId ? String(i.productId) : null,
+    description: i.description ?? i.name ?? null,
+    quantity,
+    unitPrice,
+    ...(discount && { discount: off }),
+    total: quantity * unitPrice - off,
+  };
+}
+
+// A field an automated update (an approval's final action, a workflow) may
+// set: a plain value, never who owns or links to a record, its identity or
+// its timestamps. Those would let a rule hand records to someone else, and a
+// value that is an object would be a nested write into another table.
+const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
+const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
+
+/**
+ * A caller's values for a model's own columns, less its identity, its
+ * timestamps and who owns it, for bulk writes where ownership is the server's
+ * to set (or a reassignment's).
+ */
+function editableFields(modelName, data) {
+  const { data: picked } = pickModelFields(modelName, data || {});
+  for (const key of PROTECTED_FIELDS) delete picked[key];
+  return picked;
+}
+
+/** Why an automated update may not set `field` to `value` on a model, or null. */
+function plainFieldProblem(modelName, field, value) {
+  const model = findModel(modelName);
+  if (!model) return `There is no ${modelName} model`;
+  const foreignKeys = new Set(model.fields.flatMap(f => f.relationFromFields || []));
+  const def = model.fields.find(f => f.name === field);
+  if (!def || def.kind === 'object' || def.isId || def.isUpdatedAt || foreignKeys.has(field)
+      || PROTECTED_FIELDS.has(field) || /Id$/.test(field)) {
+    return `"${field}" is not a field an automated update may set`;
+  }
+  if (value === null || value === undefined) return def.isRequired ? `${field} cannot be emptied` : null;
+  if (def.kind === 'enum') {
+    const values = Prisma.dmmf.datamodel.enums.find(e => e.name === def.type)?.values.map(v => v.name) || [];
+    return values.includes(value) ? null : `${field} must be one of: ${values.join(', ')}`;
+  }
+  const expected = VALUE_TYPES[def.type];
+  if (!expected) return `${field} is a ${def.type}, which an automated update cannot set`;
+  if (typeof value !== expected || (def.type === 'Int' && !Number.isInteger(value))) {
+    return `${field} needs a ${def.type === 'Int' ? 'whole number' : expected} value`;
+  }
+  return null;
+}
+
+// ─── A CALLER'S OWN FILTERS AND SELECTIONS ───
+
+const FILTER_OPS = new Set(['equals', 'not', 'in', 'notIn', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'mode']);
+const plain = v => v === null || ['string', 'number', 'boolean'].includes(typeof v) || v instanceof Date;
+
+/**
+ * A caller-supplied `where`, kept to the model's own scalar columns and plain
+ * comparisons; everything else is dropped. A relation filter such as
+ * `{ owner: { password: { startsWith: '$2a$12$a' } } }` let a query probe rows
+ * it never returned, a user's password hash included, a character at a time.
+ */
+function scalarWhere(modelName, where) {
+  const model = findModel(modelName);
+  const out = {};
+  if (!model || !where || typeof where !== 'object' || Array.isArray(where)) return out;
+  for (const [key, value] of Object.entries(where)) {
+    const field = model.fields.find(f => f.name === key);
+    if (!field || field.kind === 'object') continue;
+    if (plain(value)) { out[key] = value; continue; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const condition = {};
+    for (const [op, v] of Object.entries(value)) {
+      if (!FILTER_OPS.has(op)) continue;
+      if (op === 'in' || op === 'notIn') { if (Array.isArray(v) && v.every(plain)) condition[op] = v; }
+      else if (op === 'mode') { if (v === 'insensitive' || v === 'default') condition[op] = v; }
+      else if (plain(v)) condition[op] = v;
+    }
+    if (Object.keys(condition).length) out[key] = condition;
+  }
+  return out;
+}
+
+/**
+ * A caller's choice of columns as a Prisma `select`: the model's own scalar
+ * fields only (id always). A relation in `select` returned the related rows,
+ * so `{ owner: { select: { password: true } } }` read password hashes. Takes
+ * a list of names or a `{ name: true }` object; undefined when none remain.
+ */
+function scalarSelect(modelName, fields) {
+  const model = findModel(modelName);
+  const names = Array.isArray(fields) ? fields : fields && typeof fields === 'object' ? Object.keys(fields).filter(k => fields[k]) : [];
+  const picked = names.filter(n => model?.fields.some(f => f.name === n && f.kind !== 'object'));
+  return picked.length ? Object.fromEntries([['id', true], ...picked.map(n => [n, true])]) : undefined;
 }
 
 /** Whether a model declares a given field. */
@@ -113,6 +223,8 @@ const RELATION_OVERRIDES = {
 };
 
 /** Attach the manually resolved relations, one query per relation. */
+const SAFE_USER_SELECT = { id: true, firstName: true, lastName: true, email: true, avatar: true };
+
 async function hydrateIncludes(prisma, records, manual) {
   const rows = Array.isArray(records) ? records : records ? [records] : [];
   if (!rows.length || !manual.length) return records;
@@ -133,9 +245,12 @@ async function hydrateIncludes(prisma, records, manual) {
     const ids = [...new Set(rows.map(r => r[fkField]).filter(Boolean))];
     let byId = new Map();
     if (ids.length && prisma[delegate]?.findMany) {
+      // A user comes back as who they are, never whole: a bare include of an
+      // owner or assignee would otherwise carry their password hash out.
+      const shape = select ? { ...select, id: true } : delegate === 'user' ? SAFE_USER_SELECT : null;
       const found = await prisma[delegate].findMany({
         where: { id: { in: ids } },
-        ...(select ? { select: { ...select, id: true } } : {}),
+        ...(shape ? { select: shape } : {}),
       }).catch(() => []);
       byId = new Map(found.map(f => [f.id, f]));
     }
@@ -174,4 +289,7 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
   return result;
 }
 
-module.exports = { pickModelFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes };
+module.exports = {
+  pickModelFields, lineItemFields, plainFieldProblem, editableFields, scalarWhere, scalarSelect,
+  modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
+};

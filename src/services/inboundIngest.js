@@ -152,7 +152,17 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
       const caseRef = extractCaseRef(subject, bodyText);
       let linkedCase = null;
       if (caseRef) {
-        linkedCase = await prisma.case.findFirst({ where: { caseNumber: caseRef, deletedAt: null } });
+        const byRef = await prisma.case.findFirst({
+          where: { caseNumber: caseRef, deletedAt: null },
+          include: { contact: { select: { email: true } } },
+        });
+        // Case numbers run in sequence, so a reference proves nothing about
+        // who sent it: anyone could post into any customer's case this way,
+        // and reopen a closed one. Only the case's own contact threads by
+        // reference; anyone else's mail goes on to open a case of its own.
+        const sender = String(from.email || '').toLowerCase();
+        const own = [byRef?.contactEmail, byRef?.contact?.email].filter(Boolean).map(e => String(e).toLowerCase());
+        if (byRef && sender && own.includes(sender)) linkedCase = byRef;
       }
       if (!linkedCase && raw.inReplyTo) {
         const prior = await prisma.inboundEmailMessage.findFirst({ where: { messageId: raw.inReplyTo }, select: { createdCaseId: true } }).catch(() => null);
