@@ -7,7 +7,7 @@ const path = require('path');
 const { v4: uuid } = require('uuid');
 const { modelHasField } = require('../utils/modelFields');
 const { buildAccessFilter, applyAccessFilter, isAdmin } = require('../middleware/rowSecurity');
-const { statusRoutes } = require('../utils/moduleStatus');
+const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 
 // Never under a served path.
 const EXPORT_DIR = path.resolve(process.env.EXPORT_DIR || path.join(process.env.UPLOAD_DIR || './uploads', '..', 'private-exports'));
@@ -160,21 +160,8 @@ router.get('/retention-policy', authenticate, requirePermission('admin', 'read')
 // Record count, health and summary, answered from the module's own table.
 statusRoutes(router, { module: 'dataExport', model: 'dataExport' });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'DataExport';
-    // Generic stats endpoint
-    const stats = {
-      module: 'dataExport',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'dataExport', model: 'dataExport' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

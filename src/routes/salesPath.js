@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
+const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -165,21 +166,8 @@ router.put('/:id/reorder', authenticate, requirePermission('admin', 'full'), asy
   } catch (err) { next(err); }
 });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'SalesPath';
-    // Generic stats endpoint
-    const stats = {
-      module: 'salesPath',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'salesPath', model: 'salesPath' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

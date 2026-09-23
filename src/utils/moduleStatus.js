@@ -33,20 +33,29 @@ function statusRoutes(router, { module, model = null, where = {}, analytics = fa
     }
   });
 
-  if (model && analytics) {
-    router.get('/analytics/summary', authenticate, async (req, res, next) => {
-      try {
-        const prisma = req.app.locals.prisma;
-        const base = await scoped(req);
-        const since = new Date(Date.now() - 30 * 86400000);
-        const [total, recent] = await Promise.all([
-          prisma[model].count({ where: base }),
-          prisma[model].fields?.createdAt ? prisma[model].count({ where: { AND: [base, { createdAt: { gte: since } }] } }) : null,
-        ]);
-        res.json({ module, total, createdLast30Days: recent, checkedAt: new Date() });
-      } catch (err) { next(err); }
-    });
-  }
+  if (model && analytics) summaryRoute(router, { module, model, where });
 }
 
-module.exports = { statusRoutes };
+/**
+ * GET /analytics/summary from the module's own table: the live records the
+ * caller may see, and how many of them were created in the last 30 days.
+ * Twenty-two modules answered this with only their name, a timestamp and
+ * NODE_ENV.
+ */
+function summaryRoute(router, { module, model, where = {} }) {
+  router.get('/analytics/summary', authenticate, async (req, res, next) => {
+    try {
+      const prisma = req.app.locals.prisma;
+      const base = await visibleWhere(req, module, model, where);
+      const since = new Date(Date.now() - 30 * 86400000);
+      const [total, recent] = await Promise.all([
+        prisma[model].count({ where: base }),
+        prisma[model].fields?.createdAt ? prisma[model].count({ where: { AND: [base, { createdAt: { gte: since } }] } }) : null,
+      ]);
+      res.json({ module, total, createdLast30Days: recent, checkedAt: new Date() });
+    } catch (err) { next(err); }
+  });
+}
+
+module.exports = { statusRoutes, summaryRoute };
+

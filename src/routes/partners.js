@@ -3,7 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
-const { statusRoutes } = require('../utils/moduleStatus');
+const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('partner', 'partners', {
   include: {
@@ -151,21 +151,8 @@ router.get('/:id/scorecard', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'Partners';
-    // Generic stats endpoint
-    const stats = {
-      module: 'partners',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'partners', model: 'partner' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

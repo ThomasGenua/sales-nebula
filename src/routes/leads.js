@@ -2,6 +2,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { authenticate } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { resolveDealCurrency } = require('../utils/currency');
+const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('lead', 'leads', {
   include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, customValues: { include: { customField: true } } },
@@ -146,21 +147,8 @@ const router = createCrudRouter('lead', 'leads', {
   },
 });
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'Leads';
-    // Generic stats endpoint
-    const stats = {
-      module: 'leads',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'leads', model: 'lead' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {

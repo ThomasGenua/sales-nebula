@@ -5,6 +5,7 @@ const { v4: uuid } = require('uuid');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { summaryRoute } = require('../utils/moduleStatus');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, process.env.UPLOAD_DIR || './uploads'),
@@ -142,21 +143,8 @@ router.post('/from-template/:templateId', authenticate, async (req, res, next) =
 
 module.exports = router;
 
-// Analytics / Stats
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const modelName = 'Documents';
-    // Generic stats endpoint
-    const stats = {
-      module: 'documents',
-      generatedAt: new Date(),
-      environment: process.env.NODE_ENV || 'development',
-    };
-    res.json(stats);
-  } catch (err) { next(err); }
-});
+// Totals from the module's own table.
+summaryRoute(router, { module: 'documents', model: 'document' });
 
 // Bulk status update
 router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
