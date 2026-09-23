@@ -68,6 +68,8 @@ function renderPage(path, go) {
   if (path === "/privacy") return <PrivacyPage go={go} />;
   if (path === "/terms") return <TermsPage go={go} />;
   if (path === "/reset-password") return <ResetPasswordPage go={go} />;
+  // A connected app asking for access: sign in if need be, then consent.
+  if (path === "/oauth/authorize") return <App go={go} />;
   if (path === "/app" || path.startsWith("/app/") || path === "/login") return <App go={go} startOnLogin={path === "/login"} />;
   if (path === "/") return <Landing go={go} />;
 

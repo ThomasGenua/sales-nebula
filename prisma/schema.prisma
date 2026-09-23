@@ -1917,7 +1917,9 @@ model ConnectedApp {
   id            String  @id @default(uuid())
   name          String
   clientId      String  @unique
-  clientSecret  String
+  // Only a SHA-256 of the client secret is kept. The secret itself is shown
+  // once, when the app is registered or its secret rotated.
+  clientSecretHash String @map("clientSecret")
   redirectUris  String[] @default([])
   scopes        String[] @default(["read"])
   active        Boolean @default(true)
@@ -1935,15 +1937,36 @@ model ConnectedApp {
   tokenRefreshedAt DateTime?
 }
 
+// One user's grant to one connected app. Only a SHA-256 of each token is
+// kept; the tokens themselves go to the app alone (see services/oauth).
 model OAuthToken {
-  id            String   @id @default(uuid())
+  id               String    @id @default(uuid())
+  appId            String
+  userId           String
+  accessTokenHash  String    @unique @map("accessToken")
+  refreshTokenHash String?   @unique @map("refreshToken")
+  scopes           String[]  @default([])
+  expiresAt        DateTime
+  refreshExpiresAt DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([appId])
+  @@index([userId])
+}
+
+// The single-use code a user's consent produces, redeemed at the token
+// endpoint with the PKCE verifier that matches codeChallenge.
+model OAuthAuthorizationCode {
+  id            String    @id @default(uuid())
+  codeHash      String    @unique
   appId         String
   userId        String
-  accessToken   String   @unique
-  refreshToken  String?  @unique
-  scopes        String[] @default([])
+  redirectUri   String
+  scopes        String[]  @default([])
+  codeChallenge String
   expiresAt     DateTime
-  createdAt     DateTime @default(now())
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
 
   @@index([appId])
   @@index([userId])

@@ -7,6 +7,7 @@
  * - Account lockout after failed attempts
  * - Password complexity validation
  * - API key auth for service-to-service calls
+ * - Connected-app OAuth tokens, limited to the scopes a user granted
  * - Role-based permission checks (4 tiers per module)
  */
 
@@ -16,6 +17,7 @@ const { v4: uuid } = require('uuid');
 const { resolveJwtSecret } = require('../utils/secrets');
 const { ACCESS_COOKIE, readCookie, csrfValid, needsCsrf } = require('../utils/sessionCookies');
 const { hashApiKey } = require('../utils/apiKeys');
+const { ACCESS_TOKEN_PREFIX, findAccessGrant, appTokenRefusal } = require('../services/oauth');
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
@@ -151,6 +153,45 @@ async function authenticateApiKey(req, res, next) {
   }
 }
 
+// ─── CONNECTED-APP TOKENS ───
+/**
+ * An access token a connected app was given with a user's consent (see
+ * services/oauth). It acts as that user, within the scopes they granted.
+ */
+async function authenticateAppToken(req, res, next, token) {
+  const bearerError = (status, error, description, body) => {
+    res.set('WWW-Authenticate', `Bearer error="${error}", error_description="${description}"`);
+    return res.status(status).json(body);
+  };
+  try {
+    const prisma = req.app.locals.prisma;
+    const { grant, reason } = await findAccessGrant(prisma, token);
+    if (reason === 'expired') {
+      return bearerError(401, 'invalid_token', 'The access token expired', { error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
+    if (!grant) return bearerError(401, 'invalid_token', 'The access token is invalid', { error: 'Invalid token' });
+
+    const owner = await loadUser(req, grant.userId);
+    if (!owner || !owner.active) {
+      return bearerError(401, 'invalid_token', 'The access token is invalid', { error: 'Invalid token' });
+    }
+    const refusal = appTokenRefusal(req, grant.scopes);
+    if (refusal) {
+      return bearerError(403, 'insufficient_scope', refusal, { error: refusal, code: 'INSUFFICIENT_SCOPE' });
+    }
+
+    req.userId = owner.id;
+    req.userRole = 'app';
+    req.user = owner;
+    req.isAppToken = true;
+    req.connectedAppId = grant.appId;
+    req.oauthScopes = grant.scopes;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Token validation failed' });
+  }
+}
+
 /** The authenticated user, with role and permissions, cached on the request. */
 async function loadUser(req, userId) {
   if (req.user && req.user.id === userId) return req.user;
@@ -175,6 +216,7 @@ async function authenticate(req, res, next) {
   // httpOnly session cookie (see utils/sessionCookies).
   const header = req.headers.authorization;
   let token = header && header.startsWith('Bearer ') ? header.split(' ')[1] : null;
+  if (token && token.startsWith(ACCESS_TOKEN_PREFIX)) return authenticateAppToken(req, res, next, token);
   const viaCookie = !token;
   if (viaCookie) token = readCookie(req, ACCESS_COOKIE);
   if (!token) {
@@ -197,6 +239,7 @@ async function authenticate(req, res, next) {
     // shares one secret, and this used to accept any of them carrying a
     // userId: the seven-day refresh token, and the connected-app token that
     // /connected-apps/oauth/token minted for any user id it was handed.
+    // Connected apps now get opaque tokens, handled above.
     if (decoded.type !== 'access') return res.status(401).json({ error: 'Invalid token type' });
 
     req.userId = decoded.userId;

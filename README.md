@@ -486,7 +486,18 @@ A key acts for the user who created it and stops working if that user is disable
 
 ### SSO and OAuth
 
-SSO providers (SAML 2.0 and OIDC) are configured via `/api/security/sso`. Google and Microsoft OAuth come pre-wired through environment variables. Sales Nebula also acts as an OAuth2 authorization server via `/api/oauth` for third-party app integrations.
+SSO providers (SAML 2.0 and OIDC) are configured via `/api/security/sso`. Google and Microsoft sign-in (`/api/oauth`) come pre-wired through environment variables.
+
+### Connected Apps (OAuth 2.0)
+
+Sales Nebula is also an OAuth 2.0 authorization server for third-party apps, using the authorization-code grant with PKCE (S256, required of every app).
+
+1. An administrator registers the app with `POST /api/connected-apps`, giving `name`, `redirectUris` (https, or http on localhost; matched exactly) and `scopes`. The response carries the `clientId` and the `clientSecret`; the secret is shown once, and only a SHA-256 of it is stored.
+2. The app sends the user's browser to `/oauth/authorize?response_type=code&client_id=...&redirect_uri=...&scope=read&state=...&code_challenge=...&code_challenge_method=S256`. The user signs in if need be, sees which app is asking and for what, and allows or denies it. Either way the browser goes back to the redirect URI, with `code` and `state`, or with `error=access_denied`.
+3. The app's server trades the code within five minutes, once: `POST /api/connected-apps/oauth/token` with `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, and its client credentials (HTTP Basic, or `client_id` and `client_secret` in the form body). It gets an access token for one hour and a refresh token for thirty days.
+4. It calls the API with `Authorization: Bearer <access_token>`, and renews with `grant_type=refresh_token`, which also replaces the refresh token. `POST /api/connected-apps/oauth/revoke` with `token` ends the grant.
+
+Scopes: `read` allows GET requests, `write` allows any request, and both stay within the user's own permissions, so `write` granted by an administrator includes administration. Whatever its scopes, an app token cannot use `/api/auth` (other than `GET /api/auth/me`), `/api/security` (MFA devices, SSO, sessions), API keys, or `/api/connected-apps`, so an app cannot change anyone's sign-in or authorize itself or another app. Users see and revoke the apps they have authorized under Settings, Security; revoking or disabling an app ends every grant to it.
 
 ### Security Features
 

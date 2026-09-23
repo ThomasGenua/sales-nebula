@@ -953,16 +953,22 @@ Third-party integrations with email sync
 
 ### `/api/connected-apps`
 
-OAuth2 client application management
+OAuth 2.0 client applications, and the authorization server they use (see "Connected Apps (OAuth 2.0)" in the README)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/connected-apps` | List all connected apps |
-| POST | `/api/connected-apps` | Create new connected app |
-| PUT | `/api/connected-apps/:id` | Update connected app |
-| DELETE | `/api/connected-apps/:id` | Delete connected app |
-| POST | `/api/connected-apps/oauth/token` | Create new connected app |
-| POST | `/api/connected-apps/oauth/revoke` | Create new connected app |
+| POST | `/api/connected-apps` | Register a connected app; the client secret is returned once |
+| PUT | `/api/connected-apps/:id` | Update a connected app's name, redirect URIs, scopes or status |
+| DELETE | `/api/connected-apps/:id` | Delete a connected app and every grant to it |
+| POST | `/api/connected-apps/:id/revoke` | Disable a connected app and end every grant to it |
+| POST | `/api/connected-apps/:id/rotate-secret` | Issue a new client secret, returned once |
+| GET | `/api/connected-apps/oauth/authorize` | Check an authorization request for the consent screen (the user's own session) |
+| POST | `/api/connected-apps/oauth/authorize` | Record the user's decision; returns the redirect back to the app |
+| POST | `/api/connected-apps/oauth/token` | Exchange a code (with its PKCE verifier) or a refresh token for tokens |
+| POST | `/api/connected-apps/oauth/revoke` | End the grant behind an access or refresh token |
+| GET | `/api/connected-apps/authorizations` | The apps the signed-in user has authorized |
+| DELETE | `/api/connected-apps/authorizations/:appId` | Revoke the signed-in user's authorization of an app |
 
 ### `/api/marketplace`
 

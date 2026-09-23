@@ -214,12 +214,12 @@ function AuthProvider({ children }) {
     });
     applySession(d);
   };
-  const logout = async () => {
+  const logout = async ({ returnTo = "/" } = {}) => {
     // The server revokes both tokens and clears the cookies; the page cannot.
     if (!demoMode) await apiFetch("/auth/logout", { method: "POST", skipRefresh: true }).catch(() => {});
     setUser(null); setDemoMode(false);
     localStorage.removeItem("sn_demo_mode");
-    window.history.pushState({}, "", "/");
+    window.history.pushState({}, "", returnTo);
     window.location.reload();
   };
 
@@ -2086,6 +2086,7 @@ function SettingsPage() {
               Enable 2FA
             </Button>
           </div>
+          <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
 
@@ -2109,6 +2110,52 @@ function SettingsPage() {
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+/** The connected apps this user has let act for them, each revocable. */
+function AuthorizedAppsPanel({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [apps, setApps] = useState(null);
+
+  const load = useCallback(() => {
+    if (demoMode) { setApps([]); return; }
+    apiFetch("/connected-apps/authorizations").then(d => setApps(d.data || [])).catch(() => setApps([]));
+  }, [apiFetch, demoMode]);
+  useEffect(() => { load(); }, [load]);
+
+  const revoke = async (app) => {
+    try {
+      await apiFetch(`/connected-apps/authorizations/${encodeURIComponent(app.appId)}`, { method: "DELETE" });
+      setToast({ message: `${app.name} can no longer use your account`, type: "success" });
+      load();
+    } catch (e) {
+      setToast({ message: e.message, type: "error" });
+    }
+  };
+
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--sn-body)" }}>Authorized apps</h3>
+      <p className="text-xs mb-4" style={{ color: "var(--sn-slate)" }}>Connected apps you have allowed to act for you. Revoking one ends its access at once.</p>
+      {apps === null ? <Spinner label="Loading authorized apps" /> : apps.length === 0 ? (
+        <p className="text-xs" style={{ color: "var(--sn-dim)" }}>You have not authorized any apps.</p>
+      ) : (
+        <ul className="space-y-2">
+          {apps.map(app => (
+            <li key={app.appId} className="flex items-center justify-between gap-3 py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+              <div className="min-w-0">
+                <div className="text-sm truncate" style={{ color: "var(--sn-cream)" }}>{app.name}</div>
+                <div className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                  {app.scopes.join(", ")} · since {new Date(app.authorizedAt).toLocaleDateString(...fmt())}
+                </div>
+              </div>
+              <Button variant="danger" size="sm" onClick={() => revoke(app)}>Revoke</Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -2206,6 +2253,110 @@ function AdminDashboardPage() {
 }
 
 // ========================================================================
+// OAUTH CONSENT -- where a connected app asks a user for access
+// ========================================================================
+const OAUTH_CONSENT_PATH = "/oauth/authorize";
+
+/** Only ever leave for an http(s) address; the server built it, but still. */
+function leaveFor(url) {
+  try {
+    if (["https:", "http:"].includes(new URL(url).protocol)) window.location.assign(url);
+  } catch { /* not a URL: stay put */ }
+}
+
+/**
+ * A connected app sends the user here, with its OAuth request in the query.
+ * The user sees which app is asking, what for, and where they will be sent
+ * back to; nothing is issued unless they allow it. The server checks the
+ * request again when the decision arrives, so nothing here is trusted.
+ */
+function OAuthConsentPage() {
+  const { user, demoMode, apiFetch, logout } = useAuth();
+  const query = window.location.search;
+  const [request, setRequest] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (demoMode) { setError("The demo account cannot authorize apps. Sign out and sign in with your own account."); return; }
+    apiFetch(`/connected-apps/oauth/authorize${query}`)
+      .then(d => {
+        // A known app's malformed request goes back to it with the reason.
+        if (d.error && d.redirectTo) leaveFor(d.redirectTo);
+        else setRequest(d);
+      })
+      .catch(e => setError(e.message || "This authorization request is not valid."));
+  }, [demoMode, apiFetch, query]);
+
+  const decide = async (decision) => {
+    setBusy(true); setError("");
+    try {
+      const params = Object.fromEntries(new URLSearchParams(query));
+      const d = await apiFetch("/connected-apps/oauth/authorize", { method: "POST", body: { ...params, decision } });
+      leaveFor(d.redirectTo);
+    } catch (e) {
+      setError(e.message || "Could not finish authorizing the app.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-[100dvh] flex items-center justify-center p-4" style={{ background: "var(--sn-void)", color: "var(--sn-cream)" }}>
+      <div className="w-full max-w-md">
+        <div className="flex justify-end mb-4">
+          <ThemeToggle compact />
+        </div>
+        <div className="text-center mb-6">
+          <div className="flex justify-center mb-4">
+            <BrandMark size={48} />
+          </div>
+          <h1 className="text-xl font-bold" style={{ color: "var(--sn-cream)" }}>
+            {request ? `${request.app.name} wants access to your Sales Nebula account` : "Authorize an app"}
+          </h1>
+          <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>Signed in as {user?.email}</p>
+        </div>
+        <div className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
+          {error && <div role="alert" className="rounded-lg px-3 py-2.5 text-sm" style={{ background: "rgba(248,113,113,0.10)", border: "1px solid rgba(248,113,113,0.20)", color: "var(--sn-red-ink)" }}>{error}</div>}
+          {!request && !error && <Spinner label="Checking the request" />}
+          {request && (
+            <>
+              {request.app.description && <p className="text-sm" style={{ color: "var(--sn-body)" }}>{request.app.description}</p>}
+              <div>
+                <p className="text-xs font-medium mb-2" style={{ color: "var(--sn-slate)" }}>If you allow it, it can:</p>
+                <ul className="space-y-2">
+                  {request.scopes.map(s => (
+                    <li key={s.name} className="flex items-start gap-2 text-sm" style={{ color: "var(--sn-cream)" }}>
+                      <CheckCircle2 size={16} className="shrink-0 mt-0.5" style={{ color: "var(--sn-green-ink)" }} aria-hidden="true" />
+                      {s.description}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                It acts as you and can do no more than your own permissions allow. It can never change your password,
+                your sign-in or security settings, or your API keys. You can take its access away at any time under
+                Settings, Security.
+              </p>
+              <p className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                Either way you will be sent back to <span className="font-medium" style={{ color: "var(--sn-body)" }}>{request.redirectOrigin}</span>.
+              </p>
+              <div className="flex gap-3 pt-1">
+                <Button variant="secondary" size="lg" fullWidth disabled={busy} onClick={() => decide("deny")}>Deny</Button>
+                <Button size="lg" fullWidth disabled={busy} onClick={() => decide("allow")}>Allow</Button>
+              </div>
+            </>
+          )}
+          <button type="button" onClick={() => logout({ returnTo: OAUTH_CONSENT_PATH + query })}
+            className="w-full text-xs underline min-h-[32px]" style={{ color: "var(--sn-dim)" }}>
+            Not you? Sign out
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ========================================================================
 // LOGIN PAGE -- mobile-first
 // ========================================================================
 function LoginPage({ go }) {
@@ -2219,8 +2370,10 @@ function LoginPage({ go }) {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState("login"); // login | forgot | mfa
 
+  // Signing in on the way to a connected app's consent screen stays there.
+  const authorizing = window.location.pathname === OAUTH_CONSENT_PATH;
   const enterApp = () => {
-    if (window.location.pathname !== "/app") {
+    if (!authorizing && window.location.pathname !== "/app") {
       window.history.pushState({}, "", "/app");
     }
   };
@@ -2289,7 +2442,7 @@ function LoginPage({ go }) {
           </div>
           <h1 className="text-2xl font-bold" style={{ color: "var(--sn-cream)" }}>Sales Nebula</h1>
           <p className="text-sm mt-1" style={{ color: "var(--sn-dim)" }}>
-            {mode === "forgot" ? "Reset your password" : "Sales CRM"}
+            {mode === "forgot" ? "Reset your password" : authorizing ? "Sign in to authorize an app" : "Sales CRM"}
           </p>
         </div>
         <form onSubmit={mode === "forgot" ? handleForgot : mode === "mfa" ? handleMfa : handleLogin} className="rounded-2xl p-5 sm:p-6 space-y-4" style={{ background: "var(--sn-panel)", border: "1px solid var(--sn-rule)" }}>
@@ -5400,5 +5553,6 @@ function AppInner({ go }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="min-h-[100dvh] flex items-center justify-center" style={{ background: "var(--sn-void)" }}><Spinner /></div>;
   if (!user) return <LoginPage go={go} />;
+  if (window.location.pathname === OAUTH_CONSENT_PATH) return <OAuthConsentPage />;
   return <AppShell go={go} />;
 }
