@@ -1,6 +1,8 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach, reachableWhere } = require('../middleware/access');
+const { editableFields } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = createCrudRouter('contact', 'contacts', {
@@ -38,14 +40,25 @@ const router = createCrudRouter('contact', 'contacts', {
     });
 
     // POST /api/contacts/:id/merge
-    router.post('/:id/merge', async (req, res, next) => {
+    // It deletes a contact, so it takes the module's full permission, as DELETE does.
+    router.post('/:id/merge', requirePermission('contacts', 'full'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const primaryId = req.params.id;
         const { mergeId, fields } = req.body;
+        // Without one, the re-link below matched every contact's records.
+        if (!mergeId || typeof mergeId !== 'string') return res.status(400).json({ error: 'mergeId required' });
+        if (mergeId === primaryId) return res.status(400).json({ error: 'Cannot merge contact into itself' });
+        // The router checks :id alone. This contact gives up its records and is
+        // deleted, so the caller needs the row access DELETE asks for.
+        if (!(await canReach(req, 'contacts', 'contact', mergeId, 'Full'))) {
+          return res.status(404).json({ error: 'Not found' });
+        }
 
-        // Update primary with selected fields
-        await prisma.contact.update({ where: { id: primaryId }, data: fields });
+        // Update primary with selected fields: its own columns, not its id,
+        // owner or a nested write into another table.
+        const data = editableFields('contact', fields);
+        if (Object.keys(data).length) await prisma.contact.update({ where: { id: primaryId }, data });
 
         // Re-link all relations from merged record to primary
         await Promise.all([
@@ -70,7 +83,10 @@ const router = createCrudRouter('contact', 'contacts', {
         const { records } = req.body;
         if (!records || !Array.isArray(records)) return res.status(400).json({ error: 'records array required' });
 
-        const created = await prisma.contact.createMany({ data: records, skipDuplicates: true });
+        // Each row as the contact's own columns, owned by the importer. Raw
+        // rows set ids, timestamps and another rep as owner.
+        const data = records.map(row => ({ ...editableFields('contact', row), ownerId: req.userId }));
+        const created = await prisma.contact.createMany({ data, skipDuplicates: true });
         res.json({ success: true, imported: created.count });
       } catch (err) { next(err); }
     });
@@ -82,48 +98,21 @@ const router = createCrudRouter('contact', 'contacts', {
         const contact = await prisma.contact.findUnique({ where: { id: req.params.id } });
         if (!contact) return res.status(404).json({ error: 'Not found' });
 
+        // Whole records, so only contacts the caller could open anyway.
         const dupes = await prisma.contact.findMany({
-          where: {
+          where: await reachableWhere(req, 'contacts', 'contact', {
             id: { not: contact.id },
             OR: [
               { AND: [{ firstName: contact.firstName }, { lastName: contact.lastName }] },
               ...(contact.email ? [{ email: contact.email }] : []),
               ...(contact.phone ? [{ phone: contact.phone }] : []),
             ],
-          },
+          }),
         });
         res.json(dupes);
       } catch (err) { next(err); }
     });
   },
-});
-
-// Merge contacts
-router.post('/:id/merge', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { mergeIds } = req.body;
-    if (!mergeIds?.length) return res.status(400).json({ error: 'mergeIds required' });
-    const primary = await prisma.contact.findUnique({ where: { id: req.params.id } });
-    if (!primary) return res.status(404).json({ error: 'Primary contact not found' });
-    for (const mid of mergeIds) {
-      const sec = await prisma.contact.findUnique({ where: { id: mid } });
-      if (!sec) continue;
-      // Fill blank fields from secondary
-      const updates = {};
-      const fields = ['phone','mobilePhone','title','department','mailingCity','mailingState','mailingCountry','leadSource'];
-      fields.forEach(f => { if (!primary[f] && sec[f]) updates[f] = sec[f]; });
-      if (Object.keys(updates).length) await prisma.contact.update({ where: { id: primary.id }, data: updates });
-      // Reassign related records
-      await prisma.activity.updateMany({ where: { contactId: mid }, data: { contactId: primary.id } }).catch(() => {});
-      await prisma.case.updateMany({ where: { contactId: mid }, data: { contactId: primary.id } }).catch(() => {});
-      await prisma.deal.updateMany({ where: { contactId: mid }, data: { contactId: primary.id } }).catch(() => {});
-      await prisma.contact.update({ where: { id: mid }, data: { deletedAt: new Date(), mergedIntoId: primary.id } });
-    }
-    await req.audit({ action: 'merge', module: 'contacts', recordId: primary.id, details: `Merged ${mergeIds.length} contacts` });
-    const merged = await prisma.contact.findUnique({ where: { id: primary.id } });
-    res.json(merged);
-  } catch (err) { next(err); }
 });
 
 // Duplicate check
@@ -136,7 +125,8 @@ router.get('/duplicates/check', authenticate, async (req, res, next) => {
     if (phone) conditions.push({ phone });
     if (firstName && lastName) conditions.push({ AND: [{ firstName: { equals: firstName, mode: 'insensitive' } }, { lastName: { equals: lastName, mode: 'insensitive' } }] });
     if (!conditions.length) return res.json({ duplicates: [] });
-    const dupes = await prisma.contact.findMany({ where: { OR: conditions, deletedAt: null }, take: 10 });
+    // Whole records, so only contacts the caller could open anyway.
+    const dupes = await prisma.contact.findMany({ where: await reachableWhere(req, 'contacts', 'contact', { OR: conditions }), take: 10 });
     res.json({ duplicates: dupes, count: dupes.length });
   } catch (err) { next(err); }
 });
