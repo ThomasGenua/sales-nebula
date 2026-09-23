@@ -503,7 +503,7 @@ Scopes: `read` allows GET requests, `write` allows any request, and both stay wi
 
 ### Real-Time Updates (WebSocket)
 
-Socket.io runs on the API server. A client connects with a session access token (`auth: { token }`, or the `sn_access` cookie); connected-app tokens and API keys are not accepted. Every socket joins its user's room for notifications and approval requests. `join:module` (a module name) needs read permission on the module, and `join:record` (`{ module, recordId }`) needs a record the user can see; both answer an optional ack with `{ ok }`. Record events (`record:created`, `record:updated`, `record:deleted`, `deal:stageChanged`) carry the module and record id only; fetch the record through the API.
+Socket.io runs on the API server. A client connects with a session access token (`auth: { token }`, or the `sn_access` cookie); connected-app tokens and API keys are not accepted. Every socket joins its user's room for notifications and approval requests. `join:record` (`{ module, recordId }`) needs a record the user can see. `join:module` (a module name) needs read permission on the module and no records in it hidden from the user, since it hears about every record; anyone else follows records one by one. Both answer an optional ack with `{ ok, reason }`. Record events (`record:created`, `record:updated`, `record:deleted`, `deal:stageChanged`) carry the module and record id only; fetch the record through the API. A socket closes, after a `session:expired` event, when its access token expires; reconnect with a fresh token and rejoin.
 
 ### Security Features
 
