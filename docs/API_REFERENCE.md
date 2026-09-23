@@ -4,7 +4,10 @@
 
 Base URL: `http://localhost:4000`
 
-All endpoints require `Authorization: Bearer <token>` unless marked **(public)**.
+All endpoints require `Authorization: Bearer <token>` (or an `X-API-Key`) unless
+marked **(public)**. The browser app uses a cookie session instead: sign in with
+`X-Session-Mode: cookie`, then send the `sn_csrf` cookie's value as
+`X-CSRF-Token` on every state-changing request.
 
 Modules built with CRUD factory include: GET / (list), GET /:id, POST /, PUT /:id, DELETE /:id -- marked **[CRUD]**.
 

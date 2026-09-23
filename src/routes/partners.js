@@ -2,6 +2,8 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('partner', 'partners', {
   include: {
@@ -57,11 +59,11 @@ router.post('/:id/certifications', authenticate, requirePermission('partners', '
 router.post('/:id/register-deal', authenticate, requirePermission('partners', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { dealName, value, accountId, notes } = req.body;
+    const { dealName, value, currency, accountId, notes } = req.body;
     if (!dealName) return res.status(400).json({ error: 'dealName required' });
     const deal = await prisma.deal.create({
       data: {
-        name: `[Partner] ${dealName}`, value: value || 0, stage: 'Qualification',
+        name: `[Partner] ${dealName}`, value: value || 0, currency: await resolveDealCurrency(prisma, currency), stage: 'Qualification',
         partnerId: req.params.id, source: 'Partner Referral',
         ...(accountId && { accountId }), description: notes || '',
       },
@@ -95,8 +97,10 @@ module.exports = router;
 router.get('/:id/pipeline', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deals = await prisma.deal.findMany({ where: { partnerId: req.params.id, deletedAt: null, stage: { notIn: ['Closed Won','Closed Lost'] } }, select: { id: true, name: true, value: true, stage: true, closeDate: true } });
-    res.json({ partnerId: req.params.id, pipeline: deals, totalValue: deals.reduce((s, d) => s + (d.value || 0), 0), dealCount: deals.length });
+    const deals = await prisma.deal.findMany({ where: { partnerId: req.params.id, deletedAt: null, stage: { notIn: ['Closed Won','Closed Lost'] } }, select: { id: true, name: true, value: true, currency: true, stage: true, closeDate: true } });
+    const ctx = await currencyContext(prisma);
+    // Each deal keeps its own currency; the total is in the default.
+    res.json({ partnerId: req.params.id, currency: ctx.base, pipeline: deals, totalValue: sumInBase(deals, ctx), dealCount: deals.length });
   } catch (err) { next(err); }
 });
 
@@ -106,28 +110,27 @@ router.get('/:id/commissions', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const partner = await prisma.partner.findUnique({ where: { id: req.params.id } });
     if (!partner) return res.status(404).json({ error: 'Not found' });
-    const wonDeals = await prisma.deal.findMany({ where: { partnerId: req.params.id, stage: 'Closed Won', deletedAt: null }, select: { id: true, name: true, value: true, closedAt: true } });
+    // A won deal's closeDate is when it closed; there is no closedAt.
+    const wonDeals = await prisma.deal.findMany({ where: { partnerId: req.params.id, stage: 'Closed Won', deletedAt: null }, select: { id: true, name: true, value: true, currency: true, closeDate: true } });
     const rate = partner.commissionRate || 0.10;
-    const commissions = wonDeals.map(d => ({ dealId: d.id, dealName: d.name, value: d.value, commission: Math.round((d.value || 0) * rate), closedAt: d.closedAt }));
-    res.json({ partnerId: partner.id, commissionRate: rate, totalCommission: commissions.reduce((s, c) => s + c.commission, 0), commissions });
+    const ctx = await currencyContext(prisma);
+    // A commission is in its deal's currency; the total is in the default.
+    const commissions = wonDeals.map(d => ({ dealId: d.id, dealName: d.name, value: d.value, currency: d.currency || ctx.base, commission: Math.round((d.value || 0) * rate), closedAt: d.closeDate }));
+    const totalCommission = Math.round(wonDeals.reduce((s, d) => s + ctx.toBase(d.value, d.currency) * rate, 0));
+    res.json({ partnerId: partner.id, commissionRate: rate, currency: ctx.base, totalCommission, commissions });
   } catch (err) { next(err); }
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'partners', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'partners' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'partners', model: 'partner' });
 
 // Partner activities
 router.get('/:id/activities', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const activities = await prisma.activity.findMany({ where: { partnerId: req.params.id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []);
+    // Activities carry no partner; a partner's activities are those on the
+    // deals the partner brought in.
+    const activities = await prisma.activity.findMany({ where: { deal: { partnerId: req.params.id }, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 20 });
     res.json(activities);
   } catch (err) { next(err); }
 });
@@ -140,7 +143,9 @@ router.get('/:id/scorecard', authenticate, async (req, res, next) => {
     if (!partner) return res.status(404).json({ error: 'Not found' });
     const deals = await prisma.deal.findMany({ where: { partnerId: partner.id, deletedAt: null } });
     const won = deals.filter(d => d.stage === 'Closed Won');
-    res.json({ partnerId: partner.id, tier: partner.tier, totalDeals: deals.length, wonDeals: won.length, winRate: deals.length ? Math.round(won.length / deals.length * 100) : 0, totalRevenue: won.reduce((s, d) => s + (d.value || 0), 0), avgDealSize: won.length ? Math.round(won.reduce((s, d) => s + (d.value || 0), 0) / won.length) : 0 });
+    const ctx = await currencyContext(prisma);
+    const revenue = sumInBase(won, ctx);
+    res.json({ partnerId: partner.id, tier: partner.tier, currency: ctx.base, totalDeals: deals.length, wonDeals: won.length, winRate: deals.length ? Math.round(won.length / deals.length * 100) : 0, totalRevenue: revenue, avgDealSize: won.length ? Math.round(revenue / won.length) : 0 });
   } catch (err) { next(err); }
 });
 

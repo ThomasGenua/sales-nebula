@@ -1,0 +1,74 @@
+# INERT TEMPLATE. GitHub runs only files under .github/workflows/, so this file
+# never runs from here. CI is disabled on purpose; see .github/CI_DISABLED.md,
+# which explains when and how to turn it back on by copying this file.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sales_nebula_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Throwaway service credentials, not secrets.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/sales_nebula_test?schema=public
+      MIGRATE_URL: postgresql://postgres:postgres@localhost:5432/sales_nebula_migrate?schema=public
+      NODE_ENV: test
+      JWT_SECRET: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20 # matches the Dockerfile
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # The migrations must build the schema from nothing, exactly as a
+      # production deploy does, and land on what schema.prisma describes.
+      - name: Migrations apply cleanly and match the schema
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE sales_nebula_migrate'
+          DATABASE_URL="$MIGRATE_URL" npx prisma migrate deploy
+          DATABASE_URL="$MIGRATE_URL" npx prisma migrate diff \
+            --from-url "$MIGRATE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+
+      - name: Every column the code names exists
+        run: node scripts/check-prisma-fields.js src prisma/seed.js scripts
+
+      - name: Tests
+        run: npm test
+
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build

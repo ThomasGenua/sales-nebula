@@ -130,7 +130,7 @@ router.get('/:id/usage', authenticate, async (req, res, next) => {
 router.get('/:id/invoices', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const invoices = await prisma.invoice.findMany({ where: { subscriptionId: req.params.id, deletedAt: null }, orderBy: { createdAt: 'desc' } }).catch(() => []);
+    const invoices = await prisma.invoice.findMany({ where: { subscriptionId: req.params.id, deletedAt: null }, orderBy: { createdAt: 'desc' } });
     res.json(invoices);
   } catch (err) { next(err); }
 });

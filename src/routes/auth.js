@@ -4,13 +4,17 @@ const { validate, schemas } = require('../middleware/validate');
 const { limiters } = require('../middleware/rateLimit');
 const {
   authenticate, signAccessToken, signRefreshToken, signToken,
-  blacklistToken, validatePassword,
+  blacklistToken, isBlacklisted, validatePassword,
   recordFailedLogin, clearLoginAttempts, isAccountLocked, getLockedUntil, getRemainingAttempts,
   JWT_SECRET,
 } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
 const { verifyTotp, safeEqual } = require('../utils/totp');
 const jwt = require('jsonwebtoken');
+const {
+  ACCESS_COOKIE, REFRESH_COOKIE, readCookie, wantsCookieSession,
+  setSessionCookies, clearSessionCookies, csrfValid,
+} = require('../utils/sessionCookies');
 
 const router = Router();
 
@@ -19,11 +23,17 @@ const DEFAULT_SIGNUP_ROLE = process.env.DEFAULT_SIGNUP_ROLE || 'Sales Rep';
 
 /**
  * Issue the session for a fully authenticated user. Shared by password login
- * and the MFA second step so both return an identical shape.
+ * and the MFA second step so both return an identical shape. A browser that
+ * asks for a cookie session gets its tokens only as httpOnly cookies; every
+ * other caller gets them in the body, as before.
  */
-async function issueSession(prisma, user, res) {
+async function issueSession(prisma, user, req, res) {
   const accessToken = signAccessToken(user.id, user.role.name);
   const { token: refreshToken } = signRefreshToken(user.id);
+
+  // The profile page shows this; nothing used to write it.
+  const lastLoginAt = new Date();
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt } });
 
   await audit(prisma, {
     action: 'login', module: 'auth',
@@ -31,7 +41,12 @@ async function issueSession(prisma, user, res) {
     userId: user.id,
   });
 
-  const { password: _pw, ...safeUser } = user;
+  const { password: _pw, ...rest } = user;
+  const safeUser = { ...rest, lastLoginAt };
+  if (wantsCookieSession(req)) {
+    setSessionCookies(res, { accessToken, refreshToken });
+    return res.json({ session: 'cookie', expiresIn: 900, user: safeUser });
+  }
   return res.json({
     token: accessToken,         // Backward compatible
     accessToken,
@@ -101,19 +116,28 @@ router.post('/login', limiters.auth, validate(schemas.login), async (req, res, n
       return res.json({ mfaRequired: true, mfaToken, devices, expiresIn: 300 });
     }
 
-    return issueSession(prisma, user, res);
+    return issueSession(prisma, user, req, res);
   } catch (err) { next(err); }
 });
 
 // POST /api/auth/refresh - Exchange refresh token for new access token
 router.post('/refresh', async (req, res, next) => {
   try {
-    const { refreshToken } = req.body;
+    // A script sends its refresh token in the body. The browser's sits in an
+    // httpOnly cookie that only /api/auth receives, and a request spending it
+    // must prove it came from the page.
+    const fromCookie = !req.body?.refreshToken;
+    const refreshToken = req.body?.refreshToken || readCookie(req, REFRESH_COOKIE);
     if (!refreshToken) return res.status(400).json({ error: 'refreshToken required' });
+    if (fromCookie && !csrfValid(req)) return res.status(403).json({ error: 'CSRF token missing or invalid', code: 'CSRF_FAILED' });
 
     const decoded = jwt.verify(refreshToken, JWT_SECRET);
     if (decoded.type !== 'refresh') {
       return res.status(401).json({ error: 'Invalid token type' });
+    }
+    // Signing out revokes the refresh token too; it used to stay good for a week.
+    if (decoded.jti && await isBlacklisted(decoded.jti)) {
+      return res.status(401).json({ error: 'Refresh token has been revoked' });
     }
 
     const prisma = req.app.locals.prisma;
@@ -126,6 +150,10 @@ router.post('/refresh', async (req, res, next) => {
     }
 
     const accessToken = signAccessToken(user.id, user.role.name);
+    if (fromCookie) {
+      setSessionCookies(res, { accessToken });
+      return res.json({ session: 'cookie', expiresIn: 900 });
+    }
     res.json({ accessToken, token: accessToken, expiresIn: 900 });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -135,19 +163,53 @@ router.post('/refresh', async (req, res, next) => {
   }
 });
 
-// POST /api/auth/logout - Revoke current access token
-router.post('/logout', authenticate, async (req, res, next) => {
+// POST /api/auth/logout - Revoke the session's tokens
+// Works with an expired access token too, so a signed-out browser is never
+// left holding cookies. Everything it can verify is revoked: the access token
+// and, now, the refresh token, which used to stay good for a week.
+router.post('/logout', async (req, res, next) => {
   try {
-    if (req.tokenJti) {
-      await blacklistToken(req.tokenJti, 900); // Blacklist for 15min (access token lifetime)
+    const header = req.headers.authorization;
+    const bearer = header && header.startsWith('Bearer ') ? header.slice(7) : null;
+    const hasSessionCookie = Boolean(readCookie(req, ACCESS_COOKIE) || readCookie(req, REFRESH_COOKIE));
+    if (!bearer && !hasSessionCookie) return res.status(401).json({ error: 'No token provided' });
+    // Only the page can sign its own session out; a forged cross-site request
+    // cannot echo the CSRF token.
+    if (!bearer && !csrfValid(req)) {
+      return res.status(403).json({ error: 'CSRF token missing or invalid', code: 'CSRF_FAILED' });
     }
 
-    const prisma = req.app.locals.prisma;
-    await audit(prisma, { action: 'logout', module: 'auth', details: 'User logged out', userId: req.userId });
+    const verified = (token, type) => {
+      try { const d = jwt.verify(token, JWT_SECRET); return d.type === type ? d : null; } catch { return null; }
+    };
+    const access = verified(bearer || readCookie(req, ACCESS_COOKIE), 'access');
+    const refresh = verified(req.body?.refreshToken || readCookie(req, REFRESH_COOKIE), 'refresh');
+    const now = Math.floor(Date.now() / 1000);
+    if (access?.jti) await blacklistToken(access.jti, Math.max(1, access.exp - now));
+    if (refresh?.jti) await blacklistToken(refresh.jti, Math.max(1, refresh.exp - now));
+
+    clearSessionCookies(res);
+    const userId = access?.userId || refresh?.userId;
+    if (userId) {
+      const prisma = req.app.locals.prisma;
+      await audit(prisma, { action: 'logout', module: 'auth', details: 'User logged out', userId });
+    }
 
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+/** An IANA time zone this runtime knows, such as Europe/Paris. */
+function isTimeZone(zone) {
+  if (typeof zone !== 'string' || zone.length > 64) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
+}
+
+/** The canonical BCP 47 form of a locale (en-gb -> en-GB), or null. */
+function canonicalLocale(locale) {
+  if (typeof locale !== 'string' || locale.length > 35) return null;
+  try { return Intl.getCanonicalLocales(locale)[0] || null; } catch { return null; }
+}
 
 // GET /api/auth/me
 router.get('/me', authenticate, async (req, res, next) => {
@@ -167,12 +229,23 @@ router.get('/me', authenticate, async (req, res, next) => {
 router.put('/me', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { firstName, lastName, email, avatar } = req.body || {};
+    const { firstName, lastName, email, avatar, timezone, locale } = req.body || {};
     const data = {};
     if (typeof firstName === 'string' && firstName.trim()) data.firstName = firstName.trim();
     if (typeof lastName === 'string' && lastName.trim()) data.lastName = lastName.trim();
     if (typeof email === 'string' && email.trim()) data.email = email.trim().toLowerCase();
     if (avatar !== undefined) data.avatar = avatar || null;
+
+    // Display preferences. An empty value goes back to the browser's own.
+    if (timezone !== undefined) {
+      if (timezone && !isTimeZone(timezone)) return res.status(400).json({ error: `Unknown time zone: ${timezone}` });
+      data.timezone = timezone || null;
+    }
+    if (locale !== undefined) {
+      const canonical = locale ? canonicalLocale(locale) : null;
+      if (locale && !canonical) return res.status(400).json({ error: `Unknown locale: ${locale}` });
+      data.locale = canonical;
+    }
 
     if (Object.keys(data).length === 0) {
       return res.status(400).json({ error: 'No profile fields to update' });
@@ -254,6 +327,10 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
 
     const token = signAccessToken(user.id, user.role.name);
     const { password: _, ...safeUser } = user;
+    if (wantsCookieSession(req)) {
+      setSessionCookies(res, { accessToken: token, refreshToken: signRefreshToken(user.id).token });
+      return res.status(201).json({ session: 'cookie', user: safeUser });
+    }
     res.status(201).json({ token, user: safeUser });
   } catch (err) { next(err); }
 });
@@ -429,7 +506,7 @@ router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
     if (!user || !user.active) return res.status(403).json({ error: 'Account disabled' });
 
     await prisma.mfaDevice.update({ where: { id: device.id }, data: { lastUsedAt: new Date() } });
-    return issueSession(prisma, user, res);
+    return issueSession(prisma, user, req, res);
   } catch (err) { next(err); }
 });
 

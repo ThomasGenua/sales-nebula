@@ -3,6 +3,7 @@ const { pickModelFields } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
+const { createNumbered, INVOICE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -47,9 +48,7 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
     // Same reason as the shared CRUD router: one stray key (an "amount" that the
     // model spells subtotal/total) made Prisma reject the entire input.
     const { data } = pickModelFields('invoice', rest);
-    const count = await prisma.invoice.count();
-    data.number = `INV-${String(count + 1).padStart(3, '0')}`;
-    const invoice = await prisma.invoice.create({
+    const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
       data: { ...data, items: { create: items || [] } },
       include,
     });
@@ -122,7 +121,8 @@ router.get('/:id/pdf', requirePermission('invoices', 'read'), async (req, res, n
       where: { id: req.params.id },
       include: {
         items: { include: { product: { select: { name: true, sku: true } } } },
-        account: { select: { name: true, address: true, city: true, state: true, country: true, zip: true } },
+        // Account keeps its postcode as billingZip; asking for zip failed every PDF.
+        account: { select: { name: true, address: true, city: true, state: true, country: true, billingZip: true } },
         contact: { select: { firstName: true, lastName: true, email: true, phone: true } },
       },
     });

@@ -1449,7 +1449,9 @@ export function AcceptInvitePage({ go }) {
     try {
       const res = await fetch("/api/signup/invites/accept", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        // Sign straight in with a cookie session; no token reaches the page.
+        headers: { "Content-Type": "application/json", "X-Session-Mode": "cookie" },
         body: JSON.stringify({
           token: token.current,
           password: form.password,
@@ -1463,7 +1465,6 @@ export function AcceptInvitePage({ go }) {
         setError(data.details?.join(". ") || data.error || "Could not create your account.");
         return;
       }
-      localStorage.setItem("sn_token", data.token);
       window.location.href = "/app";
     } catch {
       setState("ready");

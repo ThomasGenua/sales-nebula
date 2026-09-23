@@ -118,11 +118,15 @@ router.get('/mentions', authenticate, async (req, res, next) => {
 router.get('/:recordId/stats', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const [total, comments, likes] = await Promise.all([
-      prisma.feedItem.count({ where: { parentId: req.params.recordId } }),
-      prisma.feedComment.count({ where: { feedItem: { parentId: req.params.recordId } } }).catch(() => 0),
-      prisma.feedLike.count({ where: { feedItem: { parentId: req.params.recordId } } }).catch(() => 0),
+    // FeedLike has no relation to its item, only feedItemId, so find the
+    // record's items first.
+    const items = await prisma.feedItem.findMany({ where: { parentId: req.params.recordId }, select: { id: true } });
+    const itemIds = items.map(i => i.id);
+    const [comments, likes] = await Promise.all([
+      prisma.feedComment.count({ where: { feedItem: { parentId: req.params.recordId } } }),
+      itemIds.length ? prisma.feedLike.count({ where: { feedItemId: { in: itemIds } } }) : 0,
     ]);
+    const total = items.length;
     res.json({ recordId: req.params.recordId, totalPosts: total, totalComments: comments, totalLikes: likes });
   } catch (err) { next(err); }
 });

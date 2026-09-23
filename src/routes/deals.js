@@ -1,5 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
+const { visibleWhere } = require('../middleware/rowSecurity');
+const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
 
 module.exports = createCrudRouter('deal', 'deals', {
   include: {
@@ -15,6 +17,9 @@ module.exports = createCrudRouter('deal', 'deals', {
     return { valid: Object.keys(errors).length === 0, errors };
   },
   orderBy: { updatedAt: 'desc' },
+  // A deal's value is in its own currency; an unknown or inactive code is a
+  // 400, and none at all means the default currency.
+  beforeCreate: async (data, req) => ({ ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) }),
   afterUpdate: async (record, req) => {
     // Track stage changes
     const prisma = req.app.locals.prisma;
@@ -45,6 +50,7 @@ module.exports = createCrudRouter('deal', 'deals', {
     }
   },
   beforeUpdate: async (data, req) => {
+    if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) };
     // Store old stage for afterUpdate comparison
     if (data.stage) {
       const prisma = req.app.locals.prisma;
@@ -54,30 +60,47 @@ module.exports = createCrudRouter('deal', 'deals', {
     return data;
   },
   customRoutes: (router) => {
+    // GET /api/deals/currencies - What the deal form may offer
+    router.get('/currencies', async (req, res, next) => {
+      try {
+        const ctx = await currencyContext(req.app.locals.prisma);
+        res.json({
+          base: ctx.base,
+          data: ctx.currencies.filter(c => c.active).map(({ code, name, symbol, isDefault }) => ({ code, name, symbol, isDefault })),
+        });
+      } catch (err) { next(err); }
+    });
+
     // GET /api/deals/pipeline - Pipeline summary stats
+    // Amounts are in the default currency. This read every deal, deleted and
+    // other people's included, and added values across currencies.
     router.get('/stats/pipeline', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const deals = await prisma.deal.findMany();
+        const [deals, ctx] = await Promise.all([
+          prisma.deal.findMany({ where: await visibleWhere(req, 'deals', 'deal'), select: { stage: true, value: true, currency: true } }),
+          currencyContext(prisma),
+        ]);
         const stages = ['Qualification', 'Discovery', 'Proposal', 'Negotiation', 'Closed Won', 'Closed Lost'];
         const pipeline = stages.map(stage => ({
           stage,
           count: deals.filter(d => d.stage === stage).length,
-          value: deals.filter(d => d.stage === stage).reduce((s, d) => s + d.value, 0),
+          value: sumInBase(deals.filter(d => d.stage === stage), ctx),
         }));
         const open = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
         const won = deals.filter(d => d.stage === 'Closed Won');
         const lost = deals.filter(d => d.stage === 'Closed Lost');
         res.json({
+          currency: ctx.base,
           pipeline,
           summary: {
             totalOpen: open.length,
-            totalValue: open.reduce((s, d) => s + d.value, 0),
+            totalValue: sumInBase(open, ctx),
             wonCount: won.length,
-            wonValue: won.reduce((s, d) => s + d.value, 0),
+            wonValue: sumInBase(won, ctx),
             lostCount: lost.length,
             winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
-            avgDealSize: open.length > 0 ? Math.round(open.reduce((s, d) => s + d.value, 0) / open.length) : 0,
+            avgDealSize: open.length > 0 ? Math.round(sumInBase(open, ctx) / open.length) : 0,
           },
         });
       } catch (err) { next(err); }
@@ -238,8 +261,8 @@ module.exports = createCrudRouter('deal', 'deals', {
       try {
         const prisma = req.app.locals.prisma;
         const deals = await prisma.deal.findMany({
-          where: { stage: { notIn: ['Closed Won', 'Closed Lost'] } },
-          select: { id: true, name: true, stage: true, value: true, updatedAt: true, createdAt: true, account: { select: { name: true } } },
+          where: await visibleWhere(req, 'deals', 'deal', { stage: { notIn: ['Closed Won', 'Closed Lost'] } }),
+          select: { id: true, name: true, stage: true, value: true, currency: true, updatedAt: true, createdAt: true, account: { select: { name: true } } },
         });
 
         const now = Date.now();
@@ -249,6 +272,7 @@ module.exports = createCrudRouter('deal', 'deals', {
           account: d.account?.name,
           stage: d.stage,
           value: d.value,
+          currency: d.currency,
           daysInStage: Math.round((now - d.updatedAt.getTime()) / 86400000),
           totalAge: Math.round((now - d.createdAt.getTime()) / 86400000),
         })).sort((a, b) => b.daysInStage - a.daysInStage);
@@ -277,9 +301,10 @@ module.exports = createCrudRouter('deal', 'deals', {
         }
 
         const where = dateFilter.gte ? { closeDate: dateFilter, stage: { in: ['Closed Won', 'Closed Lost'] } } : { stage: { in: ['Closed Won', 'Closed Lost'] } };
+        const ctx = await currencyContext(prisma);
         const deals = await prisma.deal.findMany({
-          where,
-          select: { id: true, name: true, stage: true, value: true, closeDate: true, lossReason: true, source: true,
+          where: await visibleWhere(req, 'deals', 'deal', where),
+          select: { id: true, name: true, stage: true, value: true, currency: true, closeDate: true, lossReason: true, source: true,
             account: { select: { name: true, industry: true } },
             owner: { select: { id: true, firstName: true, lastName: true } },
           },
@@ -300,8 +325,8 @@ module.exports = createCrudRouter('deal', 'deals', {
         deals.forEach(d => {
           const key = d.owner?.id || 'unassigned';
           if (!byRep[key]) byRep[key] = { user: d.owner, won: 0, lost: 0, wonValue: 0, lostValue: 0 };
-          if (d.stage === 'Closed Won') { byRep[key].won++; byRep[key].wonValue += d.value; }
-          else { byRep[key].lost++; byRep[key].lostValue += d.value; }
+          if (d.stage === 'Closed Won') { byRep[key].won++; byRep[key].wonValue += ctx.toBase(d.value, d.currency); }
+          else { byRep[key].lost++; byRep[key].lostValue += ctx.toBase(d.value, d.currency); }
         });
 
         Object.values(byRep).forEach(r => {
@@ -309,11 +334,12 @@ module.exports = createCrudRouter('deal', 'deals', {
         });
 
         res.json({
+          currency: ctx.base,
           totalWon: won.length, totalLost: lost.length,
           winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
-          wonValue: won.reduce((s, d) => s + d.value, 0),
-          lostValue: lost.reduce((s, d) => s + d.value, 0),
-          avgWonDealSize: won.length > 0 ? Math.round(won.reduce((s, d) => s + d.value, 0) / won.length) : 0,
+          wonValue: sumInBase(won, ctx),
+          lostValue: sumInBase(lost, ctx),
+          avgWonDealSize: won.length > 0 ? Math.round(sumInBase(won, ctx) / won.length) : 0,
           lossReasons,
           byRep: Object.values(byRep),
         });
@@ -375,9 +401,13 @@ module.exports = createCrudRouter('deal', 'deals', {
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
 
-        const deals = await prisma.deal.findMany({
-          select: { stage: true, value: true, probability: true, closeDate: true, createdAt: true },
-        });
+        const [deals, ctx] = await Promise.all([
+          prisma.deal.findMany({
+            where: await visibleWhere(req, 'deals', 'deal'),
+            select: { stage: true, value: true, currency: true, probability: true, closeDate: true, createdAt: true },
+          }),
+          currencyContext(prisma),
+        ]);
 
         const open = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
         const won = deals.filter(d => d.stage === 'Closed Won');
@@ -386,13 +416,14 @@ module.exports = createCrudRouter('deal', 'deals', {
         const wonThisQuarter = won.filter(d => d.closeDate && d.closeDate >= startOfQuarter);
 
         res.json({
-          pipeline: { count: open.length, value: open.reduce((s, d) => s + d.value, 0), weighted: Math.round(open.reduce((s, d) => s + d.value * d.probability / 100, 0)) },
-          won: { count: won.length, value: won.reduce((s, d) => s + d.value, 0) },
-          lost: { count: lost.length, value: lost.reduce((s, d) => s + d.value, 0) },
-          newThisMonth: { count: newThisMonth.length, value: newThisMonth.reduce((s, d) => s + d.value, 0) },
-          wonThisQuarter: { count: wonThisQuarter.length, value: wonThisQuarter.reduce((s, d) => s + d.value, 0) },
+          currency: ctx.base,
+          pipeline: { count: open.length, value: sumInBase(open, ctx), weighted: Math.round(open.reduce((s, d) => s + ctx.toBase(d.value, d.currency) * d.probability / 100, 0)) },
+          won: { count: won.length, value: sumInBase(won, ctx) },
+          lost: { count: lost.length, value: sumInBase(lost, ctx) },
+          newThisMonth: { count: newThisMonth.length, value: sumInBase(newThisMonth, ctx) },
+          wonThisQuarter: { count: wonThisQuarter.length, value: sumInBase(wonThisQuarter, ctx) },
           winRate: (won.length + lost.length) > 0 ? Math.round(won.length / (won.length + lost.length) * 100) : 0,
-          avgDealSize: open.length > 0 ? Math.round(open.reduce((s, d) => s + d.value, 0) / open.length) : 0,
+          avgDealSize: open.length > 0 ? Math.round(sumInBase(open, ctx) / open.length) : 0,
         });
       } catch (err) { next(err); }
     });

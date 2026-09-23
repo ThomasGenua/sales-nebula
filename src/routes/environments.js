@@ -1,8 +1,13 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { statusRoutes } = require('../utils/moduleStatus');
+const { looksLikeId } = require('../utils/modelFields');
 
 const router = Router();
+
+// A segment that is not an id (`/count`) falls through to the routes below.
+const idParam = (req, res, next) => (looksLikeId('environment', req.params.id) ? next() : next('route'));
 
 // List environments
 router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
@@ -13,7 +18,7 @@ router.get('/', authenticate, requirePermission('admin', 'read'), async (req, re
   } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/:id', authenticate, idParam, requirePermission('admin', 'read'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const env = await prisma.environment.findUnique({ where: { id: req.params.id } }); if (!env) return res.status(404).json({ error: 'Not found' }); res.json(env); } catch (err) { next(err); }
 });
 
@@ -27,11 +32,11 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
   } catch (err) { next(err); }
 });
 
-router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const env = await prisma.environment.update({ where: { id: req.params.id }, data: req.body }); res.json(env); } catch (err) { next(err); }
 });
 
-router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
+router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'), async (req, res, next) => {
   try { await req.app.locals.prisma.environment.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
@@ -116,22 +121,8 @@ router.post('/metadata/import', authenticate, requirePermission('admin', 'full')
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'environments', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'environments', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'environments' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'environments', model: 'environment', analytics: true });
 
 // Deployment history
 router.get('/:id/deployments', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {

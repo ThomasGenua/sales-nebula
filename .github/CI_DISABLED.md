@@ -24,17 +24,21 @@ npm test                           # all suites in one process
 Also run before pushing:
 
 ```bash
-node scripts/check-prisma-fields.js src     # columns named in code must exist
-(cd frontend && npm run build)              # production frontend build
+node scripts/check-prisma-fields.js src prisma/seed.js scripts   # columns named in code must exist
+(cd frontend && npm run build)                                   # production frontend build
 ```
 
-`tests/schemaFields.test.js` is a ratchet over the checker's count: it fails if
-a change adds a reference to a column that does not exist.
+`tests/schemaFields.test.js` runs the same checker as a gate: it fails, naming
+the file and line, if code refers to a column or relation that does not exist.
 
 ## Re-enabling CI
 
+A ready workflow is kept in [`ci-template/ci.yml`](ci-template/ci.yml). It sits
+outside `.github/workflows/`, so GitHub never runs it. It starts PostgreSQL 16,
+checks that the migrations build the schema from nothing with no drift, runs
+the static schema checker and the test suite, and builds the frontend.
+
 1. Re-enable Actions in the repository's **Settings → Actions → General**.
-2. Add a workflow under `.github/workflows/` that starts a PostgreSQL service,
-   sets `DATABASE_URL`, runs `npx prisma migrate deploy`, then `npm test`,
-   `node scripts/check-prisma-fields.js src` and the frontend build.
+2. Copy the template into place:
+   `mkdir -p .github/workflows && cp .github/ci-template/ci.yml .github/workflows/ci.yml`
 3. Delete this file.

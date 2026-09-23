@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('asset', 'assets', {
   include: {
@@ -117,22 +118,8 @@ router.post('/bulk/status', authenticate, requirePermission('assets', 'edit'), a
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'assets', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'assets', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'assets' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'assets', model: 'asset', analytics: true });
 
 // Asset utilization report
 router.get('/reports/utilization', authenticate, async (req, res, next) => {

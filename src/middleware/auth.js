@@ -14,6 +14,7 @@ const jwt = require('jsonwebtoken');
 const { v4: uuid } = require('uuid');
 
 const { resolveJwtSecret } = require('../utils/secrets');
+const { ACCESS_COOKIE, readCookie, csrfValid, needsCsrf } = require('../utils/sessionCookies');
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || '15m';
@@ -164,18 +165,33 @@ async function authenticate(req, res, next) {
   // Check API key first
   if (req.headers['x-api-key']) return authenticateApiKey(req, res, next);
 
+  // A Bearer header (scripts, tests, API clients), else the browser's
+  // httpOnly session cookie (see utils/sessionCookies).
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  let token = header && header.startsWith('Bearer ') ? header.split(' ')[1] : null;
+  const viaCookie = !token;
+  if (viaCookie) token = readCookie(req, ACCESS_COOKIE);
+  if (!token) {
     return res.status(401).json({ error: 'No token provided' });
   }
+  // The browser attaches the cookie to forged cross-site requests too; only
+  // the page itself can echo the CSRF token back.
+  if (viaCookie && needsCsrf(req) && !csrfValid(req)) {
+    return res.status(403).json({ error: 'CSRF token missing or invalid', code: 'CSRF_FAILED' });
+  }
   try {
-    const token = header.split(' ')[1];
     const decoded = jwt.verify(token, JWT_SECRET);
 
     // Check blacklist
     if (decoded.jti && await isBlacklisted(decoded.jti)) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
+
+    // Only a session access token opens the API. Every JWT this app signs
+    // shares one secret, and this used to accept any of them carrying a
+    // userId: the seven-day refresh token, and the connected-app token that
+    // /connected-apps/oauth/token minted for any user id it was handed.
+    if (decoded.type !== 'access') return res.status(401).json({ error: 'Invalid token type' });
 
     req.userId = decoded.userId;
     req.userRole = decoded.role;

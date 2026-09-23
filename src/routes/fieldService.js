@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { WORK_ORDER_NUMBER } = require('../utils/numbering');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = createCrudRouter('workOrder', 'fieldService', {
   include: {
@@ -122,22 +123,8 @@ router.get('/stats/overview', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Analytics/stats endpoint
-router.get('/analytics/summary', authenticate, async (req, res, next) => {
-  try {
-    res.json({ module: 'fieldService', status: 'operational', lastChecked: new Date(), metrics: { uptime: process.uptime(), memoryMB: Math.round(process.memoryUsage().heapUsed / 1048576) } });
-  } catch (err) { next(err); }
-});
-
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'fieldService', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'fieldService' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'fieldService', model: 'workOrder', analytics: true });
 
 module.exports = router;
 

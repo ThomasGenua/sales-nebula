@@ -1,14 +1,19 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { statusRoutes } = require('../utils/moduleStatus');
+const { looksLikeId } = require('../utils/modelFields');
 
 const router = Router();
+
+// A segment that is not an id (`/count`) falls through to the routes below.
+const idParam = (req, res, next) => (looksLikeId('customCode', req.params.id) ? next() : next('route'));
 
 router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const scripts = await prisma.customCode.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } }); res.json(scripts); } catch (err) { next(err); }
 });
 
-router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/:id', authenticate, idParam, requirePermission('admin', 'read'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const s = await prisma.customCode.findUnique({ where: { id: req.params.id } }); if (!s) return res.status(404).json({ error: 'Not found' }); res.json(s); } catch (err) { next(err); }
 });
 
@@ -24,7 +29,7 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
   } catch (err) { next(err); }
 });
 
-router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const script = await prisma.customCode.update({ where: { id: req.params.id }, data: { ...req.body, version: { increment: 1 } } });
@@ -32,7 +37,7 @@ router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddle
   } catch (err) { next(err); }
 });
 
-router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
+router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'), async (req, res, next) => {
   try { await req.app.locals.prisma.customCode.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
@@ -128,15 +133,8 @@ router.get('/:id/dependencies', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'customCode', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'customCode' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'customCode', model: 'customCode' });
 
 // Analytics / Stats
 router.get('/analytics/summary', authenticate, async (req, res, next) => {

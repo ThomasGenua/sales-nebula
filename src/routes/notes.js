@@ -58,7 +58,8 @@ router.get('/parent/:module/:parentId', authenticate, async (req, res, next) => 
     const prisma = req.app.locals.prisma;
     const { module, parentId } = req.params;
     const notes = await prisma.note.findMany({
-      where: { parentModule: module, parentId, deletedAt: null },
+      // A note names its record by module + recordId.
+      where: { module, recordId: parentId, deletedAt: null },
       orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }], take: 50,
     });
     res.json(notes);

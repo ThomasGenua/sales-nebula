@@ -151,7 +151,7 @@ router.get('/online', async (req, res, next) => {
     // Consider users "online" if they created an audit log entry in last 15 minutes
     const threshold = new Date(Date.now() - 15 * 60 * 1000);
     const recentLogs = await prisma.auditLog.findMany({
-      where: { timestamp: { gte: threshold } },
+      where: { createdAt: { gte: threshold } },
       select: { userId: true },
       distinct: ['userId'],
     });

@@ -58,9 +58,13 @@ function createApp(prisma) {
     let contentSecurityPolicy = false;
     if (isProd) {
       const hashes = inlineScriptHashes(spaDir);
+      // Fonts and styles are served from here (Poppins is bundled, not fetched
+      // from Google), so Helmet's default of any https: origin is narrowed to
+      // this one.
+      const directives = { 'font-src': ["'self'", 'data:'], 'style-src': ["'self'", "'unsafe-inline'"] };
       contentSecurityPolicy = hashes.length
-        ? { useDefaults: true, directives: { 'script-src': ["'self'", ...hashes] } }
-        : undefined;
+        ? { useDefaults: true, directives: { ...directives, 'script-src': ["'self'", ...hashes] } }
+        : { useDefaults: true, directives };
     }
     app.use(helmet({ contentSecurityPolicy, crossOriginEmbedderPolicy: false }));
   }
@@ -91,7 +95,7 @@ function createApp(prisma) {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID', 'If-Match'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID', 'If-Match', 'X-CSRF-Token', 'X-Session-Mode'],
     exposedHeaders: ['X-Request-ID', 'X-Cache', 'Retry-After'],
     maxAge: 86400,
   }));

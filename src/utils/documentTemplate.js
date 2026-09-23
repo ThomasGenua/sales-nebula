@@ -26,7 +26,7 @@ function generateDocumentHtml(type, data) {
   const accountAddr = data.account ? [
     data.account.name,
     data.account.address,
-    [data.account.city, data.account.state, data.account.zip].filter(Boolean).join(', '),
+    [data.account.city, data.account.state, data.account.billingZip ?? data.account.zip].filter(Boolean).join(', '),
     data.account.country,
   ].filter(Boolean).join('<br>') : '';
 

@@ -84,6 +84,50 @@ async function getOrgWideDefaults(prisma) {
 
 function invalidateOrgWideDefaultCache() { owdCache = { map: null, expires: 0 }; }
 
+const HIERARCHY_CACHE_TTL_MS = 60000;
+let hierarchyCache = { children: null, expires: 0 };
+
+/** Parent role id -> the role ids directly beneath it, from RoleHierarchy. */
+async function getRoleChildren(prisma) {
+  if (hierarchyCache.children && hierarchyCache.expires > Date.now()) return hierarchyCache.children;
+  const children = new Map();
+  try {
+    for (const row of await prisma.roleHierarchy.findMany({ select: { roleId: true, parentId: true } })) {
+      if (!row.parentId) continue;
+      if (!children.has(row.parentId)) children.set(row.parentId, []);
+      children.get(row.parentId).push(row.roleId);
+    }
+  } catch (err) { /* table absent; no hierarchy */ }
+  hierarchyCache = { children, expires: Date.now() + HIERARCHY_CACHE_TTL_MS };
+  return children;
+}
+
+function invalidateHierarchyCache() { hierarchyCache = { children: null, expires: 0 }; }
+
+/**
+ * The users in every role below this user's, however deep. A module whose
+ * org-wide default grants access using the hierarchy lets a manager reach
+ * what their reports own. `grantAccessUsing` was stored and read by nothing.
+ */
+async function subordinateUserIds(prisma, user) {
+  const roleId = user.roleId || user.role?.id;
+  if (!roleId) return [];
+  const children = await getRoleChildren(prisma);
+  const below = new Set();
+  const queue = [...(children.get(roleId) || [])];
+  while (queue.length) {
+    const id = queue.shift();
+    if (id === roleId || below.has(id)) continue; // a cycle ends the walk
+    below.add(id);
+    queue.push(...(children.get(id) || []));
+  }
+  if (!below.size) return [];
+  const users = await prisma.user.findMany({ where: { roleId: { in: [...below] } }, select: { id: true } });
+  return users.map(u => u.id);
+}
+
+const grantsViaHierarchy = owd => owd?.grantAccessUsing === 'hierarchy';
+
 /**
  * Whether the org-wide default restricts this operation.
  *   Private  — only the owner (plus groups, plus admins) reads or writes.
@@ -152,6 +196,11 @@ async function buildAccessFilter(prisma, user, module, { minLevel = 'Read', mode
     { id: { in: visibleIds } },
   ];
 
+  if (grantsViaHierarchy(owd)) {
+    const reports = await subordinateUserIds(prisma, user);
+    if (reports.length) or.push(...ownerFieldsFor(prisma, modelName).map(field => ({ [field]: { in: reports } })));
+  }
+
   // Under an open org-wide default, a record nobody put in a group is nobody's
   // secret, so it stays visible. Under Private it does not.
   if (!restricted) {
@@ -205,7 +254,11 @@ function rowSecurity(module, opts = {}) {
           where: { id: recordId },
           select: Object.fromEntries(fields.map(f => [f, true])),
         }).catch(() => null);
-        return !!record && fields.some(f => record[f] === req.user.id);
+        if (!record) return false;
+        if (fields.some(f => record[f] === req.user.id)) return true;
+        if (!grantsViaHierarchy(owd)) return false;
+        const reports = await subordinateUserIds(prisma, req.user);
+        return fields.some(f => record[f] && reports.includes(record[f]));
       };
 
       next();
@@ -218,6 +271,18 @@ function applyAccessFilter(where, accessFilter) {
   if (!accessFilter) return where;
   if (!where || !Object.keys(where).length) return accessFilter;
   return { AND: [where, accessFilter] };
+}
+
+/**
+ * `where`, narrowed to the live records of a module the requesting user may
+ * read. For summary endpoints that query a model directly, outside the CRUD
+ * router's guards, and so used to count deleted and other people's records.
+ */
+async function visibleWhere(req, module, modelName, where = {}) {
+  const prisma = req.app.locals.prisma;
+  const filter = req.user ? await buildAccessFilter(prisma, req.user, module, { modelName }) : null;
+  const live = prisma[modelName]?.fields?.deletedAt ? { deletedAt: null } : {};
+  return applyAccessFilter({ ...where, ...live }, filter);
 }
 
 /**
@@ -275,8 +340,8 @@ async function autoAssignToUserGroups(prisma, userId, module, recordId) {
 }
 
 module.exports = {
-  invalidateOrgWideDefaultCache,
-  rowSecurity, buildAccessFilter, applyAccessFilter,
+  invalidateOrgWideDefaultCache, invalidateHierarchyCache, subordinateUserIds,
+  rowSecurity, buildAccessFilter, applyAccessFilter, visibleWhere,
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
   applyAutoAssignRules, autoAssignToUserGroups, isAdmin,
 };

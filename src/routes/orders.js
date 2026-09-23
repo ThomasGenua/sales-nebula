@@ -114,7 +114,8 @@ router.post('/:id/cancel', authenticate, requirePermission('orders', 'full'), au
 router.get('/:id/items', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const items = await prisma.orderItem.findMany({ where: { orderId: req.params.id }, include: { product: { select: { name: true, code: true, price: true } } }, orderBy: { sortOrder: 'asc' } });
+    // A product's code is its sku; order items keep no sort position.
+    const items = await prisma.orderItem.findMany({ where: { orderId: req.params.id }, include: { product: { select: { name: true, sku: true, price: true } } } });
     const subtotal = items.reduce((s, i) => s + (i.unitPrice || 0) * (i.quantity || 1), 0);
     res.json({ items, subtotal, itemCount: items.length });
   } catch (err) { next(err); }

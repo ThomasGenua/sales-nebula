@@ -7,6 +7,7 @@ const path = require('path');
 const { v4: uuid } = require('uuid');
 const { modelHasField } = require('../utils/modelFields');
 const { buildAccessFilter, applyAccessFilter, isAdmin } = require('../middleware/rowSecurity');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 // Never under a served path.
 const EXPORT_DIR = path.resolve(process.env.EXPORT_DIR || path.join(process.env.UPLOAD_DIR || './uploads', '..', 'private-exports'));
@@ -156,15 +157,8 @@ router.get('/retention-policy', authenticate, requirePermission('admin', 'read')
   });
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'dataExport', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'dataExport' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'dataExport', model: 'dataExport' });
 
 // Analytics / Stats
 router.get('/analytics/summary', authenticate, async (req, res, next) => {

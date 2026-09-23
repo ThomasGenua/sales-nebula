@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { dealTotalInBase } = require('../utils/currency');
 const router = Router();
 router.use(authenticate);
 
@@ -108,8 +109,8 @@ router.get('/funnel', authenticate, async (req, res, next) => {
     const funnel = [];
     for (const stage of stages) {
       const count = await prisma.deal.count({ where: { stage, createdAt: { gte: since }, deletedAt: null } });
-      const value = await prisma.deal.aggregate({ where: { stage, createdAt: { gte: since }, deletedAt: null }, _sum: { value: true } });
-      funnel.push({ stage, count, value: value._sum.value || 0 });
+      const { value } = await dealTotalInBase(prisma, { stage, createdAt: { gte: since }, deletedAt: null });
+      funnel.push({ stage, count, value });
     }
     const topEntry = funnel[0]?.count || 1;
     funnel.forEach(f => { f.conversionRate = Math.round((f.count / topEntry) * 100); });

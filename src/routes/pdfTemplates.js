@@ -33,7 +33,7 @@ async function loadRenderData(prisma, module, recordId) {
   if (record.accountId) await safeFind('account', () => prisma.account.findUnique({ where: { id: record.accountId } }));
   if (record.contactId) await safeFind('contact', () => prisma.contact.findUnique({ where: { id: record.contactId } }));
   if (record.dealId) await safeFind('deal', () => prisma.deal.findUnique({ where: { id: record.dealId } }));
-  if (record.ownerId) await safeFind('owner', () => prisma.user.findUnique({ where: { id: record.ownerId }, select: { id: true, firstName: true, lastName: true, email: true, phone: true, title: true } }));
+  if (record.ownerId) await safeFind('owner', () => prisma.user.findUnique({ where: { id: record.ownerId }, select: { id: true, firstName: true, lastName: true, email: true } }));
 
   // Line items live on different models per document type
   const lineItemModels = { quotes: 'quoteLineItem', invoices: 'invoiceLineItem', orders: 'orderLineItem', contracts: 'contractLineItem' };

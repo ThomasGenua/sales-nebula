@@ -109,12 +109,19 @@ For incremental changes, generate new migrations with `npx prisma migrate dev`.
 
 Dual JWT tokens with different lifetimes:
 
-| Token | TTL | Purpose | Storage |
-|-------|-----|---------|---------|
-| Access | 15 min | API authorization | Client memory |
-| Refresh | 7 days | Token renewal | HttpOnly cookie or client storage |
+| Token | TTL | Purpose | Browser storage |
+|-------|-----|---------|-----------------|
+| Access | 15 min | API authorization | httpOnly cookie `sn_access` (path `/api`) |
+| Refresh | 7 days | Token renewal | httpOnly cookie `sn_refresh` (path `/api/auth`, SameSite=Strict) |
 
 The short access token TTL limits exposure from token theft. The refresh token allows long sessions without re-authentication.
+
+The browser never holds either token where a script could read it
+(`src/utils/sessionCookies.js`). Cookie-authenticated requests that change
+state must carry the `sn_csrf` cookie's value in `X-CSRF-Token`
+(double-submit). Scripts and integrations use Bearer tokens or API keys, which
+need no CSRF token. Only tokens of type `access` authenticate, and signing out
+revokes the refresh token as well as the access token.
 
 ### RBAC Model
 

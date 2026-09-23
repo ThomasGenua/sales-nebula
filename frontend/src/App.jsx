@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
+import { fmt, money, setUserPrefs, timeZones, LOCALES } from "./prefs";
 import {
   Search, Bell, Settings, LogOut, Menu, X, Plus, Edit2, Trash2, Eye,
   ChevronDown, ChevronRight, ChevronLeft, Filter, Download, Upload,
@@ -81,51 +82,49 @@ function parseAppPath(pathname) {
 }
 function useAuth() { return useContext(AuthContext); }
 
+/** The CSRF token the server set beside the session cookies. */
+function csrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)sn_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 function AuthProvider({ children }) {
   const [demoMode, setDemoMode] = useState(() => localStorage.getItem("sn_demo_mode") === "true");
   const [user, setUser] = useState(() => localStorage.getItem("sn_demo_mode") === "true" ? DEMO_USER : null);
-  const [token, setToken] = useState(localStorage.getItem("sn_token"));
   const [loading, setLoading] = useState(true);
+
+  // Set during render, before any child formats a date with it.
+  useMemo(() => setUserPrefs(user), [user?.timezone, user?.locale]);
+
+  // The session used to be two tokens in localStorage, readable by any script
+  // that found its way into the page. It is now a pair of httpOnly cookies
+  // the page cannot read at all; clear what an earlier version left behind.
+  useEffect(() => {
+    localStorage.removeItem("sn_token");
+    localStorage.removeItem("sn_refresh");
+  }, []);
 
   // One in-flight renewal shared by every 401 that lands at once, so a burst of
   // parallel requests refreshes the session once instead of racing each other.
   const renewal = useRef(null);
 
-  const clearSession = useCallback(() => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem("sn_token");
-    localStorage.removeItem("sn_refresh");
-  }, []);
+  const clearSession = useCallback(() => setUser(null), []);
+  const applySession = useCallback((d) => setUser(d.user), []);
 
-  const applySession = useCallback((d) => {
-    setToken(d.token);
-    localStorage.setItem("sn_token", d.token);
-    // Login hands back a refresh token; it used to be dropped on the floor,
-    // which is why a session died the moment the 15 minute access token did.
-    if (d.refreshToken) localStorage.setItem("sn_refresh", d.refreshToken);
-    setUser(d.user);
-  }, []);
-
-  const renewAccessToken = useCallback(() => {
-    const refreshToken = localStorage.getItem("sn_refresh");
-    if (!refreshToken) return Promise.resolve(null);
+  // The refresh cookie only ever travels to /api/auth; spending it needs the
+  // CSRF token like any other change.
+  const renewSession = useCallback(() => {
     if (!renewal.current) {
+      const csrf = csrfToken();
       renewal.current = fetch(`${API}/auth/refresh`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken }),
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(csrf && { "X-CSRF-Token": csrf }) },
+        body: "{}",
       })
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => {
-          const next = d?.accessToken || d?.token || null;
-          if (next) {
-            localStorage.setItem("sn_token", next);
-            setToken(next);
-          }
-          return next;
-        })
-        .catch(() => null)
+        .then(r => r.ok)
+        .catch(() => false)
         .finally(() => { renewal.current = null; });
     }
     return renewal.current;
@@ -135,23 +134,29 @@ function AuthProvider({ children }) {
     if (demoMode) return demoApiFetch(path, opts);
 
     const { skipRefresh, rawBody, ...init } = opts;
-    const call = (bearer) => fetch(`${API}${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(bearer && { Authorization: `Bearer ${bearer}` }),
-        ...opts.headers,
-      },
-      ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
-    });
+    const method = String(init.method || "GET").toUpperCase();
+    // The session cookies ride along on their own; a request that changes
+    // anything also echoes the CSRF token, which a forged one cannot.
+    const call = () => {
+      const csrf = UNSAFE_METHODS.has(method) ? csrfToken() : null;
+      return fetch(`${API}${path}`, {
+        ...init,
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(csrf && { "X-CSRF-Token": csrf }),
+          ...opts.headers,
+        },
+        ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
+      });
+    };
 
-    let res = await call(token);
+    let res = await call();
 
     // Access tokens last 15 minutes. Spend the refresh token and retry once
     // rather than interrupting whatever the user was in the middle of.
     if (res.status === 401 && !skipRefresh) {
-      const renewed = await renewAccessToken();
-      if (renewed) res = await call(renewed);
+      if (await renewSession()) res = await call();
     }
 
     if (res.status === 401) {
@@ -165,31 +170,32 @@ function AuthProvider({ children }) {
     }
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
-  }, [token, demoMode, renewAccessToken, clearSession]);
+  }, [demoMode, renewSession, clearSession]);
 
   useEffect(() => {
     if (demoMode) { setUser(DEMO_USER); setLoading(false); return; }
-    if (!token) { setLoading(false); return; }
-    apiFetch("/auth/me").then(d => setUser(d.user || d)).catch(() => { setToken(null); localStorage.removeItem("sn_token"); }).finally(() => setLoading(false));
-  }, [token, demoMode, apiFetch]);
+    // Nothing to look up locally: if a session cookie exists it goes with the
+    // request, and a 401 just means signed out.
+    apiFetch("/auth/me").then(d => setUser(d.user || d)).catch(() => setUser(null)).finally(() => setLoading(false));
+  }, [demoMode, apiFetch]);
+
+  // Asks the server for a cookie session: the tokens stay out of the page.
+  const COOKIE_SESSION = { "X-Session-Mode": "cookie" };
 
   const login = async (email, password) => {
     if (email.trim().toLowerCase() === DEMO_LOGIN.email && password === DEMO_LOGIN.password) {
       localStorage.setItem("sn_demo_mode", "true");
-      localStorage.removeItem("sn_token");
       setDemoMode(true);
-      setToken(null);
       setUser(DEMO_USER);
       return;
     }
 
     // skipRefresh: a stale refresh token from a previous session must not be
     // spent trying to rescue a wrong password.
-    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true });
+    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true, headers: COOKIE_SESSION });
 
     // A verified MFA device means no session yet. The caller collects a code
-    // and finishes at /auth/mfa/verify; storing d.token here would write the
-    // string "undefined" into localStorage and silently strand the user.
+    // and finishes at /auth/mfa/verify.
     if (d.mfaRequired) {
       return { mfaRequired: true, mfaToken: d.mfaToken, devices: d.devices || [] };
     }
@@ -204,13 +210,14 @@ function AuthProvider({ children }) {
       method: "POST",
       body: { mfaToken, deviceId, code },
       skipRefresh: true,
+      headers: COOKIE_SESSION,
     });
     applySession(d);
   };
-  const logout = () => {
-    setUser(null); setToken(null); setDemoMode(false);
-    localStorage.removeItem("sn_token");
-    localStorage.removeItem("sn_refresh");
+  const logout = async () => {
+    // The server revokes both tokens and clears the cookies; the page cannot.
+    if (!demoMode) await apiFetch("/auth/logout", { method: "POST", skipRefresh: true }).catch(() => {});
+    setUser(null); setDemoMode(false);
     localStorage.removeItem("sn_demo_mode");
     window.history.pushState({}, "", "/");
     window.location.reload();
@@ -220,7 +227,7 @@ function AuthProvider({ children }) {
     setUser((current) => (current ? { ...current, ...partial } : current));
   };
 
-  return <AuthContext.Provider value={{ user, token, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
 }
 
 function useApi(path, deps = []) {
@@ -393,20 +400,22 @@ function Modal({ open, onClose, title, children, wide }) {
   );
 }
 
-function StatCard({ label, value, change, icon: Icon, color = "primary" }) {
+function StatCard({ label, value, change, changeHint, icon: Icon, color = "primary" }) {
   const bgColors = { primary: "bg-[rgba(245,166,35,0.08)]", success: "bg-[rgba(52,211,153,0.10)]", warning: "bg-[rgba(251,191,36,0.10)]", danger: "bg-[rgba(248,113,113,0.10)]", purple: "bg-[rgba(167,139,250,0.10)]", cyan: "bg-[rgba(45,212,191,0.10)]" };
   const iconColors = { primary: "text-[#F5A623]", success: "text-[#34D399]", warning: "text-[#FBBF24]", danger: "text-[#F87171]", purple: "text-[#A78BFA]", cyan: "text-[#2DD4BF]" };
   const isUp = change > 0;
+  const isFlat = change === 0;
   return (
     <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-5 hover:border-[#203060] transition-colors active:scale-[0.98] touch-manipulation">
       <div className="flex items-start justify-between mb-2 sm:mb-3">
         <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-lg ${bgColors[color]} flex items-center justify-center`}>
           <Icon size={18} className={iconColors[color]} />
         </div>
-        {change !== undefined && (
-          <div className={`flex items-center gap-0.5 text-xs font-medium ${isUp ? "text-[#34D399]" : "text-[#F87171]"}`}>
-            {isUp ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+        {change != null && (
+          <div className={`flex items-center gap-0.5 text-xs font-medium ${isFlat ? "text-[#4A5168]" : isUp ? "text-[#34D399]" : "text-[#F87171]"}`} title={changeHint}>
+            {!isFlat && (isUp ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />)}
             {Math.abs(change)}%
+            {changeHint && <span className="sr-only">{changeHint}</span>}
           </div>
         )}
       </div>
@@ -737,7 +746,7 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
             ))}
           </div>
           <div className="mt-4 pt-3 border-t border-[#182550]/40 text-xs text-[#4A5168]">
-            Created: {record.createdAt ? new Date(record.createdAt).toLocaleString() : "-"} | Updated: {record.updatedAt ? new Date(record.updatedAt).toLocaleString() : "-"}
+            Created: {record.createdAt ? new Date(record.createdAt).toLocaleString(...fmt()) : "-"} | Updated: {record.updatedAt ? new Date(record.updatedAt).toLocaleString(...fmt()) : "-"}
           </div>
         </div>
       )}
@@ -758,7 +767,7 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
                       <div className="text-sm text-[#F0EDE5]">{item.name || item.subject || item.title || "Record"}</div>
                       <div className="text-xs text-[#7E8598] mt-0.5">{item.status || item.type || item.stage || ""}</div>
                     </div>
-                    <div className="text-xs text-[#4A5168]">{item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ""}</div>
+                    <div className="text-xs text-[#4A5168]">{item.createdAt ? new Date(item.createdAt).toLocaleDateString(...fmt()) : ""}</div>
                   </div>
                 ))}
               </div>
@@ -786,7 +795,7 @@ function MiniBarChart({ data = [], height = 120, label, valueKey = "value", labe
           return (
             <div key={i} className="flex-1 flex flex-col items-center gap-1 group">
               <div className="text-[9px] text-[#4A5168] opacity-0 group-hover:opacity-100 transition-opacity font-mono">
-                {typeof d[valueKey] === "number" ? d[valueKey].toLocaleString() : d[valueKey]}
+                {typeof d[valueKey] === "number" ? d[valueKey].toLocaleString(...fmt()) : d[valueKey]}
               </div>
               <div className="w-full rounded-t" style={{ height: `${Math.max(pct, 2)}%`, backgroundColor: color, opacity: 0.7 + (pct / 300), transition: "height 0.3s ease" }} />
               <div className="text-[8px] sm:text-[9px] text-[#4A5168] truncate w-full text-center">{d[labelKey]}</div>
@@ -829,7 +838,7 @@ function DonutChart({ data = [], size = 140, label }) {
       <div className="flex flex-col sm:flex-row items-center gap-4">
         <svg width={size} height={size} className="shrink-0">
           {segments.map((seg, i) => <path key={i} d={seg.path} fill={seg.color} opacity={0.85} />)}
-          <text x={size/2} y={size/2-6} textAnchor="middle" fill="#F0EDE5" fontSize="18" fontWeight="bold" fontFamily="monospace">{total.toLocaleString()}</text>
+          <text x={size/2} y={size/2-6} textAnchor="middle" fill="#F0EDE5" fontSize="18" fontWeight="bold" fontFamily="monospace">{total.toLocaleString(...fmt())}</text>
           <text x={size/2} y={size/2+10} textAnchor="middle" fill="#4A5168" fontSize="9">TOTAL</text>
         </svg>
         <div className="flex flex-wrap sm:flex-col gap-2 sm:gap-1.5">
@@ -873,7 +882,7 @@ function NotificationPanel({ open, onClose }) {
                 <div className="flex-1 min-w-0">
                   <div className="text-sm text-[#F0EDE5]">{n.title || n.message || "Notification"}</div>
                   {n.body && <div className="text-xs text-[#7E8598] mt-0.5 line-clamp-2">{n.body}</div>}
-                  <div className="text-[10px] text-[#4A5168] mt-1">{n.createdAt ? new Date(n.createdAt).toLocaleString() : ""}</div>
+                  <div className="text-[10px] text-[#4A5168] mt-1">{n.createdAt ? new Date(n.createdAt).toLocaleString(...fmt()) : ""}</div>
                 </div>
               </div>
             </div>
@@ -966,7 +975,7 @@ function ActivityTimeline({ activities = [] }) {
                 {a.type || a.status || ""}
               </Badge>
             </div>
-            <div className="text-[10px] text-[#4A5168] mt-2">{a.createdAt ? new Date(a.createdAt).toLocaleString() : ""}</div>
+            <div className="text-[10px] text-[#4A5168] mt-2">{a.createdAt ? new Date(a.createdAt).toLocaleString(...fmt()) : ""}</div>
           </div>
         </div>
       ))}
@@ -1301,12 +1310,16 @@ function LeadsPage() {
 
 function DealsPage() {
   const stageBadge = v => { const c = { "Closed Won": "success", "Closed Lost": "danger", Negotiation: "warning", Qualification: "info", Discovery: "purple", Proposal: "cyan" }; return <Badge color={c[v] || "primary"}>{v || "-"}</Badge>; };
+  // A deal's value is in its own currency; the picker offers the active ones.
+  const { data: currencies } = useApi("/deals/currencies");
+  const base = currencies?.base || "USD";
+  const currencyOptions = (currencies?.data || []).map(c => ({ value: c.code, label: `${c.code} (${c.name})` }));
   return <ModulePage title="Deals" icon={Target} endpoint="/deals"
     columns={[
       { key: "name", label: "Deal" }, { key: "stage", label: "Stage", render: stageBadge },
-      { key: "value", label: "Value", render: v => <span className="font-mono">${(v || 0).toLocaleString()}</span> },
+      { key: "value", label: "Value", render: (v, row) => <span className="font-mono">{money(v, row?.currency || base)}</span> },
       { key: "probability", label: "Prob", render: v => `${v || 0}%` },
-      { key: "closeDate", label: "Close", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "closeDate", label: "Close", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     filterDefs={[
       { key: "stage", label: "Stage", type: "select", options: ["Qualification","Discovery","Proposal","Negotiation","Closed Won","Closed Lost"] },
@@ -1314,14 +1327,15 @@ function DealsPage() {
     ]}
     detailFields={[
       { key: "name", label: "Deal Name" }, { key: "stage", label: "Stage" },
-      { key: "value", label: "Value", render: v => `$${(v||0).toLocaleString()}` },
+      { key: "value", label: "Value", render: (v, row) => money(v, row?.currency || base) },
       { key: "probability", label: "Probability", render: v => `${v||0}%` },
-      { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "source", label: "Source" }, { key: "type", label: "Type" },
       { key: "nextStep", label: "Next Step" }, { key: "description", label: "Description" },
     ]}
     formFields={[
       { key: "name", label: "Deal Name", required: true }, { key: "value", label: "Value", type: "number" },
+      ...(currencyOptions.length > 1 ? [{ key: "currency", label: "Currency", type: "select", options: currencyOptions }] : []),
       { key: "stage", label: "Stage", type: "select", options: ["Qualification","Discovery","Proposal","Negotiation","Closed Won","Closed Lost"] },
       { key: "probability", label: "Probability %", type: "number" },
       { key: "closeDate", label: "Close Date", type: "date" }, { key: "source", label: "Source" },
@@ -1351,7 +1365,7 @@ function ActivitiesPage() {
     columns={[
       { key: "subject", label: "Subject" }, { key: "type", label: "Type", render: typeBadge },
       { key: "status", label: "Status" },
-      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "subject", label: "Subject", required: true },
@@ -1386,7 +1400,7 @@ function ProductsPage() {
     columns={[
       { key: "name", label: "Product" }, { key: "code", label: "Code" },
       { key: "category", label: "Category" },
-      { key: "price", label: "Price", render: v => <span className="font-mono">${(v || 0).toLocaleString()}</span> },
+      { key: "price", label: "Price", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
       { key: "active", label: "Active", render: v => v !== false ? <Badge color="success">Yes</Badge> : <Badge color="neutral">No</Badge> },
     ]}
     formFields={[
@@ -1400,8 +1414,8 @@ function QuotesPage() {
   return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes"
     columns={[
       { key: "name", label: "Quote" }, { key: "quoteNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString()}</span> },
-      { key: "expirationDate", label: "Expires", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "expirationDate", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "name", label: "Quote Name", required: true },
@@ -1415,8 +1429,8 @@ function InvoicesPage() {
   return <ModulePage title="Invoices" icon={DollarSign} endpoint="/invoices"
     columns={[
       { key: "invoiceNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString()}</span> },
-      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Paid","Overdue","Cancelled"] },
@@ -1429,7 +1443,7 @@ function CampaignsPage() {
   return <ModulePage title="Campaigns" icon={Send} endpoint="/campaigns"
     columns={[
       { key: "name", label: "Campaign" }, { key: "type", label: "Type" }, { key: "status", label: "Status" },
-      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "budgetedCost", label: "Budget", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
     ]}
     formFields={[
@@ -1447,7 +1461,7 @@ function EmailsPage() {
     columns={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Sent'?'success':v==='Opened'?'info':v==='Bounced'?'danger':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "sentAt", label: "Sent", render: v => v ? new Date(v).toLocaleString() : "-" },
+      { key: "sentAt", label: "Sent", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Opened","Bounced","Failed"] },
@@ -1455,8 +1469,8 @@ function EmailsPage() {
     detailFields={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To" }, { key: "from", label: "From" },
       { key: "status", label: "Status" }, { key: "body", label: "Body" },
-      { key: "sentAt", label: "Sent At", render: v => v ? new Date(v).toLocaleString() : "-" },
-      { key: "openedAt", label: "Opened At", render: v => v ? new Date(v).toLocaleString() : "-" },
+      { key: "sentAt", label: "Sent At", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
+      { key: "openedAt", label: "Opened At", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "subject", label: "Subject", required: true },{ key: "to", label: "To", required: true },{ key: "body", label: "Body", type: "textarea" }]}
   />;
@@ -1476,8 +1490,8 @@ function KnowledgePage() {
     detailFields={[
       { key: "title", label: "Title" }, { key: "status", label: "Status" }, { key: "category", label: "Category" },
       { key: "body", label: "Content" }, { key: "viewCount", label: "Views" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString() : "-" },
-      { key: "updatedAt", label: "Updated", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "updatedAt", label: "Updated", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "title", label: "Title", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Archived"] },{ key: "category", label: "Category" },{ key: "body", label: "Body", type: "textarea" }]}
   />;
@@ -1487,8 +1501,8 @@ function ContractsPage() {
     columns={[
       { key: "contractNumber", label: "#" }, { key: "name", label: "Contract" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Activated'?'success':v==='Terminated'?'danger':v==='Expired'?'warning':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString() : "-" },
-      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "value", label: "Value", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
     ]}
     filterDefs={[
@@ -1496,9 +1510,9 @@ function ContractsPage() {
     ]}
     detailFields={[
       { key: "name", label: "Name" }, { key: "contractNumber", label: "Contract #" },
-      { key: "status", label: "Status" }, { key: "value", label: "Value", render: v => v ? `$${v.toLocaleString()}` : "-" },
-      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString() : "-" },
-      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "status", label: "Status" }, { key: "value", label: "Value", render: v => v ? `$${v.toLocaleString(...fmt())}` : "-" },
+      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "description", label: "Description" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" },{ key: "value", label: "Value", type: "number" }]}
@@ -1509,7 +1523,7 @@ function OrdersPage() {
     columns={[
       { key: "name", label: "Order" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Fulfilled'?'success':v==='Cancelled'?'danger':v==='Activated'?'info':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v||0).toLocaleString()}</span> },
+      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v||0).toLocaleString(...fmt())}</span> },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },
@@ -1523,8 +1537,8 @@ function SubscriptionsPage() {
       { key: "subscriptionNumber", label: "#" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Cancelled'?'danger':v==='Expired'?'warning':'neutral'}>{v||'Pending'}</Badge> },
       { key: "billingFrequency", label: "Billing" },
-      { key: "totalPrice", label: "Price", render: v => <span className="font-mono">${(v||0).toLocaleString()}</span> },
-      { key: "endDate", label: "Ends", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "totalPrice", label: "Price", render: v => <span className="font-mono">${(v||0).toLocaleString(...fmt())}</span> },
+      { key: "endDate", label: "Ends", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },
@@ -1548,8 +1562,8 @@ function WorkOrdersPage() {
       { key: "subject", label: "Subject" }, { key: "status", label: "Status" },
       { key: "priority", label: "Priority" }, { key: "description", label: "Description" },
       { key: "address", label: "Address" },
-      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString() : "-" },
-      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "subject", label: "Subject", required: true },{ key: "status", label: "Status", type: "select", options: ["New","Scheduled","Dispatched","InProgress","Completed","Cancelled"] },{ key: "priority", label: "Priority", type: "select", options: ["Low","Medium","High","Critical"] },{ key: "description", label: "Description", type: "textarea" }]}
   />;
@@ -1560,7 +1574,7 @@ function EntitlementsPage() {
       { key: "name", label: "Entitlement" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Expired'?'danger':'neutral'}>{v||'Inactive'}</Badge> },
       { key: "type", label: "Type" },
-      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "casesPerEntitlement", label: "Case Limit", render: v => v || "Unlimited" },
     ]}
     filterDefs={[
@@ -1578,7 +1592,7 @@ function CustomObjectsPage() {
     detailFields={[
       { key: "label", label: "Label" }, { key: "apiName", label: "API Name" },
       { key: "pluralLabel", label: "Plural Label" }, { key: "description", label: "Description" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "label", label: "Label", required: true },{ key: "apiName", label: "API Name" },{ key: "pluralLabel", label: "Plural Label" },{ key: "description", label: "Description" }]}
   />;
@@ -1731,8 +1745,8 @@ function DashboardPage() {
 
       {/* KPI strip - scrollable on mobile */}
       <KpiRow items={[
-        { label: "Pipeline", value: `$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`, sub: `${pipe.dealCount || 0} deals` },
-        { label: "Won MTD", value: `$${((rev.wonThisMonth?.value || 0) / 1000).toFixed(0)}K` },
+        { label: "Pipeline", value: money(pipe.totalValue, s.currency, { notation: "compact" }), sub: `${pipe.dealCount || 0} deals` },
+        { label: "Won MTD", value: money(rev.wonThisMonth?.value, s.currency, { notation: "compact" }) },
         { label: "Open Leads", value: counts.leads || 0 },
         { label: "Win Rate", value: `${s.winRate || pipe.winRate || 0}%` },
         { label: "Cases", value: counts.openCases || 0 },
@@ -1740,8 +1754,10 @@ function DashboardPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4 mt-4 mb-4 sm:mb-6">
-        <StatCard label="Total Deals" value={pipe.dealCount || counts.openDeals || 0} icon={Target} color="primary" change={12} />
-        <StatCard label="Pipeline Value" value={`$${((pipe.totalValue || 0) / 1000).toFixed(0)}K`} icon={DollarSign} color="success" change={8} />
+        <StatCard label="Total Deals" value={pipe.dealCount || counts.openDeals || 0} icon={Target} color="primary"
+          change={s.trends?.newDeals?.changePct} changeHint="New deals, last 30 days vs the 30 days before" />
+        <StatCard label="Pipeline Value" value={money(pipe.totalValue, s.currency, { notation: "compact" })} icon={DollarSign} color="success"
+          change={s.trends?.newPipeline?.changePct} changeHint="Value of new deals, last 30 days vs the 30 days before" />
         <StatCard label="Contacts" value={counts.contacts || 0} icon={Users} color="purple" />
         <StatCard label="Accounts" value={counts.accounts || 0} icon={Building2} color="cyan" />
       </div>
@@ -1861,7 +1877,10 @@ function SettingsPage() {
     firstName: user?.firstName || "",
     lastName: user?.lastName || "",
     email: user?.email || "",
+    timezone: user?.timezone || "",
+    locale: user?.locale || "",
   });
+  const zoneOptions = useMemo(() => timeZones(), []);
   const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1872,8 +1891,10 @@ function SettingsPage() {
       firstName: user?.firstName || "",
       lastName: user?.lastName || "",
       email: user?.email || "",
+      timezone: user?.timezone || "",
+      locale: user?.locale || "",
     });
-  }, [user?.id, user?.firstName, user?.lastName, user?.email]);
+  }, [user?.id, user?.firstName, user?.lastName, user?.email, user?.timezone, user?.locale]);
 
   const tabs = [
     { id: "profile", label: "Profile", icon: Users },
@@ -1890,6 +1911,8 @@ function SettingsPage() {
           firstName: profile.firstName,
           lastName: profile.lastName,
           email: profile.email,
+          timezone: profile.timezone || null,
+          locale: profile.locale || null,
         });
         setToast({ message: "Profile updated in this demo session", type: "success" });
         return;
@@ -1900,6 +1923,8 @@ function SettingsPage() {
           firstName: profile.firstName,
           lastName: profile.lastName,
           email: profile.email,
+          timezone: profile.timezone,
+          locale: profile.locale,
         },
       });
       updateUser?.(updated);
@@ -1979,6 +2004,10 @@ function SettingsPage() {
               <Input label="First Name" value={profile.firstName} onChange={v => setProfile(p => ({ ...p, firstName: v }))} />
               <Input label="Last Name" value={profile.lastName} onChange={v => setProfile(p => ({ ...p, lastName: v }))} />
               <Input label="Email" value={profile.email} onChange={v => setProfile(p => ({ ...p, email: v }))} type="email" className="sm:col-span-2" />
+              <Select label="Time zone" value={profile.timezone} onChange={v => setProfile(p => ({ ...p, timezone: v }))}
+                placeholder="Browser default" options={zoneOptions} />
+              <Select label="Date & number format" value={profile.locale} onChange={v => setProfile(p => ({ ...p, locale: v }))}
+                placeholder="Browser default" options={LOCALES.map(([value, label]) => ({ value, label }))} />
             </div>
             <Button onClick={saveProfile} size="md" disabled={saving}>{saving ? "Saving..." : "Save Changes"}</Button>
           </div>
@@ -1988,8 +2017,8 @@ function SettingsPage() {
               {[
                 ["User ID", user?.id ? `${String(user.id).substring(0, 12)}...` : "-"],
                 ["Role", roleName],
-                ["Created", user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : "-"],
-                ["Last Login", user?.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : "-"],
+                ["Created", user?.createdAt ? new Date(user.createdAt).toLocaleDateString(...fmt()) : "-"],
+                ["Last Login", user?.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString(...fmt()) : "-"],
                 ["Status", user?.active === false ? "Inactive" : "Active"],
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
@@ -2086,7 +2115,7 @@ function AdminDashboardPage() {
 
   const Pill = ({ label, value, color = "amber" }) => {
     const cls = { amber: "text-[#F5A623] border-[#F5A623]/20", green: "text-[#34D399] border-[#34D399]/20", blue: "text-[#60A5FA] border-[#60A5FA]/20", red: "text-[#F87171] border-[#F87171]/20", purple: "text-[#A78BFA] border-[#A78BFA]/20", cyan: "text-[#22D3EE] border-[#22D3EE]/20" };
-    return <div className={`px-2.5 sm:px-3 py-2 rounded-lg border ${cls[color] || cls.amber}`}><div className="text-[9px] sm:text-[10px] uppercase tracking-wider opacity-60">{label}</div><div className="text-base sm:text-lg font-bold font-mono mt-0.5">{typeof value === "number" ? value.toLocaleString() : value}</div></div>;
+    return <div className={`px-2.5 sm:px-3 py-2 rounded-lg border ${cls[color] || cls.amber}`}><div className="text-[9px] sm:text-[10px] uppercase tracking-wider opacity-60">{label}</div><div className="text-base sm:text-lg font-bold font-mono mt-0.5">{typeof value === "number" ? value.toLocaleString(...fmt()) : value}</div></div>;
   };
   const Section = ({ title, children }) => <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-5"><h3 className="text-xs font-semibold text-[#C8C2B4] uppercase tracking-wider mb-3">{title}</h3>{children}</div>;
 
@@ -2113,14 +2142,14 @@ function AdminDashboardPage() {
         <Section title="Data Volume">
           <div className="grid grid-cols-3 gap-1.5">
             {Object.entries({ Users: r.users, Contacts: r.contacts, Leads: r.leads, Deals: r.deals, Accounts: r.accounts, Cases: r.cases, Activities: r.activities, Products: r.products, Campaigns: r.campaigns }).filter(([,v]) => v !== undefined).map(([k, v]) =>
-              <div key={k} className="text-center py-1"><div className="text-sm font-bold font-mono text-[#C8C2B4]">{(v||0).toLocaleString()}</div><div className="text-[8px] sm:text-[9px] text-[#4A5168] uppercase">{k}</div></div>
+              <div key={k} className="text-center py-1"><div className="text-sm font-bold font-mono text-[#C8C2B4]">{(v||0).toLocaleString(...fmt())}</div><div className="text-[8px] sm:text-[9px] text-[#4A5168] uppercase">{k}</div></div>
             )}
           </div>
         </Section>
         <Section title="Security">
           <div className="space-y-2">
             {[["API Keys", sec.activeApiKeys, "#60A5FA"], ["Logins 24h", sec.loginsLast24h, "#22D3EE"], ["MFA Devices", sec.mfaDevicesEnrolled, "#34D399"], ["Events 24h", sec.eventsLast24h, "#A78BFA"]].map(([l, v, c]) =>
-              <div key={l} className="flex justify-between text-xs"><span className="text-[#7E8598]">{l}</span><span className="font-mono font-bold" style={{ color: c }}>{(v||0).toLocaleString()}</span></div>
+              <div key={l} className="flex justify-between text-xs"><span className="text-[#7E8598]">{l}</span><span className="font-mono font-bold" style={{ color: c }}>{(v||0).toLocaleString(...fmt())}</span></div>
             )}
           </div>
         </Section>
@@ -2143,7 +2172,7 @@ function AdminDashboardPage() {
               <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b border-[#182550]/40">
                 <span className="text-[#C8C2B4] font-mono truncate flex-1">{l.userId?.substring(0, 8)}...</span>
                 <span className={`mx-2 ${l.status === 'Success' ? "text-[#34D399]" : "text-[#F87171]"}`}>{l.status}</span>
-                <span className="text-[#4A5168] hidden sm:inline">{l.loginTime ? new Date(l.loginTime).toLocaleString() : ""}</span>
+                <span className="text-[#4A5168] hidden sm:inline">{l.loginTime ? new Date(l.loginTime).toLocaleString(...fmt()) : ""}</span>
               </div>
             )}
             {!(act.recentLogins?.length) && <div className="text-xs text-[#4A5168] text-center py-4">No recent logins</div>}
@@ -2155,7 +2184,7 @@ function AdminDashboardPage() {
               <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b border-[#182550]/40">
                 <span className="text-[#F5A623] font-medium">{a.action || a.event}</span>
                 <span className="text-[#C8C2B4]">{a.module || a.entity}</span>
-                <span className="text-[#4A5168] hidden sm:inline">{a.createdAt ? new Date(a.createdAt).toLocaleString() : ""}</span>
+                <span className="text-[#4A5168] hidden sm:inline">{a.createdAt ? new Date(a.createdAt).toLocaleString(...fmt()) : ""}</span>
               </div>
             )}
             {!(act.recentAudit?.length) && <div className="text-xs text-[#4A5168] text-center py-4">No audit entries</div>}
@@ -2402,7 +2431,7 @@ function SurveysPage() {
     detailFields={[
       { key: "title", label: "Title" }, { key: "status", label: "Status" },
       { key: "description", label: "Description" }, { key: "responseCount", label: "Responses" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "title", label: "Title", required: true },{ key: "description", label: "Description", type: "textarea" },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Closed"] }]}
   />;
@@ -2420,7 +2449,7 @@ function TerritoriesPage() {
     detailFields={[
       { key: "name", label: "Name" }, { key: "type", label: "Type" },
       { key: "description", label: "Description" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
   />;
@@ -2461,7 +2490,7 @@ function WebhooksPage() {
     columns={[
       { key: "name", label: "Name" }, { key: "url", label: "URL" },
       { key: "active", label: "Active", render: v => <Badge color={v?'success':'neutral'}>{v?'Active':'Inactive'}</Badge> },
-      { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString() : "Never" },
+      { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString(...fmt()) : "Never" },
     ]}
     filterDefs={[
       { key: "active", label: "Status", type: "select", options: ["true","false"] },
@@ -2470,7 +2499,7 @@ function WebhooksPage() {
       { key: "name", label: "Name" }, { key: "url", label: "URL" },
       { key: "secret", label: "Secret", render: () => "********" },
       { key: "active", label: "Active" }, { key: "events", label: "Events" },
-      { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString() : "Never" },
+      { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString(...fmt()) : "Never" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "url", label: "URL", required: true },{ key: "secret", label: "Secret" }]}
   />;
@@ -2503,7 +2532,7 @@ function AssetsPage() {
       { key: "name", label: "Asset" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'||v==='Installed'?'success':v==='Decommissioned'?'danger':'warning'}>{v||'-'}</Badge> },
       { key: "serialNumber", label: "Serial #" },
-      { key: "warrantyEndDate", label: "Warranty", render: v => { if (!v) return "-"; const d = new Date(v); const now = new Date(); return <span className={d < now ? "text-[#F87171]" : "text-[#34D399]"}>{d.toLocaleDateString()}</span>; } },
+      { key: "warrantyEndDate", label: "Warranty", render: v => { if (!v) return "-"; const d = new Date(v); const now = new Date(); return <span className={d < now ? "text-[#F87171]" : "text-[#34D399]"}>{d.toLocaleDateString(...fmt())}</span>; } },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Purchased","Shipped","Installed","Active","Decommissioned"] },
@@ -2511,8 +2540,8 @@ function AssetsPage() {
     detailFields={[
       { key: "name", label: "Name" }, { key: "serialNumber", label: "Serial Number" },
       { key: "status", label: "Status" },
-      { key: "installDate", label: "Installed", render: v => v ? new Date(v).toLocaleDateString() : "-" },
-      { key: "warrantyEndDate", label: "Warranty Ends", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "installDate", label: "Installed", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "warrantyEndDate", label: "Warranty Ends", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "serialNumber", label: "Serial #" },{ key: "status", label: "Status", type: "select", options: ["Purchased","Shipped","Installed","Active","Decommissioned"] },{ key: "installDate", label: "Install", type: "date" },{ key: "warrantyEndDate", label: "Warranty End", type: "date" }]}
   />;
@@ -2522,12 +2551,12 @@ function NotesPage() {
   return <ModulePage title="Notes" icon={FileText} endpoint="/notes"
     columns={[
       { key: "title", label: "Title" }, { key: "parentModule", label: "Module" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     detailFields={[
       { key: "title", label: "Title" }, { key: "body", label: "Content" },
       { key: "parentModule", label: "Module" },
-      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleString() : "-" },
+      { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "title", label: "Title", required: true },{ key: "body", label: "Content", type: "textarea" }]}
   />;
@@ -2567,7 +2596,7 @@ function ApprovalsPage() {
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Approvals</h1>
       <div className="flex gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit">{['pending','history'].map(t=><button key={t} onClick={()=>setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize touch-manipulation ${tab===t?'bg-[rgba(245,166,35,0.08)] text-[#F5A623]':'text-[#7E8598]'}`}>{t}{t==='pending'&&pending.length>0&&<span className="ml-1 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{pending.length}</span>}</button>)}</div>
       {loading ? <Spinner /> : items.length===0 ? <EmptyState icon={CheckCircle2} title={tab==='pending'?"No pending approvals":"No history"} /> : (
-        <div className="space-y-2">{items.map(a=>(<div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div><div className="text-sm font-medium text-[#F0EDE5]">{a.module} - {a.recordId?.substring(0,8)}</div><div className="text-xs text-[#4A5168] mt-0.5">{a.createdAt?new Date(a.createdAt).toLocaleString():''}</div></div><div className="flex items-center gap-2">{a.status==='Pending'?<><Button variant="primary" size="sm" onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>:<Badge color={a.status==='Approved'?'success':'danger'}>{a.status}</Badge>}</div></div></div>))}</div>)}
+        <div className="space-y-2">{items.map(a=>(<div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div><div className="text-sm font-medium text-[#F0EDE5]">{a.module} - {a.recordId?.substring(0,8)}</div><div className="text-xs text-[#4A5168] mt-0.5">{a.createdAt?new Date(a.createdAt).toLocaleString(...fmt()):''}</div></div><div className="flex items-center gap-2">{a.status==='Pending'?<><Button variant="primary" size="sm" onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>:<Badge color={a.status==='Approved'?'success':'danger'}>{a.status}</Badge>}</div></div></div>))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );
@@ -2624,7 +2653,7 @@ function ChatterPage() {
       <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 mb-4"><TextArea value={newPost} onChange={setNewPost} placeholder="Share an update..." rows={2} /><div className="flex justify-end mt-2"><Button onClick={post} size="sm" icon={Send}>Post</Button></div></div>
       {loading ? <Spinner /> : posts.length===0 ? <EmptyState icon={MessageSquare} title="No posts yet" /> : (
         <div className="space-y-3">{posts.map(p=>(<div key={p.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xs font-bold text-[#F0EDE5]">{(p.author?.firstName?.[0]||'U')}</div><div><div className="text-sm font-medium text-[#F0EDE5]">{p.author?.firstName||'User'} {p.author?.lastName||''}</div><div className="text-xs text-[#4A5168]">{p.createdAt?new Date(p.createdAt).toLocaleString():''}</div></div></div>
+          <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xs font-bold text-[#F0EDE5]">{(p.author?.firstName?.[0]||'U')}</div><div><div className="text-sm font-medium text-[#F0EDE5]">{p.author?.firstName||'User'} {p.author?.lastName||''}</div><div className="text-xs text-[#4A5168]">{p.createdAt?new Date(p.createdAt).toLocaleString(...fmt()):''}</div></div></div>
           <div className="text-sm text-[#C8C2B4]">{p.body}</div>
           <div className="flex items-center gap-3 mt-3 pt-2 border-t border-[#182550]/40"><button className="text-xs text-[#4A5168] hover:text-[#F5A623] flex items-center gap-1"><Star size={12} />{p.likeCount||0}</button><button className="text-xs text-[#4A5168] hover:text-[#60A5FA] flex items-center gap-1"><MessageSquare size={12} />{p.commentCount||0}</button></div>
         </div>))}</div>)}
@@ -2645,7 +2674,7 @@ function RecycleBinPage() {
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Recycle Bin</h1>
       {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}s</div></button>))}</div>}
       {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title="Empty" subtitle="Deleted items appear here for 30 days" />:(
-        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString():''}</div></div><Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button></div>))}</div>)}
+        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div><Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button></div>))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );
@@ -2676,7 +2705,7 @@ const startOfWeek = (d, wkst = 0) => { const x = new Date(d); x.setDate(x.getDat
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const isoDay = d => new Date(d).toISOString().slice(0, 10);
 const sameDay = (a, b) => isoDay(a) === isoDay(b);
-const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const fmtTime = d => new Date(d).toLocaleTimeString(...fmt({ hour: 'numeric', minute: '2-digit' }));
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -2752,8 +2781,8 @@ function CalendarPage() {
   const label = mode === "month"
     ? `${MONTHS[anchor.getMonth()]} ${anchor.getFullYear()}`
     : mode === "week"
-      ? `${startOfWeek(anchor).toLocaleDateString(undefined,{month:'short',day:'numeric'})} - ${addDays(startOfWeek(anchor),6).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`
-      : anchor.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+      ? `${startOfWeek(anchor).toLocaleDateString(...fmt({month:'short',day:'numeric'}))} - ${addDays(startOfWeek(anchor),6).toLocaleDateString(...fmt({month:'short',day:'numeric'}))}`
+      : anchor.toLocaleDateString(...fmt({ weekday: 'long', month: 'long', day: 'numeric' }));
 
   return (
     <div>
@@ -2797,7 +2826,7 @@ function CalendarPage() {
               <div key={inv.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-sm text-[#F0EDE5] truncate">{inv.event?.title}</div>
-                  <div className="text-xs text-[#4A5168]">{inv.event?.startAt ? new Date(inv.event.startAt).toLocaleString() : ''}</div>
+                  <div className="text-xs text-[#4A5168]">{inv.event?.startAt ? new Date(inv.event.startAt).toLocaleString(...fmt()) : ''}</div>
                 </div>
                 <div className="flex gap-2 shrink-0">
                   <Button size="sm" onClick={() => respond(inv.eventId, 'Accepted')}>Accept</Button>
@@ -2829,7 +2858,7 @@ function CalendarPage() {
               {selected.status && <Badge color={selected.status==='Held'?'success':selected.status==='Cancelled'?'danger':'info'}>{selected.status}</Badge>}
             </div>
             <div className="text-sm text-[#C8C2B4]">
-              {new Date(selected.startAt).toLocaleString()} to {fmtTime(selected.endAt)}
+              {new Date(selected.startAt).toLocaleString(...fmt())} to {fmtTime(selected.endAt)}
             </div>
             {selected.recurrenceDescription && <div className="text-xs text-[#7E8598]">{selected.recurrenceDescription}</div>}
             {selected.location && <div className="text-sm text-[#7E8598]">Location: {selected.location}</div>}
@@ -2994,7 +3023,7 @@ function AgendaList({ events, onSelect }) {
       {Object.entries(byDay).sort().map(([day, list]) => (
         <div key={day}>
           <div className="text-xs font-semibold text-[#7E8598] uppercase tracking-wider mb-2">
-            {new Date(day + 'T12:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}
+            {new Date(day + 'T12:00').toLocaleDateString(...fmt({ weekday: 'long', month: 'short', day: 'numeric' }))}
           </div>
           <div className="space-y-2">
             {list.map(e => (
@@ -3083,7 +3112,7 @@ function ProjectsPage() {
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-[#F0EDE5] truncate">{p.name}</div>
                   <div className="text-xs text-[#4A5168] mt-0.5">
-                    {p.startDate ? new Date(p.startDate).toLocaleDateString() : 'No start'} to {p.endDate ? new Date(p.endDate).toLocaleDateString() : 'No end'}
+                    {p.startDate ? new Date(p.startDate).toLocaleDateString(...fmt()) : 'No start'} to {p.endDate ? new Date(p.endDate).toLocaleDateString(...fmt()) : 'No end'}
                   </div>
                 </div>
                 <div className="flex flex-col items-end gap-1 shrink-0">
@@ -3317,7 +3346,7 @@ function TaskList({ projectId, rows, onChanged }) {
             <div className="min-w-0 flex-1" style={{ paddingLeft: `${r.level * 12}px` }}>
               <div className="text-sm text-[#F0EDE5] truncate">{r.wbs ? `${r.wbs} ` : ''}{r.name}</div>
               <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-[#4A5168]">
-                {r.start && <span>{new Date(r.start).toLocaleDateString()}</span>}
+                {r.start && <span>{new Date(r.start).toLocaleDateString(...fmt())}</span>}
                 {r.durationDays != null && <span>{r.durationDays}d</span>}
                 {r.isCritical && <span className="text-[#F87171]">Critical path</span>}
                 {r.totalFloat > 0 && <span>{r.totalFloat}d float</span>}
@@ -3356,7 +3385,7 @@ function MilestoneList({ projectId, milestones, onChanged }) {
         <div key={m.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-sm text-[#F0EDE5] truncate">{m.name}</div>
-            <div className="text-xs text-[#4A5168]">{m.dueDate ? new Date(m.dueDate).toLocaleDateString() : 'No due date'}{m.isBillable && m.amount ? ` | $${m.amount.toLocaleString()}` : ''}</div>
+            <div className="text-xs text-[#4A5168]">{m.dueDate ? new Date(m.dueDate).toLocaleDateString(...fmt()) : 'No due date'}{m.isBillable && m.amount ? ` | $${m.amount.toLocaleString(...fmt())}` : ''}</div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <Badge color={m.status==='Completed'?'success':m.isOverdue?'danger':'warning'}>{m.completedAt ? 'Completed' : m.isOverdue ? 'Overdue' : m.status}</Badge>
@@ -3575,7 +3604,7 @@ function PrivacyPage() {
                     {r.requestType}{r.strategy ? ` · ${r.strategy}` : ""}
                   </div>
                   <div className="text-xs truncate" style={{ color: "var(--sn-dim)" }}>
-                    {r.email || r.contactId || r.leadId} · {new Date(r.requestedAt).toLocaleString()}
+                    {r.email || r.contactId || r.leadId} · {new Date(r.requestedAt).toLocaleString(...fmt())}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -4206,7 +4235,7 @@ function SlaPage() {
         {status && (
           <div className="flex items-center gap-2 text-xs">
             <span className={`w-2 h-2 rounded-full ${status.currentlyOpen ? "bg-[#34D399]" : "bg-[#7E8598]"}`} />
-            <span className="text-[#7E8598]">{status.currentlyOpen ? "Desk open" : `Closed, reopens ${status.nextOpen ? new Date(status.nextOpen).toLocaleString([], { weekday: "short", hour: "numeric" }) : "soon"}`}</span>
+            <span className="text-[#7E8598]">{status.currentlyOpen ? "Desk open" : `Closed, reopens ${status.nextOpen ? new Date(status.nextOpen).toLocaleString(...fmt({ weekday: "short", hour: "numeric" })) : "soon"}`}</span>
           </div>
         )}
       </div>
@@ -4246,7 +4275,7 @@ function SlaPage() {
                   <div className="min-w-0">
                     <div className="text-sm text-[#F0EDE5] truncate">{c.caseNumber ? `${c.caseNumber} ` : ""}{c.subject}</div>
                     <div className="text-xs text-[#4A5168] mt-0.5">
-                      {c.priority} | opened {new Date(c.createdAt).toLocaleDateString()}
+                      {c.priority} | opened {new Date(c.createdAt).toLocaleDateString(...fmt())}
                     </div>
                   </div>
                   <div className="flex flex-col items-end gap-1 shrink-0">
@@ -4665,7 +4694,7 @@ function MapsPage() {
                     <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: a.color || "#F5A623" }} />
                     <div className="min-w-0">
                       <div className="text-sm text-[#F0EDE5] truncate">{a.name}</div>
-                      <div className="text-xs text-[#4A5168]">{a.type} | {a.shape}{a.areaSqKm ? ` | ${Math.round(a.areaSqKm).toLocaleString()} sq km` : ""}</div>
+                      <div className="text-xs text-[#4A5168]">{a.type} | {a.shape}{a.areaSqKm ? ` | ${Math.round(a.areaSqKm).toLocaleString(...fmt())} sq km` : ""}</div>
                     </div>
                   </div>
                   <div className="text-right shrink-0">

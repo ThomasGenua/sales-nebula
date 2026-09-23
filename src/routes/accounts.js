@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = createCrudRouter('account', 'accounts', {
   include: {
@@ -45,7 +46,7 @@ const router = createCrudRouter('account', 'accounts', {
         const id = req.params.id;
         const [contacts, deals, cases, invoices] = await Promise.all([
           prisma.contact.count({ where: { accountId: id } }),
-          prisma.deal.findMany({ where: { accountId: id }, select: { stage: true, value: true } }),
+          prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { stage: true, value: true, currency: true } }),
           prisma.case.findMany({ where: { accountId: id }, select: { status: true } }),
           // select and include are mutually exclusive in Prisma; asking for both
           // made this whole endpoint throw, so account stats never returned.
@@ -54,17 +55,19 @@ const router = createCrudRouter('account', 'accounts', {
 
         const openDeals = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
         const wonDeals = deals.filter(d => d.stage === 'Closed Won');
+        const ctx = await currencyContext(prisma);
 
         res.json({
+          currency: ctx.base,
           contacts,
           totalDeals: deals.length,
           openDeals: openDeals.length,
-          pipelineValue: openDeals.reduce((s, d) => s + d.value, 0),
-          wonValue: wonDeals.reduce((s, d) => s + d.value, 0),
+          pipelineValue: sumInBase(openDeals, ctx),
+          wonValue: sumInBase(wonDeals, ctx),
           winRate: (wonDeals.length + deals.filter(d => d.stage === 'Closed Lost').length) > 0
             ? Math.round(wonDeals.length / (wonDeals.length + deals.filter(d => d.stage === 'Closed Lost').length) * 100) : 0,
           openCases: cases.filter(c => c.status !== 'Resolved' && c.status !== 'Closed').length,
-          totalRevenue: wonDeals.reduce((s, d) => s + d.value, 0),
+          totalRevenue: sumInBase(wonDeals, ctx),
         });
       } catch (err) { next(err); }
     });
@@ -163,10 +166,11 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     const [account, contacts, deals, cases, activities] = await Promise.all([
       prisma.account.findUnique({ where: { id } }),
       prisma.contact.count({ where: { accountId: id, deletedAt: null } }),
-      prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { stage: true, value: true } }),
+      prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { stage: true, value: true, currency: true } }),
       prisma.case.findMany({ where: { accountId: id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 90 * 86400000) } }, select: { priority: true, status: true } }),
       prisma.activity.count({ where: { accountId: id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } } }),
     ]);
+    const ctx = await currencyContext(prisma);
     let score = 50;
     if (contacts > 3) score += 10; else if (contacts === 0) score -= 15;
     const wonDeals = deals.filter(d => d.stage === 'Closed Won');
@@ -178,7 +182,7 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     if (activities > 5) score += 15; else if (activities === 0) score -= 10;
     score = Math.max(0, Math.min(100, score));
     const tier = score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'At Risk' : 'Critical';
-    res.json({ score, tier, factors: { contacts, totalDeals: deals.length, wonDeals: wonDeals.length, openDeals: openDeals.length, recentCases: cases.length, criticalCases: criticalCases.length, recentActivities: activities, totalRevenue: wonDeals.reduce((s, d) => s + (d.value || 0), 0) } });
+    res.json({ score, tier, factors: { contacts, totalDeals: deals.length, wonDeals: wonDeals.length, openDeals: openDeals.length, recentCases: cases.length, criticalCases: criticalCases.length, recentActivities: activities, totalRevenue: sumInBase(wonDeals, ctx) } });
   } catch (err) { next(err); }
 });
 

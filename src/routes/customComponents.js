@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { pickModelFields, looksLikeId } = require('../utils/modelFields');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -117,15 +118,8 @@ router.get('/:id/dependencies', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'customComponents', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'customComponents' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'customComponents', model: 'customComponent' });
 
 // Component usage analytics
 router.get('/analytics/usage', authenticate, async (req, res, next) => {

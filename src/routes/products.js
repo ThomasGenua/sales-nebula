@@ -122,8 +122,11 @@ const router = createCrudRouter('product', 'products', {
 router.get('/:id/pricing', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const entries = await prisma.priceBookEntry.findMany({ where: { productId: req.params.id, active: true }, include: { priceBook: { select: { id: true, name: true } } } });
-    res.json(entries);
+    // Price book entries live in PricebookEntry; the PriceBookEntry model this
+    // read is an unused duplicate with no relation to a price book. The old
+    // camel-cased keys are kept for callers.
+    const entries = await prisma.pricebookEntry.findMany({ where: { productId: req.params.id, active: true }, include: { pricebook: { select: { id: true, name: true } } } });
+    res.json(entries.map(e => ({ ...e, priceBookId: e.pricebookId, priceBook: e.pricebook })));
   } catch (err) { next(err); }
 });
 
@@ -135,8 +138,11 @@ router.get('/:id/inventory', authenticate, async (req, res, next) => {
     const [quotedQty, orderedQty] = await Promise.all([
       prisma.quoteLineItem.aggregate({ where: { productId: req.params.id }, _sum: { quantity: true } }),
       prisma.orderItem.aggregate({ where: { productId: req.params.id }, _sum: { quantity: true } }),
-    ]).catch(() => [{}, {}]);
-    res.json({ ...product, quotedQuantity: quotedQty?._sum?.quantity || 0, orderedQuantity: orderedQty?._sum?.quantity || 0, needsReorder: (product?.quantityOnHand || 0) <= (product?.reorderPoint || 0) });
+    ]);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    // Unset stock levels used to read as 0 <= 0, so every product needed a reorder.
+    const needsReorder = product.quantityOnHand != null && product.reorderPoint != null && product.quantityOnHand <= product.reorderPoint;
+    res.json({ ...product, quotedQuantity: quotedQty._sum.quantity || 0, orderedQuantity: orderedQty._sum.quantity || 0, needsReorder });
   } catch (err) { next(err); }
 });
 

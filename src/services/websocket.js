@@ -5,6 +5,7 @@
  */
 
 const jwt = require('jsonwebtoken');
+const { parseCookies, ACCESS_COOKIE } = require('../utils/sessionCookies');
 const { resolveJwtSecret } = require('../utils/secrets');
 
 const JWT_SECRET = resolveJwtSecret();
@@ -29,10 +30,16 @@ function initWebSocket(server) {
 
   // Auth middleware
   io.use((socket, next) => {
-    const token = socket.handshake.auth?.token;
+    // A token handed over explicitly, or the browser's session cookie, which
+    // the handshake carries on its own. The cookie is SameSite=Lax, so a
+    // socket opened by a page on another site arrives without it.
+    const token = socket.handshake.auth?.token
+      || parseCookies(socket.handshake.headers?.cookie)[ACCESS_COOKIE];
     if (!token) return next(new Error('Authentication required'));
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
+      // Only a session access token, as in the HTTP middleware.
+      if (decoded.type !== 'access') return next(new Error('Invalid token'));
       socket.userId = decoded.userId;
       socket.userRole = decoded.role;
       next();

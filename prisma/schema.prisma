@@ -43,6 +43,12 @@ model User {
   // Written by the routes, never migrated until now.
   contactId String?
   isPortalUser Boolean   @default(false)
+  // Shown on the profile page; stamped at each sign-in.
+  lastLoginAt DateTime?
+  // How this user reads dates and numbers: an IANA zone (Europe/Paris) and a
+  // BCP 47 locale (fr-FR). Unset means the browser's own.
+  timezone String?
+  locale   String?
   @@index([roleId])
   teamMemberships TeamMember[] @relation("TeamMembers")
   deployments    Deployment[]      @relation
@@ -185,6 +191,9 @@ model Deal {
   deletedAt   DateTime?
   // Written by the routes, never migrated until now.
   partnerId String?
+  // ISO code of the currency `value` is in (a Currency.code); totals convert
+  // to the default currency. Null counts as the default.
+  currency  String?
 
   @@index([accountId])
   @@index([contactId])
@@ -527,6 +536,10 @@ model Product {
   pricebookEntries PricebookEntry[]
   dealLineItems    DealLineItem[]
   deletedAt   DateTime?
+  // Stock levels for the inventory report; unset means not tracked.
+  quantityOnHand  Int?
+  reorderPoint    Int?
+  reorderQuantity Int?
 
 }
 
@@ -616,6 +629,10 @@ model Invoice {
 
   totalAmount     Float    @default(0)
   invoiceNumber   String?
+  // The subscription this invoice bills, for its invoice history.
+  subscriptionId  String?
+
+  @@index([subscriptionId])
 }
 
 model InvoiceItem {
@@ -4251,19 +4268,6 @@ model TeamMember {
   @@unique([teamId, userId])
   @@index([teamId])
   @@index([userId])
-}
-
-model PriceBookEntry {
-  id          String   @id @default(cuid())
-  priceBookId String?
-  productId   String
-  unitPrice   Float
-  currency    String   @default("USD")
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  @@index([productId])
-  @@index([priceBookId])
 }
 
 // ═══════════════════════════════════════════════════════════════

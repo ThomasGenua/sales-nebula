@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { statusRoutes } = require('../utils/moduleStatus');
 
 const router = Router();
 
@@ -87,9 +88,11 @@ module.exports = router;
 router.post('/schedule', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { module, format, frequency, recipients } = req.body;
+    const { name, module, format, frequency, recipients } = req.body;
     if (!module || !EXPORTABLE_MODULES[module]) return res.status(400).json({ error: 'Invalid module' });
-    const schedule = await prisma.scheduledExport.create({ data: { module, format: format || 'csv', schedule: frequency || 'weekly', recipients: recipients || [], userId: req.user.id, nextRunAt: new Date(Date.now() + 86400000) } }).catch(() => ({ module, format, schedule: frequency, status: 'scheduled' }));
+    // name is a required column. The create always failed without it, and a
+    // .catch() then answered 201 with a schedule that was never saved.
+    const schedule = await prisma.scheduledExport.create({ data: { name: name || `${module} export`, module, format: format || 'csv', schedule: frequency || 'weekly', recipients: recipients || [], userId: req.user.id, nextRunAt: new Date(Date.now() + 86400000) } });
     res.status(201).json(schedule);
   } catch (err) { next(err); }
 });
@@ -105,15 +108,8 @@ router.get('/templates', authenticate, async (req, res, next) => {
   res.json(templates);
 });
 
-// Bulk status check
-router.get('/status/health', authenticate, async (req, res, next) => {
-  try { res.json({ module: 'export', healthy: true, timestamp: new Date(), version: '4.1.0' }); } catch (err) { next(err); }
-});
-
-// Count endpoint
-router.get('/count', authenticate, async (req, res, next) => {
-  try { res.json({ count: 0, module: 'export' }); } catch (err) { next(err); }
-});
+// Record count, health and summary, answered from the module's own table.
+statusRoutes(router, { module: 'export', model: 'scheduledExport' });
 
 // Export progress
 router.get('/progress/:jobId', authenticate, async (req, res, next) => {

@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { authenticate, requirePermission, validatePassword, signAccessToken } = require('../middleware/auth');
+const { authenticate, requirePermission, validatePassword, signAccessToken, signRefreshToken } = require('../middleware/auth');
+const { wantsCookieSession, setSessionCookies } = require('../utils/sessionCookies');
 const { auditMiddleware } = require('../middleware/audit');
 const { createLimiter } = require('../middleware/rateLimit');
 const {
@@ -512,6 +513,12 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
       console.error('[welcome-email]', err.message);
     });
 
+    // The browser signs straight in with a cookie session; other callers get
+    // the token in the body, as before.
+    if (wantsCookieSession(req)) {
+      setSessionCookies(res, { accessToken, refreshToken: signRefreshToken(user.id).token });
+      return res.status(201).json({ session: 'cookie', user: safeUser });
+    }
     res.status(201).json({ token: accessToken, user: safeUser });
   } catch (err) { next(err); }
 });
