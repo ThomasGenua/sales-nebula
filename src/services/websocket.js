@@ -5,11 +5,17 @@
  *
  * A socket only ever hears what its user could fetch. Record events carry
  * the module and id, never the record, so a client fetches it through the
- * API and its permission checks; a module room takes read permission on the
- * module, and a record room a record the user can see. Every created or
- * updated record used to go out whole to anyone who asked to join its
- * module's room, and every deal stage change, deal included, to every
- * connected user.
+ * API and its permission checks. A record room takes a record the user can
+ * see. A module room, which hears about every record in the module, takes
+ * read permission and a module none of whose records are hidden from the
+ * user; anyone else follows records one by one. Every created or updated
+ * record used to go out whole to anyone who asked to join its module's room,
+ * and every deal stage change, deal included, to every connected user.
+ *
+ * A socket closes when the access token it opened with expires, so a
+ * sign-out, a disabled account or a change of permissions reaches it within
+ * that token's lifetime; the client reconnects with a fresh token, and its
+ * rooms are checked again.
  *
  * Sessions only: connected-app tokens are not taken here, since an open
  * socket would outlive the app's revocation.
@@ -48,7 +54,22 @@ async function canSeeRecord(prisma, user, module, recordId) {
   return !!record;
 }
 
-const reply = (ack, ok) => { if (typeof ack === 'function') ack({ ok }); };
+/**
+ * Why the user may not follow a whole module, or null when they may: only
+ * when no record in it is hidden from them, or its events would name
+ * records they cannot open.
+ */
+async function moduleRoomRefusal(prisma, user, module) {
+  const modelName = crudModelFor(module);
+  if (!modelName) return 'No live updates for this module';
+  if (!canReadModule(user, module)) return 'No read permission on this module';
+  if (await buildAccessFilter(prisma, user, module, { modelName })) {
+    return 'Some records in this module are hidden from you; follow records with join:record';
+  }
+  return null;
+}
+
+const reply = (ack, ok, reason) => { if (typeof ack === 'function') ack(reason ? { ok, reason } : { ok }); };
 const isName = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
 
 function initWebSocket(server, prisma) {
@@ -89,6 +110,7 @@ function initWebSocket(server, prisma) {
       if (!user || !user.active) return next(new Error('Invalid token'));
       socket.user = user;
       socket.userId = user.id;
+      socket.tokenExpiresAt = decoded.exp ? decoded.exp * 1000 : null;
       next();
     } catch (err) {
       next(new Error('Invalid token'));
@@ -104,6 +126,13 @@ function initWebSocket(server, prisma) {
 
     // Join user-specific room for targeted notifications
     socket.join(`user:${userId}`);
+
+    // Closed when its token expires; the client reconnects with a new one.
+    // (A longer delay than setTimeout's 32-bit limit would fire at once.)
+    const expiry = socket.tokenExpiresAt && setTimeout(() => {
+      socket.emit('session:expired');
+      socket.disconnect(true);
+    }, Math.min(Math.max(0, socket.tokenExpiresAt - Date.now()), 2147483647));
 
     console.log(`  WS: ${userId} connected (${userSockets.get(userId).size} sessions)`);
 
@@ -126,11 +155,16 @@ function initWebSocket(server, prisma) {
       if (isName(module) && isName(recordId)) socket.leave(`record:${module}:${recordId}`);
     });
 
-    // List view updates, for a module the user's role can read
-    socket.on('join:module', (module, ack) => {
-      const ok = isName(module) && canReadModule(socket.user, module);
-      if (ok) socket.join(`module:${module}`);
-      reply(ack, ok);
+    // List view updates, for a module the user can see all of
+    socket.on('join:module', async (module, ack) => {
+      if (!isName(module)) return reply(ack, false);
+      try {
+        const refusal = await moduleRoomRefusal(prisma, socket.user, module);
+        if (!refusal) socket.join(`module:${module}`);
+        reply(ack, !refusal, refusal);
+      } catch (err) {
+        reply(ack, false);
+      }
     });
 
     socket.on('leave:module', (module) => {
@@ -148,6 +182,7 @@ function initWebSocket(server, prisma) {
     });
 
     socket.on('disconnect', () => {
+      if (expiry) clearTimeout(expiry);
       const sockets = userSockets.get(userId);
       if (sockets) {
         sockets.delete(socket.id);

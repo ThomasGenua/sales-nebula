@@ -58,6 +58,12 @@ function triggersFor(event) {
   return TRIGGER_ALIASES[event] || [String(event).toLowerCase()];
 }
 
+/** The operators compare() understands, for checking conditions when they are saved. */
+const COMPARE_OPERATORS = [
+  'equals', 'eq', 'notEquals', 'ne', 'contains', 'notContains', 'startsWith',
+  'greaterThan', 'gt', 'lessThan', 'lt', 'gte', 'lte', 'isEmpty', 'isNotEmpty', 'in',
+];
+
 function compare(operator, value, target) {
   const left = value === null || value === undefined ? '' : value;
   switch (operator) {
@@ -252,6 +258,7 @@ module.exports = {
   runWorkflowsSafely,
   runActions,
   evaluateConditions,
+  COMPARE_OPERATORS,
   resolveModel,
   triggersFor,
 };

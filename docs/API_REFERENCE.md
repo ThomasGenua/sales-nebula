@@ -697,20 +697,27 @@ Rule-based automation with logs and manual trigger
 
 ### `/api/approvals`
 
-Multi-step approval processes and requests
+Multi-step approval processes and requests.
+
+A process names its `module`, its `steps` (each with an `approverType` of `user`, `role`, `manager` or `queue`, and an `approverId` unless it is `manager`), and optionally:
+
+- `entryConditions`: `[{ "field": "value", "operator": "gt", "value": 10000 }]`, all of which a record must meet to be submitted. Operators are those workflows use: `equals`, `notEquals`, `contains`, `notContains`, `startsWith`, `gt`, `lt`, `gte`, `lte`, `isEmpty`, `isNotEmpty`, `in`. A deal submitted with `POST /api/deals/:id/submit` goes to the oldest active deals process whose conditions it meets.
+- `finalApprovalAction` and `finalRejectionAction`: `none`, `updateField` with a config of `{ "field": "stage", "value": "Negotiation" }` (a plain field, never an id, owner or timestamp), or `createNotification` with an optional `{ "message", "userId" }` (the record's owner by default).
+
+The submitter is never an approver, and is told of every outcome.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/approvals/processes` | List approval processes |
-| POST | `/api/approvals/processes` | Create new approval |
-| PUT | `/api/approvals/processes/:id` | Update approval |
-| DELETE | `/api/approvals/processes/:id` | Delete approval |
-| GET | `/api/approvals/requests` | List approval requests |
-| GET | `/api/approvals/requests/pending` | List pending approval requests |
-| POST | `/api/approvals/requests` | Create new approval |
-| POST | `/api/approvals/requests/:id/approve` | Approve approval |
-| POST | `/api/approvals/requests/:id/reject` | Reject approval |
-| POST | `/api/approvals/requests/:id/recall` | Recall approval from approval |
+| POST | `/api/approvals/processes` | Create an approval process |
+| PUT | `/api/approvals/processes/:id` | Update an approval process |
+| DELETE | `/api/approvals/processes/:id` | Delete an approval process |
+| GET | `/api/approvals/requests` | Requests the caller submitted or was asked to decide (all, for administrators) |
+| GET | `/api/approvals/requests/pending` | Steps waiting on the caller |
+| POST | `/api/approvals/requests` | Submit a record the caller can see (`processId`, `recordId`) |
+| POST | `/api/approvals/requests/:id/approve` | Approve the step waiting on the caller |
+| POST | `/api/approvals/requests/:id/reject` | Reject the request at the step waiting on the caller |
+| POST | `/api/approvals/requests/:id/recall` | Withdraw a pending request (submitter only) |
 
 ### `/api/events`
 
