@@ -120,6 +120,36 @@ function signToken(userId, role) {
   return signAccessToken(userId, role);
 }
 
+// ─── API KEY RATE LIMIT ───
+// A key's rateLimit is requests per hour. It was stored and never enforced.
+// Counted in Redis when there is one, so every instance shares the count;
+// otherwise in this process.
+const HOUR_MS = 60 * 60 * 1000;
+const keyWindows = new Map(); // key id -> { windowStart, count }
+
+async function countApiKeyRequest(keyId) {
+  const windowStart = Math.floor(Date.now() / HOUR_MS) * HOUR_MS;
+  const resetAt = windowStart + HOUR_MS;
+  if (redisClient) {
+    try {
+      const name = `rl:apikey:${keyId}:${windowStart}`;
+      const count = await redisClient.incr(name);
+      if (count === 1) await redisClient.pexpire(name, HOUR_MS);
+      return { count, resetAt };
+    } catch (e) { /* fall back to memory */ }
+  }
+  let window = keyWindows.get(keyId);
+  if (!window || window.windowStart !== windowStart) {
+    window = { windowStart, count: 0 };
+    keyWindows.set(keyId, window);
+  }
+  window.count += 1;
+  if (keyWindows.size > 10000) {
+    for (const [id, w] of keyWindows) if (w.windowStart !== windowStart) keyWindows.delete(id);
+  }
+  return { count: window.count, resetAt };
+}
+
 // ─── API KEY AUTH ───
 async function authenticateApiKey(req, res, next) {
   const apiKey = req.headers['x-api-key'];
@@ -141,6 +171,20 @@ async function authenticateApiKey(req, res, next) {
     // disabled: routes without a permission check used to take such a key.
     const owner = await loadUser(req, keyRecord.createdById);
     if (!owner || !owner.active) return res.status(401).json({ error: 'API key owner is disabled' });
+
+    if (keyRecord.rateLimit > 0) {
+      const { count, resetAt } = await countApiKeyRequest(keyRecord.id);
+      res.set({
+        'X-RateLimit-Limit': String(keyRecord.rateLimit),
+        'X-RateLimit-Remaining': String(Math.max(0, keyRecord.rateLimit - count)),
+        'X-RateLimit-Reset': String(Math.ceil(resetAt / 1000)),
+      });
+      if (count > keyRecord.rateLimit) {
+        const retryAfter = Math.ceil((resetAt - Date.now()) / 1000);
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({ error: 'API key rate limit exceeded', code: 'RATE_LIMITED', retryAfter });
+      }
+    }
 
     req.userId = keyRecord.createdById;
     req.userRole = 'api';

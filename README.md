@@ -484,6 +484,8 @@ For server-to-server integrations, generate API keys via `POST /api/admin/api-ke
 
 A key acts for the user who created it and stops working if that user is disabled. Give it `permissions: [{ "module": "contacts", "level": "read" }, ...]` to limit it to those modules, never beyond the creator's own access; `"module": "*"` covers every module. A key with an empty `permissions` list carries the creator's full access.
 
+Each key allows `rateLimit` requests per hour (default 1000). Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; past the limit the API answers 429 with `Retry-After`. The count is shared through Redis when `REDIS_URL` is set, and kept per process otherwise.
+
 ### SSO and OAuth
 
 SSO providers (SAML 2.0 and OIDC) are configured via `/api/security/sso`. Google and Microsoft sign-in (`/api/oauth`) come pre-wired through environment variables.
