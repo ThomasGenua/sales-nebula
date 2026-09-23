@@ -53,6 +53,36 @@ function lineItemFields(item, { discount = true } = {}) {
   };
 }
 
+// A field an automated update (an approval's final action, a workflow) may
+// set: a plain value, never who owns or links to a record, its identity or
+// its timestamps. Those would let a rule hand records to someone else, and a
+// value that is an object would be a nested write into another table.
+const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
+const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
+
+/** Why an automated update may not set `field` to `value` on a model, or null. */
+function plainFieldProblem(modelName, field, value) {
+  const model = findModel(modelName);
+  if (!model) return `There is no ${modelName} model`;
+  const foreignKeys = new Set(model.fields.flatMap(f => f.relationFromFields || []));
+  const def = model.fields.find(f => f.name === field);
+  if (!def || def.kind === 'object' || def.isId || def.isUpdatedAt || foreignKeys.has(field)
+      || PROTECTED_FIELDS.has(field) || /Id$/.test(field)) {
+    return `"${field}" is not a field an automated update may set`;
+  }
+  if (value === null || value === undefined) return def.isRequired ? `${field} cannot be emptied` : null;
+  if (def.kind === 'enum') {
+    const values = Prisma.dmmf.datamodel.enums.find(e => e.name === def.type)?.values.map(v => v.name) || [];
+    return values.includes(value) ? null : `${field} must be one of: ${values.join(', ')}`;
+  }
+  const expected = VALUE_TYPES[def.type];
+  if (!expected) return `${field} is a ${def.type}, which an automated update cannot set`;
+  if (typeof value !== expected || (def.type === 'Int' && !Number.isInteger(value))) {
+    return `${field} needs a ${def.type === 'Int' ? 'whole number' : expected} value`;
+  }
+  return null;
+}
+
 /** Whether a model declares a given field. */
 function modelHasField(modelName, field) {
   const model = Prisma.dmmf.datamodel.models.find(
@@ -198,4 +228,6 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
   return result;
 }
 
-module.exports = { pickModelFields, lineItemFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes };
+module.exports = {
+  pickModelFields, lineItemFields, plainFieldProblem, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
+};

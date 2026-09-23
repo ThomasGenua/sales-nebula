@@ -1,7 +1,25 @@
 const { Router } = require('express');
-const { runWorkflows } = require('../services/workflowEngine');
+const { runWorkflows, resolveModel, workflowProblem } = require('../services/workflowEngine');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { visibleWhere } = require('../middleware/rowSecurity');
+
+/**
+ * The fields a workflow is saved with. The body went to Prisma whole, so it
+ * could set run counts or write logs, and actions were never looked at.
+ */
+function workflowFields(body) {
+  const b = body || {};
+  const data = {};
+  for (const key of ['name', 'description', 'module', 'trigger']) {
+    if (b[key] !== undefined) data[key] = b[key] === null ? null : String(b[key]);
+  }
+  for (const key of ['conditions', 'actions']) {
+    if (b[key] !== undefined) data[key] = b[key];
+  }
+  if (b.active !== undefined) data.active = !!b.active;
+  return data;
+}
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -32,7 +50,11 @@ router.get('/:id', requirePermission('workflows', 'read'), async (req, res, next
 router.post('/', requirePermission('workflows', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const workflow = await prisma.workflow.create({ data: req.body });
+    const data = workflowFields(req.body);
+    if (!data.name || !data.module || !data.trigger) return res.status(400).json({ error: 'name, module and trigger are required' });
+    const problem = workflowProblem(data);
+    if (problem) return res.status(400).json({ error: problem });
+    const workflow = await prisma.workflow.create({ data });
     await req.audit({ action: 'create', module: 'workflows', recordId: workflow.id });
     res.status(201).json(workflow);
   } catch (err) { next(err); }
@@ -42,7 +64,11 @@ router.post('/', requirePermission('workflows', 'edit'), async (req, res, next) 
 router.put('/:id', requirePermission('workflows', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, logs, ...data } = req.body;
+    const current = await prisma.workflow.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    const data = workflowFields(req.body);
+    const problem = workflowProblem({ ...current, ...data });
+    if (problem) return res.status(400).json({ error: problem });
     const workflow = await prisma.workflow.update({ where: { id: req.params.id }, data });
     res.json(workflow);
   } catch (err) { next(err); }
@@ -96,16 +122,24 @@ router.get('/logs/all', requirePermission('workflows', 'read'), async (req, res,
  * nothing called. It now shares src/services/workflowEngine.js with the write
  * paths and the scheduler, so a rule behaves the same however it is reached.
  */
-router.post('/execute', authenticate, async (req, res, next) => {
+router.post('/execute', requirePermission('workflows', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { module, trigger, record, oldRecord } = req.body || {};
-    if (!module || !trigger || !record?.id) {
+    const { module, trigger, record: given, oldRecord } = req.body || {};
+    if (!module || !trigger || !given?.id) {
       return res.status(400).json({ error: 'module, trigger and record.id are required' });
     }
+    // The record as stored, and only one the caller can see. Anyone signed
+    // in could run every rule against a record they described themselves:
+    // any id, with whatever fields made the conditions match.
+    const modelName = resolveModel(module);
+    const record = modelName && await prisma[modelName].findFirst({
+      where: await visibleWhere(req, String(module), modelName, { id: String(given.id) }),
+    });
+    if (!record) return res.status(404).json({ error: 'Record not found' });
 
     const results = await runWorkflows(prisma, {
-      module, trigger, record, oldRecord, userId: req.userId,
+      module: String(module), trigger, record, oldRecord, userId: req.userId,
     });
     res.json({ executed: results.length, results });
   } catch (err) { next(err); }

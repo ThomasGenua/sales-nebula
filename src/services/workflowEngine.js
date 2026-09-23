@@ -1,5 +1,5 @@
 const { Prisma } = require('@prisma/client');
-const { modelHasField } = require('../utils/modelFields');
+const { modelHasField, plainFieldProblem } = require('../utils/modelFields');
 
 /**
  * Rule engine for Workflow records.
@@ -122,6 +122,11 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
     switch (action?.type) {
       case 'updateField': {
         if (!config.field) break;
+        // Checked here as well as when the rule is saved, for rules saved
+        // before: an object value was a nested write into another table, and
+        // ownerId handed the record to whoever the rule named.
+        const problem = plainFieldProblem(modelName, config.field, config.value);
+        if (problem) throw new Error(`updateField refused: ${problem}`);
         await prisma[modelName].update({
           where: { id: record.id },
           data: { [config.field]: config.value },
@@ -193,6 +198,37 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
   return actionsRun;
 }
 
+const CONDITION_OPERATORS = [...COMPARE_OPERATORS, 'changed', 'changedTo'];
+
+/**
+ * Why a workflow could not be saved: its module, conditions or field
+ * updates. Action types the engine does not run are left alone, as ever;
+ * they do nothing.
+ */
+function workflowProblem({ module, conditions, actions }) {
+  const modelName = resolveModel(module);
+  if (!modelName) return `Unknown module: ${module}`;
+  if (conditions != null) {
+    if (!Array.isArray(conditions)) return 'conditions must be a list of { field, operator, value }';
+    for (const condition of conditions) {
+      if (!condition || typeof condition.field !== 'string' || !condition.field) return 'Each condition needs a field';
+      if (!CONDITION_OPERATORS.includes(condition.operator)) {
+        return `Condition operator must be one of: ${CONDITION_OPERATORS.join(', ')}`;
+      }
+    }
+  }
+  if (actions != null) {
+    if (!Array.isArray(actions)) return 'actions must be a list of { type, config }';
+    for (const action of actions) {
+      if (action?.type === 'updateField') {
+        const problem = plainFieldProblem(modelName, action.config?.field, action.config?.value);
+        if (problem) return `updateField: ${problem}`;
+      }
+    }
+  }
+  return null;
+}
+
 /** Guards against an action type that one day writes back through the API. */
 const MAX_DEPTH = 3;
 
@@ -259,6 +295,7 @@ module.exports = {
   runActions,
   evaluateConditions,
   COMPARE_OPERATORS,
+  workflowProblem,
   resolveModel,
   triggersFor,
 };
