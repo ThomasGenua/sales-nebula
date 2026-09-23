@@ -60,6 +60,17 @@ function lineItemFields(item, { discount = true } = {}) {
 const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
 const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
 
+/**
+ * A caller's values for a model's own columns, less its identity, its
+ * timestamps and who owns it, for bulk writes where ownership is the server's
+ * to set (or a reassignment's).
+ */
+function editableFields(modelName, data) {
+  const { data: picked } = pickModelFields(modelName, data || {});
+  for (const key of PROTECTED_FIELDS) delete picked[key];
+  return picked;
+}
+
 /** Why an automated update may not set `field` to `value` on a model, or null. */
 function plainFieldProblem(modelName, field, value) {
   const model = findModel(modelName);
@@ -81,6 +92,51 @@ function plainFieldProblem(modelName, field, value) {
     return `${field} needs a ${def.type === 'Int' ? 'whole number' : expected} value`;
   }
   return null;
+}
+
+// ─── A CALLER'S OWN FILTERS AND SELECTIONS ───
+
+const FILTER_OPS = new Set(['equals', 'not', 'in', 'notIn', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'mode']);
+const plain = v => v === null || ['string', 'number', 'boolean'].includes(typeof v) || v instanceof Date;
+
+/**
+ * A caller-supplied `where`, kept to the model's own scalar columns and plain
+ * comparisons; everything else is dropped. A relation filter such as
+ * `{ owner: { password: { startsWith: '$2a$12$a' } } }` let a query probe rows
+ * it never returned, a user's password hash included, a character at a time.
+ */
+function scalarWhere(modelName, where) {
+  const model = findModel(modelName);
+  const out = {};
+  if (!model || !where || typeof where !== 'object' || Array.isArray(where)) return out;
+  for (const [key, value] of Object.entries(where)) {
+    const field = model.fields.find(f => f.name === key);
+    if (!field || field.kind === 'object') continue;
+    if (plain(value)) { out[key] = value; continue; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const condition = {};
+    for (const [op, v] of Object.entries(value)) {
+      if (!FILTER_OPS.has(op)) continue;
+      if (op === 'in' || op === 'notIn') { if (Array.isArray(v) && v.every(plain)) condition[op] = v; }
+      else if (op === 'mode') { if (v === 'insensitive' || v === 'default') condition[op] = v; }
+      else if (plain(v)) condition[op] = v;
+    }
+    if (Object.keys(condition).length) out[key] = condition;
+  }
+  return out;
+}
+
+/**
+ * A caller's choice of columns as a Prisma `select`: the model's own scalar
+ * fields only (id always). A relation in `select` returned the related rows,
+ * so `{ owner: { select: { password: true } } }` read password hashes. Takes
+ * a list of names or a `{ name: true }` object; undefined when none remain.
+ */
+function scalarSelect(modelName, fields) {
+  const model = findModel(modelName);
+  const names = Array.isArray(fields) ? fields : fields && typeof fields === 'object' ? Object.keys(fields).filter(k => fields[k]) : [];
+  const picked = names.filter(n => model?.fields.some(f => f.name === n && f.kind !== 'object'));
+  return picked.length ? Object.fromEntries([['id', true], ...picked.map(n => [n, true])]) : undefined;
 }
 
 /** Whether a model declares a given field. */
@@ -229,5 +285,6 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
 }
 
 module.exports = {
-  pickModelFields, lineItemFields, plainFieldProblem, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
+  pickModelFields, lineItemFields, plainFieldProblem, editableFields, scalarWhere, scalarSelect,
+  modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
 };

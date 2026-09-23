@@ -10,7 +10,7 @@
  */
 const { requirePermission } = require('./auth');
 const { buildAccessFilter, applyAccessFilter } = require('./rowSecurity');
-const { looksLikeId } = require('../utils/modelFields');
+const { looksLikeId, modelHasField } = require('../utils/modelFields');
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -50,4 +50,16 @@ function recordAccess(module, modelName) {
   };
 }
 
-module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach };
+/**
+ * `where`, narrowed to a module's live rows the user may see (minLevel
+ * 'Read') or change ('Edit'), for queries and bulk writes outside the CRUD
+ * router.
+ */
+async function reachableWhere(req, module, modelName, where = {}, minLevel = 'Read') {
+  const prisma = req.app.locals.prisma;
+  const filter = await buildAccessFilter(prisma, req.user, module, { minLevel, modelName });
+  const live = modelHasField(modelName, 'deletedAt') ? { deletedAt: null } : {};
+  return applyAccessFilter({ ...where, ...live }, filter);
+}
+
+module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere };
