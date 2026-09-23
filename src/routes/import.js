@@ -1,6 +1,12 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+
+// Only administrators import records on someone else's behalf; everyone
+// else's imports are theirs.
+const OWNERSHIP_FIELDS = ['ownerId', 'assignedId'];
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -114,7 +120,14 @@ router.post('/execute', async (req, res, next) => {
       return res.status(400).json({ error: 'Maximum 10,000 records per import' });
     }
 
+    // An import took a session alone, set owners, and with updateDuplicates
+    // overwrote whichever records matched, anyone's. It now takes edit
+    // permission on the module and touches only records the caller can see
+    // (to skip) or change (to update).
+    if (!permits(req, module, 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+
     const config = IMPORTABLE_MODULES[module];
+    const fields = isAdmin(req.user) ? config.fields : config.fields.filter(f => !OWNERSHIP_FIELDS.includes(f));
     const mapping = fieldMapping || {};
     const results = { created: 0, updated: 0, skipped: 0, errors: [] };
 
@@ -124,11 +137,12 @@ router.post('/execute', async (req, res, next) => {
       const dedupeField = config.dedupeFields[0];
       const values = records
         .map(r => applyMapping(r, mapping)[dedupeField])
-        .filter(Boolean);
+        .filter(Boolean)
+        .map(String);
 
       if (values.length > 0) {
         const existing = await prisma[config.model].findMany({
-          where: { [dedupeField]: { in: values } },
+          where: await reachableWhere(req, module, config.model, { [dedupeField]: { in: values } }, updateDuplicates ? 'Edit' : 'Read'),
           select: { id: true, [dedupeField]: true },
         });
         for (const rec of existing) {
@@ -149,7 +163,7 @@ router.post('/execute', async (req, res, next) => {
 
           // Filter to valid fields only
           const data = {};
-          for (const field of config.fields) {
+          for (const field of fields) {
             if (mapped[field] !== undefined && mapped[field] !== null && mapped[field] !== '') {
               data[field] = coerceField(field, mapped[field]);
             }
