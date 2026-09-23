@@ -4,8 +4,11 @@ const { auditMiddleware } = require('../middleware/audit');
 
 const router = Router();
 
+// Reads answer to surveys read (they took a session alone). Only /:id/respond
+// below is public, for the people a survey goes to.
+
 // List surveys
-router.get('/', authenticate, async (req, res, next) => {
+router.get('/', authenticate, requirePermission('surveys', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, status } = req.query;
@@ -20,7 +23,7 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 // Get survey with questions
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requirePermission('surveys', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const survey = await prisma.survey.findUnique({ where: { id: req.params.id }, include: { questions: { orderBy: { order: 'asc' } } } });
@@ -110,7 +113,7 @@ router.post('/:id/respond', async (req, res, next) => {
 });
 
 // Get survey results/analytics
-router.get('/:id/results', authenticate, async (req, res, next) => {
+router.get('/:id/results', authenticate, requirePermission('surveys', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const survey = await prisma.survey.findUnique({ where: { id: req.params.id }, include: { questions: { include: { answers: true } } } });

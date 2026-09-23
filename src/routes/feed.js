@@ -1,10 +1,24 @@
 const { Router } = require('express');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach, reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { crudModelFor } = require('../utils/crud');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
+
+/**
+ * The model behind a record module the caller may read, or null once it has
+ * answered. Posting took any module and record id with a session alone.
+ */
+function feedModel(req, res, module) {
+  const modelName = typeof module === 'string' ? crudModelFor(module) : null;
+  if (!modelName) { res.status(400).json({ error: `Feed posts are not available for ${module}` }); return null; }
+  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return null; }
+  return modelName;
+}
 
 // Get activity feed for any record
 router.get('/:module/:id', authenticate, async (req, res, next) => {
@@ -28,6 +42,9 @@ router.post('/:module/:id', authenticate, auditMiddleware, async (req, res, next
   try {
     const prisma = req.app.locals.prisma;
     const { module: mod, id } = req.params;
+    const modelName = feedModel(req, res, mod);
+    if (!modelName) return;
+    if (!(await canReach(req, mod, modelName, id))) return res.status(404).json({ error: 'Record not found' });
     const { type, body, visibility } = req.body;
     if (!body?.trim()) return res.status(400).json({ error: 'body required' });
     const entry = await queryWithIncludes(prisma, 'feedItem', 'create', {
@@ -82,7 +99,8 @@ router.delete('/:entryId', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const entry = await prisma.feedItem.findUnique({ where: { id: req.params.entryId } });
     if (!entry) return res.status(404).json({ error: 'Not found' });
-    if (entry.userId !== req.user.id) return res.status(403).json({ error: 'Can only delete own entries' });
+    // The author column is authorId; FeedItem has no userId, so this refused everyone.
+    if (entry.authorId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Can only delete own entries' });
     await prisma.feedItem.delete({ where: { id: req.params.entryId } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -137,9 +155,19 @@ router.post('/bulk', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { recordIds, body, module } = req.body;
-    if (!recordIds?.length || !body) return res.status(400).json({ error: 'recordIds and body required' });
-    const posts = await Promise.all(recordIds.slice(0, 50).map(id =>
-      prisma.feedItem.create({ data: { parentId: id, parentModule: module || 'general', body, type: 'text', authorId: req.user.id } })
+    // The module is needed to check the records; the old default, 'general', named none.
+    if (!Array.isArray(recordIds) || !recordIds.length || !body || !module) {
+      return res.status(400).json({ error: 'recordIds, body and module required' });
+    }
+    const modelName = feedModel(req, res, module);
+    if (!modelName) return;
+    // Only the records the caller can see.
+    const visible = await prisma[modelName].findMany({
+      where: await reachableWhere(req, module, modelName, { id: { in: recordIds.slice(0, 50).map(String) } }),
+      select: { id: true },
+    });
+    const posts = await Promise.all(visible.map(({ id }) =>
+      prisma.feedItem.create({ data: { parentId: id, parentModule: module, body, type: 'text', authorId: req.user.id } })
     ));
     res.status(201).json({ created: posts.length });
   } catch (err) { next(err); }

@@ -61,8 +61,9 @@ router.get('/:id', requirePermission('knowledge', 'read'), async (req, res, next
   } catch (err) { next(err); }
 });
 
-// Lookup by slug (for public/portal use)
-router.get('/slug/:slug', async (req, res, next) => {
+// Lookup by slug. Portal accounts never reach /api/knowledge, so this takes
+// knowledge read like the reads above; it served Internal articles to anyone.
+router.get('/slug/:slug', requirePermission('knowledge', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const article = await prisma.knowledgeArticle.findUnique({
@@ -144,8 +145,8 @@ router.post('/:id/new-version', requirePermission('knowledge', 'edit'), async (r
   } catch (err) { next(err); }
 });
 
-// Vote helpful/not helpful
-router.post('/:id/vote', async (req, res, next) => {
+// Vote helpful/not helpful, on an article the voter may read
+router.post('/:id/vote', requirePermission('knowledge', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { helpful } = req.body;

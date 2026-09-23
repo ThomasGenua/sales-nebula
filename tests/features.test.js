@@ -293,13 +293,15 @@ describe('Forecast Approve', () => {
     const start = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
     const end = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 + 3, 0);
 
+    // Someone else's forecast: nobody approves their own.
+    const { user: rep } = await createTestUser({ email: `forecaster${Date.now()}@test.com` });
     const forecast = await prisma.forecast.create({
       data: {
         name: 'Q1 Forecast',
         period: 'Q1-2026',
         periodStart: start,
         periodEnd: end,
-        userId,
+        userId: rep.id,
         status: 'Submitted',
         quotaAmount: 500000,
       },

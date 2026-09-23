@@ -5,8 +5,11 @@ const { queryWithIncludes } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
+// Publishing fans out to every subscriber's webhook and socket, and the
+// history holds every payload; both took a session alone.
+
 // ─── EVENT PUBLISHING ───
-router.post('/publish', async (req, res, next) => {
+router.post('/publish', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { channel, payload, module, recordId } = req.body;
@@ -43,7 +46,7 @@ router.post('/publish', async (req, res, next) => {
 });
 
 // ─── EVENT HISTORY ───
-router.get('/history', async (req, res, next) => {
+router.get('/history', requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const { channel, module, limit = 50, before } = req.query;
     const where = {};
@@ -58,7 +61,8 @@ router.get('/history', async (req, res, next) => {
 });
 
 // ─── SUBSCRIPTIONS CRUD ───
-router.get('/subscriptions', async (req, res, next) => {
+// Each row carries a webhook's endpoint and HMAC secret; this took a session alone.
+router.get('/subscriptions', requirePermission('admin', 'read'), async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.eventSubscription.findMany() }); }
   catch (err) { next(err); }
 });

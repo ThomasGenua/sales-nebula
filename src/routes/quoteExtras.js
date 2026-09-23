@@ -1,10 +1,19 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach } = require('../middleware/access');
 const { createNumbered, ORDER_NUMBER, QUOTE_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
+
+/** 404 unless the caller can see the quote at :id; these reads took any quote. */
+async function visibleQuote(req, res, next) {
+  try {
+    if (await canReach(req, 'quotes', 'quote', req.params.id)) return next();
+    res.status(404).json({ error: 'Not found' });
+  } catch (err) { next(err); }
+}
 
 // Quote approvals
 router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), auditMiddleware, async (req, res, next) => {
@@ -83,11 +92,15 @@ router.post('/:id/convert-to-order', authenticate, requirePermission('orders', '
 });
 
 // Quote comparison
-router.post('/compare', authenticate, async (req, res, next) => {
+router.post('/compare', authenticate, requirePermission('quotes', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { quoteIds } = req.body;
-    if (!quoteIds?.length || quoteIds.length < 2) return res.status(400).json({ error: 'At least 2 quoteIds required' });
+    if (!Array.isArray(quoteIds) || quoteIds.length < 2) return res.status(400).json({ error: 'At least 2 quoteIds required' });
+    // Every quote compared must be one the caller can see.
+    for (const id of quoteIds) {
+      if (!(await canReach(req, 'quotes', 'quote', id))) return res.status(404).json({ error: 'Not found' });
+    }
     const quotes = await prisma.quote.findMany({
       where: { id: { in: quoteIds } },
       include: { lineItems: { include: { product: { select: { id: true, name: true } } } } },
@@ -104,7 +117,7 @@ router.post('/compare', authenticate, async (req, res, next) => {
 });
 
 // Quote version history
-router.get('/:id/versions', authenticate, async (req, res, next) => {
+router.get('/:id/versions', authenticate, requirePermission('quotes', 'read'), visibleQuote, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const versions = await prisma.quoteVersion.findMany({
@@ -117,7 +130,7 @@ router.get('/:id/versions', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Quote PDF preview data
-router.get('/:id/preview', authenticate, async (req, res, next) => {
+router.get('/:id/preview', authenticate, requirePermission('quotes', 'read'), visibleQuote, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: { include: { product: true } }, account: { select: { name: true, billingCity: true, billingCountry: true } } } });
