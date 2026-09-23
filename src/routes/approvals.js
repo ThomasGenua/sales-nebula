@@ -1,6 +1,9 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const {
+  APPROVER_TYPES, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
+} = require('../services/approvals');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -18,10 +21,22 @@ router.get('/processes', requirePermission('workflows', 'read'), async (req, res
   } catch (err) { next(err); }
 });
 
+/** A process step's approver must be one the request can resolve. */
+function invalidStep(steps) {
+  for (const step of steps || []) {
+    const type = String(step.approverType || 'user').toLowerCase();
+    if (!APPROVER_TYPES.includes(type)) return `approverType must be one of: ${APPROVER_TYPES.join(', ')}`;
+    if (type !== 'manager' && !step.approverId) return `Step "${step.name || '?'}" needs an approverId for approverType ${type}`;
+  }
+  return null;
+}
+
 router.post('/processes', requirePermission('workflows', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { steps, ...data } = req.body;
+    const problem = invalidStep(steps);
+    if (problem) return res.status(400).json({ error: problem });
     const process = await prisma.approvalProcess.create({
       data: { ...data, steps: { create: steps || [] } },
       include: { steps: true },
@@ -35,6 +50,8 @@ router.put('/processes/:id', requirePermission('workflows', 'edit'), async (req,
   try {
     const prisma = req.app.locals.prisma;
     const { steps, id, createdAt, updatedAt, requests, _count, ...data } = req.body;
+    const problem = invalidStep(steps);
+    if (problem) return res.status(400).json({ error: problem });
     if (steps) await prisma.approvalProcessStep.deleteMany({ where: { processId: req.params.id } });
     const process = await prisma.approvalProcess.update({
       where: { id: req.params.id },
@@ -81,7 +98,8 @@ router.get('/requests/pending', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const pending = await prisma.approvalStep.findMany({
-      where: { approverId: req.userId, status: 'Pending' },
+      // Only steps whose turn has come, on requests still open.
+      where: { approverId: req.userId, status: 'Pending', request: { status: 'Pending' } },
       include: {
         request: {
           include: {
@@ -108,13 +126,9 @@ router.post('/requests', async (req, res, next) => {
       include: { steps: { orderBy: { stepOrder: 'asc' } } },
     });
     if (!process || !process.active) return res.status(400).json({ error: 'Process not found or inactive' });
-    // A step with no named approver used to fall back to the submitter, who
-    // could then approve their own request. Role, manager and queue approvers
-    // are not resolved yet, so such a process cannot be submitted.
-    const unassigned = process.steps.find(step => !step.approverId);
-    if (unassigned) {
-      return res.status(400).json({ error: `Approval step "${unassigned.name}" has no approver; set approverId on the process step` });
-    }
+    if (!process.steps.length) return res.status(400).json({ error: 'Process has no steps' });
+    // Every candidate for every step, never the submitter (services/approvals).
+    const stepRows = await buildApprovalSteps(prisma, process.steps, req.user);
 
     // Check entry conditions
     if (process.entryConditions && process.entryConditions.length > 0) {
@@ -130,13 +144,7 @@ router.post('/requests', async (req, res, next) => {
         submittedById: req.userId,
         comments,
         currentStep: 1,
-        steps: {
-          // Numbered from 1 in process order, to match currentStep.
-          create: process.steps.map((step, i) => ({
-            stepOrder: i + 1,
-            approverId: step.approverId,
-          })),
-        },
+        steps: { create: stepRows },
       },
       include: {
         steps: { include: { approver: { select: { id: true, firstName: true, lastName: true } } } },
@@ -144,19 +152,7 @@ router.post('/requests', async (req, res, next) => {
       },
     });
 
-    // Notify first approver
-    const firstStep = request.steps.find(s => s.stepOrder === 1);
-    if (firstStep) {
-      await prisma.notification.create({
-        data: {
-          title: 'Approval Required',
-          message: `${process.name}: Submitted by ${(await prisma.user.findUnique({ where: { id: req.userId }, select: { firstName: true } })).firstName}`,
-          userId: firstStep.approverId,
-          recordModule: module,
-          recordId,
-        },
-      });
-    }
+    await notifyApprovers(prisma, request, 1, 'Approval Required', `${process.name}: Submitted by ${req.user.firstName}`);
 
     await req.audit({ action: 'create', module: 'approvals', recordId: request.id, details: `Submitted for approval: ${process.name}` });
     res.status(201).json(request);
@@ -175,14 +171,11 @@ router.post('/requests/:id/approve', async (req, res, next) => {
     });
     if (!request || request.status !== 'Pending') return res.status(400).json({ error: 'Invalid request' });
 
-    const currentStep = request.steps.find(s => s.stepOrder === request.currentStep && s.approverId === req.userId);
+    const currentStep = request.steps.find(s => s.stepOrder === request.currentStep && s.approverId === req.userId && s.status === 'Pending');
     if (!currentStep) return res.status(403).json({ error: 'Not your turn to approve' });
 
-    // Approve this step
-    await prisma.approvalStep.update({
-      where: { id: currentStep.id },
-      data: { status: 'Approved', comments, decidedAt: new Date() },
-    });
+    // Approve this step; the other candidates for it are done.
+    await settleStep(prisma, request, currentStep, 'Approved', comments);
 
     // Check if there are more steps
     const nextStepNum = request.currentStep + 1;
@@ -193,13 +186,8 @@ router.post('/requests/:id/approve', async (req, res, next) => {
         where: { id: req.params.id },
         data: { currentStep: nextStepNum },
       });
-      // Notify next approver
-      const nextStep = request.steps.find(s => s.stepOrder === nextStepNum);
-      if (nextStep) {
-        await prisma.notification.create({
-          data: { title: 'Approval Required (Step ' + nextStepNum + ')', message: `${request.process.name}`, userId: nextStep.approverId, recordModule: request.module, recordId: request.recordId },
-        });
-      }
+      await prisma.approvalStep.updateMany({ where: { requestId: request.id, stepOrder: nextStepNum, status: 'Waiting' }, data: { status: 'Pending' } });
+      await notifyApprovers(prisma, request, nextStepNum, `Approval Required (Step ${nextStepNum})`, request.process.name);
     } else {
       // Final approval
       await prisma.approvalRequest.update({
@@ -228,11 +216,15 @@ router.post('/requests/:id/reject', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { comments } = req.body;
     const request = await prisma.approvalRequest.findUnique({ where: { id: req.params.id }, include: { steps: true } });
-    const currentStep = request?.steps.find(s => s.stepOrder === request.currentStep && s.approverId === req.userId);
+    // A decided request stays decided: this used to let an approver reject
+    // one that had already been approved.
+    if (!request || request.status !== 'Pending') return res.status(400).json({ error: 'Invalid request' });
+    const currentStep = request.steps.find(s => s.stepOrder === request.currentStep && s.approverId === req.userId && s.status === 'Pending');
     if (!currentStep) return res.status(403).json({ error: 'Not authorized' });
 
-    await prisma.approvalStep.update({ where: { id: currentStep.id }, data: { status: 'Rejected', comments, decidedAt: new Date() } });
+    await settleStep(prisma, request, currentStep, 'Rejected', comments);
     await prisma.approvalRequest.update({ where: { id: req.params.id }, data: { status: 'Rejected', completedAt: new Date() } });
+    await closeOpenSteps(prisma, request.id);
 
     await prisma.notification.create({
       data: { title: 'Approval Rejected', message: comments || 'Your request was rejected', userId: request.submittedById, recordModule: request.module, recordId: request.recordId },
@@ -252,6 +244,7 @@ router.post('/requests/:id/recall', async (req, res, next) => {
     if (request.status !== 'Pending') return res.status(400).json({ error: 'Can only recall pending requests' });
 
     await prisma.approvalRequest.update({ where: { id: req.params.id }, data: { status: 'Recalled', completedAt: new Date() } });
+    await closeOpenSteps(prisma, request.id);
     res.json({ success: true });
   } catch (err) { next(err); }
 });

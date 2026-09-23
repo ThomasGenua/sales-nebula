@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
 const { visibleWhere } = require('../middleware/rowSecurity');
+const { buildApprovalSteps, notifyApprovers } = require('../services/approvals');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
 
 module.exports = createCrudRouter('deal', 'deals', {
@@ -350,7 +351,8 @@ module.exports = createCrudRouter('deal', 'deals', {
     router.post('/:id/submit', requirePermission('deals', 'edit'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+        // Only a deal the submitter can see; this took any deal id.
+        const deal = await prisma.deal.findFirst({ where: await visibleWhere(req, 'deals', 'deal', { id: req.params.id }) });
         if (!deal) return res.status(404).json({ error: 'Not found' });
 
         // Find applicable approval process
@@ -362,10 +364,9 @@ module.exports = createCrudRouter('deal', 'deals', {
         if (!process) {
           return res.status(400).json({ error: 'No active approval process configured for deals' });
         }
-        const unassigned = process.steps.find(step => !step.approverId);
-        if (unassigned) {
-          return res.status(400).json({ error: `Approval step "${unassigned.name}" has no approver; set approverId on the process step` });
-        }
+        if (!process.steps.length) return res.status(400).json({ error: 'Approval process has no steps' });
+        // Every candidate for every step, never the submitter (services/approvals).
+        const stepRows = await buildApprovalSteps(prisma, process.steps, req.user);
 
         // Create approval request
         const request = await prisma.approvalRequest.create({
@@ -376,17 +377,11 @@ module.exports = createCrudRouter('deal', 'deals', {
             submittedById: req.userId,
             status: 'Pending',
             currentStep: 1,
-            steps: {
-              // Numbered from 1 in process order, to match currentStep.
-              create: process.steps.map((step, i) => ({
-                stepOrder: i + 1,
-                approverId: step.approverId,
-                status: i === 0 ? 'Pending' : 'Waiting',
-              })),
-            },
+            steps: { create: stepRows },
           },
           include: { steps: true },
         });
+        await notifyApprovers(prisma, request, 1, 'Approval Required', `Deal "${deal.name}" submitted by ${req.user.firstName}`);
 
         await req.audit({ action: 'update', module: 'deals', recordId: deal.id, details: `Submitted deal for approval` });
         res.json({ success: true, approvalRequest: request });
