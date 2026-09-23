@@ -1,6 +1,7 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 
 const {
   render, buildDocument, buildContext, validateTemplate,
@@ -19,20 +20,29 @@ const MODEL_FOR = {
 /**
  * Load a record plus the related records templates usually reference,
  * so {{account.name}} resolves from a quote without extra config.
+ *
+ * Only what the requesting user could open: the record, and each related
+ * record, must be in a module they may read and within their row security.
+ * Rendering took any record id with authenticate() alone, so any document
+ * template printed any quote, invoice, contact or deal in the organisation.
  */
-async function loadRenderData(prisma, module, recordId) {
+async function loadRenderData(req, module, recordId) {
+  const prisma = req.app.locals.prisma;
   const model = MODEL_FOR[module];
-  if (!model) return null;
+  if (!model || !permits(req, module, 'read')) return null;
 
-  const record = await prisma[model].findFirst({ where: { id: recordId, deletedAt: null } });
+  const record = await prisma[model].findFirst({ where: await reachableWhere(req, module, model, { id: String(recordId) }) });
   if (!record) return null;
 
   const related = {};
   const safeFind = async (name, fn) => { try { const r = await fn(); if (r) related[name] = r; } catch { /* relation may not exist */ } };
+  const readable = async (relModule, relModel, id) => (permits(req, relModule, 'read')
+    ? prisma[relModel].findFirst({ where: await reachableWhere(req, relModule, relModel, { id }) })
+    : null);
 
-  if (record.accountId) await safeFind('account', () => prisma.account.findUnique({ where: { id: record.accountId } }));
-  if (record.contactId) await safeFind('contact', () => prisma.contact.findUnique({ where: { id: record.contactId } }));
-  if (record.dealId) await safeFind('deal', () => prisma.deal.findUnique({ where: { id: record.dealId } }));
+  if (record.accountId) await safeFind('account', () => readable('accounts', 'account', record.accountId));
+  if (record.contactId) await safeFind('contact', () => readable('contacts', 'contact', record.contactId));
+  if (record.dealId) await safeFind('deal', () => readable('deals', 'deal', record.dealId));
   if (record.ownerId) await safeFind('owner', () => prisma.user.findUnique({ where: { id: record.ownerId }, select: { id: true, firstName: true, lastName: true, email: true } }));
 
   // Line items live on different models per document type
@@ -176,8 +186,10 @@ router.get('/fields/:module', authenticate, async (req, res, next) => {
     const { module } = req.params;
     const model = MODEL_FOR[module];
     if (!model) return res.status(400).json({ error: `Unsupported module: ${module}` });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
 
-    const sample = await prisma[model].findFirst({ where: { deletedAt: null } });
+    // Sample values come from a record the caller can see.
+    const sample = await prisma[model].findFirst({ where: await reachableWhere(req, module, model) });
     const singular = module.replace(/s$/, '');
 
     const describe = (obj, prefix) => Object.entries(obj || {})
@@ -190,13 +202,18 @@ router.get('/fields/:module', authenticate, async (req, res, next) => {
 
     const groups = [{ group: singular, fields: sample ? describe(sample, singular) : [] }];
 
-    const relatedSamples = { account: 'account', contact: 'contact', owner: 'user' };
-    for (const [alias, rel] of Object.entries(relatedSamples)) {
+    // The owner sample was the first user row, whole: its password hash
+    // (40 characters of it) came back as "owner.password". The caller's own
+    // name and email stand in now, and related samples are records they can see.
+    const relatedSamples = { account: ['accounts', 'account'], contact: ['contacts', 'contact'] };
+    for (const [alias, [relModule, rel]] of Object.entries(relatedSamples)) {
       try {
-        const r = await prisma[rel].findFirst();
+        if (!permits(req, relModule, 'read')) continue;
+        const r = await prisma[rel].findFirst({ where: await reachableWhere(req, relModule, rel) });
         if (r) groups.push({ group: alias, fields: describe(r, alias) });
       } catch { /* model may not exist */ }
     }
+    groups.push({ group: 'owner', fields: describe({ id: req.user.id, firstName: req.user.firstName, lastName: req.user.lastName, email: req.user.email }, 'owner') });
 
     groups.push({
       group: 'system',
@@ -269,15 +286,17 @@ router.post('/:id/preview', authenticate, async (req, res, next) => {
 
     let context;
     if (req.body.recordId) {
-      const data = await loadRenderData(prisma, template.module, req.body.recordId);
+      const data = await loadRenderData(req, template.module, req.body.recordId);
       if (!data) return res.status(404).json({ error: 'Record not found' });
       context = buildContext(template.module, data.record, data.related);
     } else {
       // Fall back to the first available record, then to placeholders
       const model = MODEL_FOR[template.module];
-      const sample = model ? await prisma[model].findFirst({ where: { deletedAt: null } }) : null;
-      if (sample) {
-        const data = await loadRenderData(prisma, template.module, sample.id);
+      const sample = model && permits(req, template.module, 'read')
+        ? await prisma[model].findFirst({ where: await reachableWhere(req, template.module, model), select: { id: true } })
+        : null;
+      const data = sample ? await loadRenderData(req, template.module, sample.id) : null;
+      if (data) {
         context = buildContext(template.module, data.record, data.related);
       } else {
         const singular = template.module.replace(/s$/, '');
@@ -317,7 +336,7 @@ router.post('/:id/render/:recordId', authenticate, auditMiddleware, async (req, 
     if (!template) return res.status(404).json({ error: 'Template not found' });
     if (!template.active) return res.status(400).json({ error: 'Template is inactive' });
 
-    const data = await loadRenderData(prisma, template.module, req.params.recordId);
+    const data = await loadRenderData(req, template.module, req.params.recordId);
     if (!data) return res.status(404).json({ error: 'Record not found' });
 
     const context = buildContext(template.module, data.record, data.related);
@@ -366,7 +385,7 @@ router.post('/render/:module/:recordId', authenticate, async (req, res, next) =>
     });
     if (!template) return res.status(404).json({ error: `No active template for module ${req.params.module}` });
 
-    const data = await loadRenderData(prisma, req.params.module, req.params.recordId);
+    const data = await loadRenderData(req, req.params.module, req.params.recordId);
     if (!data) return res.status(404).json({ error: 'Record not found' });
 
     const html = buildDocument(template, buildContext(req.params.module, data.record, data.related));
@@ -391,7 +410,7 @@ router.post('/:id/batch', authenticate, requirePermission('admin', 'edit'), asyn
     const rendered = [], failed = [];
     for (const recordId of recordIds) {
       try {
-        const data = await loadRenderData(prisma, template.module, recordId);
+        const data = await loadRenderData(req, template.module, recordId);
         if (!data) { failed.push({ recordId, reason: 'not found' }); continue; }
         const html = buildDocument(template, buildContext(template.module, data.record, data.related));
         rendered.push({ recordId, sizeBytes: Buffer.byteLength(html, 'utf8'), html: req.body.includeHtml ? html : undefined });
