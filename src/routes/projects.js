@@ -1,12 +1,48 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { moduleAccess, recordAccess, reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { editableFields } = require('../utils/modelFields');
 const {
   calculateCriticalPath, wouldCreateCycle, assignWbsCodes,
   rollUpProgress, buildGanttRows, addDays, diffDays,
 } = require('../utils/scheduling');
 
 const router = Router();
+
+// The projects permission for every route, read to look and edit to change,
+// and a project a route names must be one row security lets the caller see
+// (or change). Reads, budgets and hourly rates among them, took a session
+// alone, and so did logging time against any project.
+router.use(authenticate, moduleAccess('projects'));
+router.param('id', recordAccess('projects', 'project'));
+
+/**
+ * The live project, when the caller may change it: its owner or manager, or
+ * an admin, and for task and time writes (`team: true`) anyone on its team.
+ * Otherwise it answers 404 or 403 and returns null. Every write here took
+ * any project with projects:edit alone.
+ */
+async function projectToChange(req, res, projectId, { team = false } = {}) {
+  const prisma = req.app.locals.prisma;
+  const project = projectId ? await prisma.project.findFirst({ where: { id: String(projectId), deletedAt: null } }) : null;
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return null; }
+  const me = req.user.id;
+  if (isAdmin(req.user) || project.ownerId === me || project.managerId === me) return project;
+  if (team && await prisma.projectResource.findFirst({ where: { projectId: project.id, userId: me }, select: { id: true } })) return project;
+  res.status(403).json({ error: team ? 'Only the project team can change its tasks and time' : 'Only the project owner or manager can change this project' });
+  return null;
+}
+
+// What a project update may set. The body went to Prisma whole, so a caller
+// could hand the project to anyone (ownerId, managerId) or rewrite its time
+// entries through `timeEntries`.
+const PROJECT_FIELDS = [
+  'name', 'code', 'description', 'status', 'priority', 'health',
+  'startDate', 'endDate', 'actualStart', 'actualEnd', 'percentComplete',
+  'budget', 'estimatedHours', 'currency', 'accountId', 'dealId', 'contactId',
+];
 
 /** Recompute derived project fields from its task set. */
 async function recalcProject(prisma, projectId) {
@@ -56,14 +92,15 @@ router.get('/', authenticate, async (req, res, next) => {
     if (managerId) where.managerId = managerId;
     if (accountId) where.accountId = accountId;
     if (mine === 'true') where.OR = [{ managerId: req.user.id }, { ownerId: req.user.id }, { resources: { some: { userId: req.user.id } } }];
+    const visible = await reachableWhere(req, 'projects', 'project', where);
 
     const [data, total] = await Promise.all([
       prisma.project.findMany({
-        where, skip: (+page - 1) * +limit, take: +limit,
+        where: visible, skip: (+page - 1) * +limit, take: +limit,
         orderBy: { [sortBy]: sortDir },
         include: { _count: { select: { tasks: true, milestones: true, resources: true } } },
       }),
-      prisma.project.count({ where }),
+      prisma.project.count({ where: visible }),
     ]);
     res.json({ data, total, page: +page, limit: +limit });
   } catch (err) { next(err); }
@@ -127,7 +164,9 @@ router.post('/', authenticate, requirePermission('projects', 'edit'), auditMiddl
 router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, tasks, milestones, resources, _count, ...data } = req.body;
+    if (!(await projectToChange(req, res, req.params.id))) return;
+    const data = {};
+    for (const f of PROJECT_FIELDS) if (req.body[f] !== undefined) data[f] = req.body[f];
     for (const f of ['startDate', 'endDate', 'actualStart', 'actualEnd']) {
       if (data[f]) data[f] = new Date(data[f]);
     }
@@ -146,6 +185,7 @@ router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMid
 router.delete('/:id', authenticate, requirePermission('projects', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await projectToChange(req, res, req.params.id))) return;
     const project = await prisma.project.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
     await prisma.projectTask.updateMany({ where: { projectId: project.id }, data: { deletedAt: new Date() } });
     await req.audit({ action: 'delete', module: 'projects', recordId: project.id, details: `Project deleted: ${project.name}` });
@@ -187,8 +227,8 @@ router.get('/:id/tasks', authenticate, async (req, res, next) => {
 router.post('/:id/tasks', authenticate, requirePermission('projects', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const project = await prisma.project.findFirst({ where: { id: req.params.id, deletedAt: null } });
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const project = await projectToChange(req, res, req.params.id, { team: true });
+    if (!project) return;
 
     const { name, description, status, priority, taskType, startDate, endDate, durationDays, estimatedHours, parentTaskId, assignedToId, milestoneId, sortOrder, dependsOn } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
@@ -234,8 +274,12 @@ router.put('/tasks/:taskId', authenticate, requirePermission('projects', 'edit')
     const prisma = req.app.locals.prisma;
     const existing = await prisma.projectTask.findFirst({ where: { id: req.params.taskId, deletedAt: null } });
     if (!existing) return res.status(404).json({ error: 'Task not found' });
+    if (!(await projectToChange(req, res, existing.projectId, { team: true }))) return;
 
-    const { id, createdAt, projectId, subtasks, predecessors, successors, dependsOn, ...data } = req.body;
+    // The task's own columns: relation keys reached its project (`project:
+    // { update: { ownerId } }`) and other tasks' time entries.
+    const data = editableFields('projectTask', req.body);
+    delete data.projectId;
     for (const f of ['startDate', 'endDate', 'actualStart', 'actualEnd']) {
       if (data[f]) data[f] = new Date(data[f]);
     }
@@ -267,6 +311,7 @@ router.delete('/tasks/:taskId', authenticate, requirePermission('projects', 'edi
     const prisma = req.app.locals.prisma;
     const task = await prisma.projectTask.findFirst({ where: { id: req.params.taskId, deletedAt: null } });
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (!(await projectToChange(req, res, task.projectId, { team: true }))) return;
     await prisma.projectTask.updateMany({ where: { OR: [{ id: task.id }, { parentTaskId: task.id }] }, data: { deletedAt: new Date() } });
     await prisma.taskDependency.deleteMany({ where: { OR: [{ predecessorId: task.id }, { successorId: task.id }] } });
     await recalcProject(prisma, task.projectId);
@@ -280,13 +325,17 @@ router.post('/:id/tasks/reorder', authenticate, requirePermission('projects', 'e
     const prisma = req.app.locals.prisma;
     const { moves } = req.body;
     if (!Array.isArray(moves)) return res.status(400).json({ error: 'moves array required' });
+    const project = await projectToChange(req, res, req.params.id, { team: true });
+    if (!project) return;
     let updated = 0;
     for (const m of moves) {
       if (!m.taskId) continue;
-      await prisma.projectTask.update({
-        where: { id: m.taskId },
+      // This project's tasks only; a move named any task in any project.
+      const { count } = await prisma.projectTask.updateMany({
+        where: { id: String(m.taskId), projectId: project.id },
         data: { sortOrder: m.sortOrder ?? 0, ...(m.parentTaskId !== undefined && { parentTaskId: m.parentTaskId }) },
-      }).then(() => updated++).catch(() => {});
+      }).catch(() => ({ count: 0 }));
+      updated += count;
     }
     res.json({ updated });
   } catch (err) { next(err); }
@@ -298,6 +347,7 @@ router.post('/:id/tasks/bulk-status', authenticate, requirePermission('projects'
     const prisma = req.app.locals.prisma;
     const { taskIds, status } = req.body;
     if (!taskIds?.length || !status) return res.status(400).json({ error: 'taskIds and status required' });
+    if (!(await projectToChange(req, res, req.params.id, { team: true }))) return;
     const data = { status };
     if (status === 'Completed') { data.percentComplete = 100; data.actualEnd = new Date(); }
     const result = await prisma.projectTask.updateMany({ where: { id: { in: taskIds }, projectId: req.params.id }, data });
@@ -319,6 +369,7 @@ router.post('/tasks/:taskId/dependencies', authenticate, requirePermission('proj
     const predecessor = await prisma.projectTask.findFirst({ where: { id: predecessorId, deletedAt: null } });
     if (!successor || !predecessor) return res.status(404).json({ error: 'Task not found' });
     if (successor.projectId !== predecessor.projectId) return res.status(400).json({ error: 'Tasks must be in the same project' });
+    if (!(await projectToChange(req, res, successor.projectId, { team: true }))) return;
 
     const existing = await prisma.taskDependency.findMany({ where: { successor: { projectId: successor.projectId } } });
     if (wouldCreateCycle(existing, predecessorId, successor.id)) {
@@ -333,7 +384,10 @@ router.post('/tasks/:taskId/dependencies', authenticate, requirePermission('proj
 router.delete('/dependencies/:depId', authenticate, requirePermission('projects', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.taskDependency.delete({ where: { id: req.params.depId } });
+    const dep = await prisma.taskDependency.findUnique({ where: { id: req.params.depId }, include: { successor: { select: { projectId: true } } } });
+    if (!dep) return res.status(404).json({ error: 'Dependency not found' });
+    if (!(await projectToChange(req, res, dep.successor.projectId, { team: true }))) return;
+    await prisma.taskDependency.delete({ where: { id: dep.id } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
@@ -375,8 +429,8 @@ router.get('/:id/gantt', authenticate, async (req, res, next) => {
 router.post('/:id/reschedule', authenticate, requirePermission('projects', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const project = await prisma.project.findFirst({ where: { id: req.params.id, deletedAt: null } });
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const project = await projectToChange(req, res, req.params.id);
+    if (!project) return;
 
     const tasks = await prisma.projectTask.findMany({ where: { projectId: project.id, deletedAt: null } });
     const dependencies = await prisma.taskDependency.findMany({ where: { successor: { projectId: project.id } } });
@@ -419,6 +473,7 @@ router.post('/:id/milestones', authenticate, requirePermission('projects', 'edit
     const prisma = req.app.locals.prisma;
     const { name, description, dueDate, isBillable, amount, sortOrder } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
+    if (!(await projectToChange(req, res, req.params.id))) return;
     const milestone = await prisma.projectMilestone.create({
       data: { projectId: req.params.id, name, description, dueDate: dueDate ? new Date(dueDate) : null, isBillable: !!isBillable, amount: amount != null ? +amount : null, sortOrder: sortOrder ?? 0 },
     });
@@ -429,8 +484,11 @@ router.post('/:id/milestones', authenticate, requirePermission('projects', 'edit
 router.post('/milestones/:milestoneId/complete', authenticate, requirePermission('projects', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const found = await prisma.projectMilestone.findUnique({ where: { id: req.params.milestoneId }, select: { id: true, projectId: true } });
+    if (!found) return res.status(404).json({ error: 'Milestone not found' });
+    if (!(await projectToChange(req, res, found.projectId))) return;
     const milestone = await prisma.projectMilestone.update({
-      where: { id: req.params.milestoneId },
+      where: { id: found.id },
       data: { status: 'Completed', completedAt: new Date() },
     });
     await req.audit({ action: 'update', module: 'projects', recordId: milestone.id, details: `Milestone completed: ${milestone.name}` });
@@ -441,9 +499,14 @@ router.post('/milestones/:milestoneId/complete', authenticate, requirePermission
 router.put('/milestones/:milestoneId', authenticate, requirePermission('projects', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, projectId, ...data } = req.body;
+    const found = await prisma.projectMilestone.findUnique({ where: { id: req.params.milestoneId }, select: { id: true, projectId: true } });
+    if (!found) return res.status(404).json({ error: 'Milestone not found' });
+    if (!(await projectToChange(req, res, found.projectId))) return;
+    // Its own columns; `project: { update: ... }` reached the project itself.
+    const data = editableFields('projectMilestone', req.body);
+    delete data.projectId;
     if (data.dueDate) data.dueDate = new Date(data.dueDate);
-    const milestone = await prisma.projectMilestone.update({ where: { id: req.params.milestoneId }, data });
+    const milestone = await prisma.projectMilestone.update({ where: { id: found.id }, data });
     res.json(milestone);
   } catch (err) { next(err); }
 });
@@ -451,7 +514,10 @@ router.put('/milestones/:milestoneId', authenticate, requirePermission('projects
 router.delete('/milestones/:milestoneId', authenticate, requirePermission('projects', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.projectMilestone.delete({ where: { id: req.params.milestoneId } });
+    const found = await prisma.projectMilestone.findUnique({ where: { id: req.params.milestoneId }, select: { id: true, projectId: true } });
+    if (!found) return res.status(404).json({ error: 'Milestone not found' });
+    if (!(await projectToChange(req, res, found.projectId))) return;
+    await prisma.projectMilestone.delete({ where: { id: found.id } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
@@ -479,6 +545,7 @@ router.post('/:id/resources', authenticate, requirePermission('projects', 'edit'
     const prisma = req.app.locals.prisma;
     const { userId, role, allocationPct, hourlyRate, startDate, endDate } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
+    if (!(await projectToChange(req, res, req.params.id))) return;
     const existing = await prisma.projectResource.findFirst({ where: { projectId: req.params.id, userId } });
     if (existing) return res.status(409).json({ error: 'User is already on this project' });
 
@@ -492,6 +559,7 @@ router.post('/:id/resources', authenticate, requirePermission('projects', 'edit'
 router.delete('/:id/resources/:userId', authenticate, requirePermission('projects', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await projectToChange(req, res, req.params.id))) return;
     await prisma.projectResource.deleteMany({ where: { projectId: req.params.id, userId: req.params.userId } });
     res.json({ removed: true });
   } catch (err) { next(err); }
@@ -501,8 +569,10 @@ router.delete('/:id/resources/:userId', authenticate, requirePermission('project
 router.get('/reports/allocation', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Across the active projects the caller can see.
+    const projectWhere = await reachableWhere(req, 'projects', 'project', { status: { in: ['Planning', 'Active'] } });
     const allocations = await prisma.projectResource.findMany({
-      where: { project: { deletedAt: null, status: { in: ['Planning', 'Active'] } } },
+      where: { project: { is: projectWhere } },
       include: { project: { select: { id: true, name: true, status: true } } },
     });
     const byUser = {};
@@ -545,6 +615,12 @@ router.post('/:id/time', authenticate, auditMiddleware, async (req, res, next) =
     const { taskId, entryDate, hours, description, billable } = req.body;
     if (hours == null || +hours <= 0) return res.status(400).json({ error: 'hours must be greater than zero' });
     if (+hours > 24) return res.status(400).json({ error: 'hours cannot exceed 24 for a single entry' });
+    // Time goes on a project the caller works on, against one of its own
+    // tasks: a task named from another project had its hours rewritten below.
+    if (!(await projectToChange(req, res, req.params.id, { team: true }))) return;
+    if (taskId && !(await prisma.projectTask.findFirst({ where: { id: String(taskId), projectId: req.params.id, deletedAt: null }, select: { id: true } }))) {
+      return res.status(400).json({ error: 'taskId not found in this project' });
+    }
 
     const resource = await prisma.projectResource.findFirst({ where: { projectId: req.params.id, userId: req.user.id } });
 
@@ -571,7 +647,8 @@ router.delete('/time/:entryId', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const entry = await prisma.timeEntry.findUnique({ where: { id: req.params.entryId } });
     if (!entry) return res.status(404).json({ error: 'Time entry not found' });
-    if (entry.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Not your time entry' });
+    // req.user.role is the role record, so comparing it to 'admin' never matched.
+    if (entry.userId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Not your time entry' });
     if (entry.billed) return res.status(400).json({ error: 'Cannot delete a billed time entry' });
     await prisma.timeEntry.update({ where: { id: entry.id }, data: { deletedAt: new Date() } });
     if (entry.projectId) await recalcProject(prisma, entry.projectId);
@@ -583,8 +660,11 @@ router.post('/time/approve', authenticate, requirePermission('projects', 'edit')
   try {
     const prisma = req.app.locals.prisma;
     const { entryIds } = req.body;
-    if (!entryIds?.length) return res.status(400).json({ error: 'entryIds required' });
-    const result = await prisma.timeEntry.updateMany({ where: { id: { in: entryIds } }, data: { approvedById: req.user.id, approvedAt: new Date() } });
+    if (!Array.isArray(entryIds) || !entryIds.length) return res.status(400).json({ error: 'entryIds required' });
+    // Time on projects the caller owns or manages; this approved any entry.
+    const where = { id: { in: entryIds.map(String) } };
+    if (!isAdmin(req.user)) where.project = { is: { OR: [{ ownerId: req.user.id }, { managerId: req.user.id }] } };
+    const result = await prisma.timeEntry.updateMany({ where, data: { approvedById: req.user.id, approvedAt: new Date() } });
     res.json({ approved: result.count });
   } catch (err) { next(err); }
 });
@@ -791,8 +871,9 @@ router.get('/:id/burndown', authenticate, async (req, res, next) => {
 router.get('/analytics/portfolio', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // The projects the caller can see; this totalled every budget.
     const projects = await prisma.project.findMany({
-      where: { deletedAt: null },
+      where: await reachableWhere(req, 'projects', 'project'),
       select: { id: true, name: true, status: true, health: true, percentComplete: true, budget: true, actualCost: true, startDate: true, endDate: true },
     });
     const active = projects.filter(p => ['Planning', 'Active'].includes(p.status));

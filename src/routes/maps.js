@@ -1,6 +1,8 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
 const {
   haversineDistance, isValidPoint, boundingBox, pointInPolygon, polygonBounds,
   polygonArea, polygonCentroid, circleToPolygon, encodeGeohash, clusterByGeohash,
@@ -14,6 +16,59 @@ const MAPPABLE = {
   accounts: 'account', contacts: 'contact', leads: 'lead',
   prospects: 'prospect', cases: 'case', activities: 'activity',
 };
+
+// ── WHOSE MARKERS ─────────────────────────────────────────────────────
+// A marker names its record and says where it is. These routes returned and
+// changed every record's marker for anyone signed in; now a module's markers
+// take its permission, and a marker goes only with a record the caller can
+// reach.
+
+// Prospects answer to the leads permission, as in routes/prospects.
+const permissionFor = module => (module === 'prospects' ? 'leads' : module);
+
+/** The mappable modules the caller may read: `module` alone, when given. */
+function readableModules(req, module) {
+  return (module ? [module] : Object.keys(MAPPABLE))
+    .filter(m => MAPPABLE[m] && permits(req, permissionFor(m), 'read'));
+}
+
+/**
+ * `where`, narrowed to the module's live records the caller may see ('Read')
+ * or change ('Edit'). Prospects follow the row security of leads, as in
+ * routes/prospects.
+ */
+function reachableRecords(req, module, where = {}, minLevel = 'Read') {
+  return reachableWhere(req, permissionFor(module), MAPPABLE[module], where, minLevel);
+}
+
+/** Only the markers whose record the caller can reach. */
+async function reachableMarkers(req, markers) {
+  const prisma = req.app.locals.prisma;
+  const keep = new Set();
+  for (const module of new Set(markers.map(m => m.module))) {
+    if (!MAPPABLE[module]) continue;
+    const ids = [...new Set(markers.filter(m => m.module === module).map(m => m.recordId))];
+    const found = await prisma[MAPPABLE[module]].findMany({ where: await reachableRecords(req, module, { id: { in: ids } }), select: { id: true } });
+    for (const r of found) keep.add(`${module}:${r.id}`);
+  }
+  return markers.filter(m => keep.has(`${m.module}:${m.recordId}`));
+}
+
+/**
+ * Whether the caller may place or remove a marker for this record: the
+ * module's edit permission and the record within their reach. Otherwise it
+ * answers and returns false.
+ */
+async function mayChangeMarker(req, res, module, recordId) {
+  if (!MAPPABLE[module]) { res.status(400).json({ error: `Module ${module} is not mappable` }); return false; }
+  if (!permits(req, permissionFor(module), 'edit')) { res.status(403).json({ error: `Insufficient permissions for ${permissionFor(module)}` }); return false; }
+  if (isAdmin(req.user)) return true;
+  const found = await req.app.locals.prisma[MAPPABLE[module]].findFirst({
+    where: await reachableRecords(req, module, { id: String(recordId) }, 'Edit'), select: { id: true },
+  });
+  if (!found) { res.status(404).json({ error: 'Record not found' }); return false; }
+  return true;
+}
 
 /** Pull the address parts out of a record whatever the field naming. */
 function addressFrom(record) {
@@ -92,8 +147,12 @@ router.get('/geocode/pending/:module', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const model = MAPPABLE[req.params.module];
     if (!model) return res.status(400).json({ error: `Module ${req.params.module} is not mappable` });
+    // Names and addresses of the caller's records only; this listed anyone's.
+    if (!readableModules(req, req.params.module).length) {
+      return res.status(403).json({ error: `Insufficient permissions for ${permissionFor(req.params.module)}` });
+    }
 
-    const records = await prisma[model].findMany({ where: { deletedAt: null }, take: Math.min(parseInt(req.query.limit, 10) || 200, 1000) });
+    const records = await prisma[model].findMany({ where: await reachableRecords(req, req.params.module), take: Math.min(parseInt(req.query.limit, 10) || 200, 1000) });
     const markers = await prisma.mapMarker.findMany({ where: { module: req.params.module }, select: { recordId: true } });
     const mapped = new Set(markers.map(m => m.recordId));
 
@@ -133,9 +192,11 @@ router.get('/markers', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, ownerId, areaId, bounds, cluster, zoom, limit = 1000 } = req.query;
+    if (module && !MAPPABLE[module]) return res.status(400).json({ error: `Module ${module} is not mappable` });
+    const modules = readableModules(req, module);
+    if (module && !modules.length) return res.status(403).json({ error: `Insufficient permissions for ${permissionFor(module)}` });
 
-    const where = {};
-    if (module) where.module = module;
+    const where = { module: { in: modules } };
     if (ownerId) where.ownerId = ownerId;
     if (areaId) where.areaId = areaId;
     if (bounds) {
@@ -145,7 +206,7 @@ router.get('/markers', authenticate, async (req, res, next) => {
       where.longitude = { gte: minLng, lte: maxLng };
     }
 
-    const markers = await prisma.mapMarker.findMany({ where, take: Math.min(+limit, 5000) });
+    const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: Math.min(+limit, 5000) }));
 
     if (cluster === 'true') {
       const precision = precisionForZoom(parseInt(zoom, 10) || 10);
@@ -163,6 +224,7 @@ router.post('/markers', authenticate, async (req, res, next) => {
     const { module, recordId, label, latitude, longitude, sublabel, markerType, color, icon, ownerId, meta } = req.body;
     if (!module || !recordId || !label) return res.status(400).json({ error: 'module, recordId, and label required' });
     if (!isValidPoint({ lat: +latitude, lng: +longitude })) return res.status(400).json({ error: 'Valid latitude and longitude required' });
+    if (!(await mayChangeMarker(req, res, module, recordId))) return;
 
     const geohash = encodeGeohash(+latitude, +longitude, 9);
     const data = {
@@ -241,6 +303,7 @@ router.post('/markers/sync/:module', authenticate, requirePermission('admin', 'e
 router.delete('/markers/:module/:recordId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await mayChangeMarker(req, res, req.params.module, req.params.recordId))) return;
     const result = await prisma.mapMarker.deleteMany({ where: { module: req.params.module, recordId: req.params.recordId } });
     res.json({ removed: result.count });
   } catch (err) { next(err); }
@@ -254,16 +317,19 @@ router.get('/nearby', authenticate, async (req, res, next) => {
     const { lat, lng, radiusKm = 25, module, limit = 50 } = req.query;
     if (!isValidPoint({ lat: +lat, lng: +lng })) return res.status(400).json({ error: 'Valid lat and lng required' });
     const radius = Math.min(+radiusKm, 20000);
+    if (module && !MAPPABLE[module]) return res.status(400).json({ error: `Module ${module} is not mappable` });
+    const modules = readableModules(req, module);
+    if (module && !modules.length) return res.status(403).json({ error: `Insufficient permissions for ${permissionFor(module)}` });
 
     // Bounding box first so the database does the coarse filtering
     const box = boundingBox({ lat: +lat, lng: +lng }, radius);
     const where = {
       latitude: { gte: box.minLat, lte: box.maxLat },
       longitude: { gte: box.minLng, lte: box.maxLng },
+      module: { in: modules },
     };
-    if (module) where.module = module;
 
-    const candidates = await prisma.mapMarker.findMany({ where, take: 5000 });
+    const candidates = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: 5000 }));
     const origin = { lat: +lat, lng: +lng };
     const within = findWithinRadius(origin, candidates.map(c => ({ ...c, lat: c.latitude, lng: c.longitude })), radius)
       .slice(0, Math.min(+limit, 200))
@@ -487,9 +553,9 @@ router.get('/export/geojson', authenticate, async (req, res, next) => {
       features.push(...areas.map(a => areaToGeoJson(a)).filter(Boolean));
     }
     if (include !== 'areas') {
-      const where = {};
-      if (module) where.module = module;
-      const markers = await prisma.mapMarker.findMany({ where, take: 10000 });
+      // The markers GET /markers would show this caller, and no others.
+      if (module && !MAPPABLE[module]) return res.status(400).json({ error: `Module ${module} is not mappable` });
+      const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where: { module: { in: readableModules(req, module) } }, take: 10000 }));
       const collection = markersToGeoJson(markers.map(m => ({ ...m, lat: m.latitude, lng: m.longitude })));
       features.push(...(collection.features || []));
     }

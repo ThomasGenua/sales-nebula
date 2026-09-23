@@ -1,17 +1,31 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { queryWithIncludes, editableFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { isAdmin } = require('../middleware/rowSecurity');
 
 const router = Router();
+
+/**
+ * The appointments a user may see and change: those they host (assignedToId)
+ * or own, or any for an admin. These routes listed, rewrote and cancelled
+ * anyone's appointments with a session alone.
+ */
+function ownAppointments(req) {
+  if (isAdmin(req.user)) return {};
+  return { OR: [{ assignedToId: req.user.id }, { ownerId: req.user.id }] };
+}
+
+const mayRead = (req, apt) => isAdmin(req.user) || apt.assignedToId === req.user.id || apt.ownerId === req.user.id;
 
 // List appointments
 router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, userId, from, to, status } = req.query;
-    const where = { deletedAt: null };
+    // userId narrows the caller's own appointments; an admin may name anyone.
+    const where = { deletedAt: null, ...ownAppointments(req) };
     if (userId) where.assignedToId = userId;
     if (status) where.status = status;
     if (from || to) { where.startTime = {}; if (from) where.startTime.gte = new Date(from); if (to) where.startTime.lte = new Date(to); }
@@ -38,9 +52,12 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
         ],
       },
     });
-    if (conflicts.length) return res.status(409).json({ error: 'Time conflict with existing appointment', conflicts: conflicts.map(c => ({ id: c.id, subject: c.subject, startTime: c.startTime, endTime: c.endTime })) });
+    // Someone else's appointment shows as busy time; booking against a
+    // colleague returned their subjects.
+    if (conflicts.length) return res.status(409).json({ error: 'Time conflict with existing appointment', conflicts: conflicts.map(c => ({ id: c.id, subject: mayRead(req, c) ? c.subject : 'Busy', startTime: c.startTime, endTime: c.endTime })) });
+    // The booker owns it, so booking for a colleague does not lose it.
     const apt = await prisma.appointment.create({
-      data: { subject, startTime: new Date(startTime), endTime: new Date(endTime), assignedToId: req.body.assignedToId || req.user.id, contactId, accountId, type: type || 'Meeting', location, notes, status: 'Scheduled' },
+      data: { subject, startTime: new Date(startTime), endTime: new Date(endTime), assignedToId: req.body.assignedToId || req.user.id, ownerId: req.user.id, contactId, accountId, type: type || 'Meeting', location, notes, status: 'Scheduled' },
     });
     await req.audit({ action: 'create', module: 'scheduler', recordId: apt.id, details: `Appointment: ${subject}` });
     res.status(201).json(apt);
@@ -51,7 +68,12 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
 router.put('/:id', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const apt = await prisma.appointment.update({ where: { id: req.params.id }, data: req.body });
+    const found = await prisma.appointment.findFirst({ where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) }, select: { id: true } });
+    if (!found) return res.status(404).json({ error: 'Appointment not found' });
+    // Its own columns, not whose it is: the body went to Prisma whole.
+    const data = editableFields('appointment', req.body);
+    delete data.assignedToId;
+    const apt = await prisma.appointment.update({ where: { id: found.id }, data });
     res.json(apt);
   } catch (err) { next(err); }
 });
@@ -60,7 +82,9 @@ router.put('/:id', authenticate, auditMiddleware, async (req, res, next) => {
 router.post('/:id/cancel', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const apt = await prisma.appointment.update({ where: { id: req.params.id }, data: { status: 'Cancelled', cancelReason: req.body.reason } });
+    const found = await prisma.appointment.findFirst({ where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) }, select: { id: true } });
+    if (!found) return res.status(404).json({ error: 'Appointment not found' });
+    const apt = await prisma.appointment.update({ where: { id: found.id }, data: { status: 'Cancelled', cancelReason: req.body.reason } });
     await req.audit({ action: 'update', module: 'scheduler', recordId: apt.id, details: 'Appointment cancelled' });
     res.json(apt);
   } catch (err) { next(err); }
@@ -106,7 +130,10 @@ router.get('/availability', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const now = new Date();
     const endOfDay = new Date(now); endOfDay.setHours(23, 59, 59, 999);
-    const agents = await prisma.user.findMany({ where: { active: true }, select: { id: true, firstName: true, lastName: true } });
+    // Everyone's (or ?userId=) is an admin's view; anyone else gets their own.
+    // This listed every user with what they were in the middle of.
+    const who = isAdmin(req.user) ? (req.query.userId ? { id: String(req.query.userId) } : {}) : { id: req.user.id };
+    const agents = await prisma.user.findMany({ where: { active: true, ...who }, select: { id: true, firstName: true, lastName: true } });
     const availability = await Promise.all(agents.map(async (agent) => {
       const aptsToday = await prisma.appointment.count({
         where: { assignedToId: agent.id, status: { not: 'Cancelled' }, startTime: { gte: now, lte: endOfDay } },
