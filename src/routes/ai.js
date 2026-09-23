@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
+const { reachableWhere } = require('../middleware/access');
 const { complete, aiModel, isConfigured } = require('../services/claude');
 const { limiters } = require('../middleware/rateLimit');
 const { currencyContext } = require('../utils/currency');
@@ -97,11 +98,13 @@ router.get('/predictions/history', authenticate, async (req, res, next) => {
 });
 
 // Batch lead scoring
-router.post('/leads/batch-score', authenticate, async (req, res, next) => {
+// Wrote a score to up to 100 leads anywhere in the org for anyone signed in;
+// now leads edit, and only leads the caller may change.
+router.post('/leads/batch-score', authenticate, requirePermission('leads', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { leadIds } = req.body;
-    const where = leadIds?.length ? { id: { in: leadIds }, deletedAt: null } : { deletedAt: null, score: null };
+    const where = await reachableWhere(req, 'leads', 'lead', leadIds?.length ? { id: { in: leadIds } } : { score: null }, 'Edit');
     const leads = await prisma.lead.findMany({ where, take: 100 });
     const results = [];
     for (const lead of leads) {
@@ -130,11 +133,13 @@ router.get('/config', authenticate, requirePermission('admin', 'read'), async (r
 });
 
 // Deal win probability
-router.post('/deals/predict', authenticate, async (req, res, next) => {
+// Read any deal by id for anyone signed in; now only deals they can read.
+router.post('/deals/predict', authenticate, requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { dealId } = req.body;
-    const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { activities: { where: { deletedAt: null } } } });
+    if (!dealId) return res.status(400).json({ error: 'dealId required' });
+    const deal = await prisma.deal.findFirst({ where: await visibleDeals(req, { id: String(dealId) }), include: { activities: { where: { deletedAt: null } } } });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
     const stageWeights = { Qualification: 10, Discovery: 25, Proposal: 50, Negotiation: 75, 'Closed Won': 100, 'Closed Lost': 0 };
     let probability = stageWeights[deal.stage] || 20;

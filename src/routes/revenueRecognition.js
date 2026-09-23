@@ -6,8 +6,12 @@ const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
 
+// Schedules, recognised and deferred revenue are financial records: reading
+// them takes invoices read. They answered anyone signed in; writes were
+// already admin edit.
+
 // List revenue schedules
-router.get('/schedules', authenticate, async (req, res, next) => {
+router.get('/schedules', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { contractId, status, page = 1, limit = 50 } = req.query;
@@ -59,7 +63,7 @@ router.post('/schedules', authenticate, requirePermission('admin', 'edit'), audi
 });
 
 // Get schedule for contract
-router.get('/schedule/:contractId', authenticate, async (req, res, next) => {
+router.get('/schedule/:contractId', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const schedules = await prisma.revenueSchedule.findMany({ where: { contractId: req.params.contractId }, orderBy: { startDate: 'desc' }, include: { entries: { orderBy: { period: 'asc' } } } });
@@ -99,7 +103,7 @@ router.post('/recognize', authenticate, requirePermission('admin', 'edit'), audi
 });
 
 // Revenue summary
-router.get('/summary', authenticate, async (req, res, next) => {
+router.get('/summary', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const schedules = await prisma.revenueSchedule.findMany({ where: { status: { not: 'Cancelled' } }, include: { entries: true } });
@@ -123,7 +127,7 @@ router.get('/summary', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Deferred revenue aging
-router.get('/deferred/aging', authenticate, async (req, res, next) => {
+router.get('/deferred/aging', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const schedules = await prisma.revenueSchedule.findMany({ where: { status: { not: 'Fully Recognized' } }, include: { entries: { where: { recognizedAt: null } } } });
@@ -143,7 +147,7 @@ router.get('/deferred/aging', authenticate, async (req, res, next) => {
 });
 
 // Revenue by product
-router.get('/by-product', authenticate, async (req, res, next) => {
+router.get('/by-product', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const schedules = await queryWithIncludes(prisma, 'revenueSchedule', 'findMany', { include: { contract: { select: { name: true } }, entries: true } }).catch(() => []);

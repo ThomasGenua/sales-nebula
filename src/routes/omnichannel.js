@@ -1,7 +1,39 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { isAdmin } = require('../middleware/rowSecurity');
 const router = Router();
 router.use(authenticate);
+
+// The queue and chats are service work: reading them takes cases read, acting
+// on them cases edit. Any signed-in user could read every visitor's chat and
+// claim, transfer, complete, message or end anyone's item or session.
+
+/**
+ * Give the caller an item or session that is unassigned, or already theirs;
+ * 409 when another agent holds it.
+ */
+async function claim(req, res, model, agentField, data) {
+  const prisma = req.app.locals.prisma;
+  const { count } = await prisma[model].updateMany({
+    where: { id: req.params.id, OR: [{ [agentField]: null }, { [agentField]: req.userId }] },
+    data: { ...data, [agentField]: req.userId },
+  });
+  const row = await prisma[model].findUnique({ where: { id: req.params.id } });
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (!count) return res.status(409).json({ error: 'Already assigned to another agent' });
+  res.json(row);
+}
+
+/** The item or session, when the caller is its assigned agent or an admin; otherwise answers and returns null. */
+async function assignedToCaller(req, res, model, agentField) {
+  const row = await req.app.locals.prisma[model].findUnique({ where: { id: req.params.id } });
+  if (!row) { res.status(404).json({ error: 'Not found' }); return null; }
+  if (row[agentField] !== req.userId && !isAdmin(req.user)) {
+    res.status(403).json({ error: 'Only the assigned agent can do this' });
+    return null;
+  }
+  return row;
+}
 
 // Channel config
 router.get('/channels', async (req, res, next) => {
@@ -18,7 +50,7 @@ router.put('/channels/:id', requirePermission('admin', 'edit'), async (req, res,
 });
 
 // Work items (routing queue)
-router.get('/queue', async (req, res, next) => {
+router.get('/queue', requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const { status = 'Queued', assignedTo } = req.query;
     const where = {};
@@ -46,25 +78,28 @@ router.post('/route', async (req, res, next) => {
     res.status(201).json(await prisma.omniWorkItem.findUnique({ where: { id: item.id } }));
   } catch (err) { next(err); }
 });
-router.post('/queue/:id/accept', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Active', assignedTo: req.userId, assignedAt: new Date() } })); }
+router.post('/queue/:id/accept', requirePermission('cases', 'edit'), async (req, res, next) => {
+  try { await claim(req, res, 'omniWorkItem', 'assignedTo', { status: 'Active', assignedAt: new Date() }); }
   catch (err) { next(err); }
 });
-router.post('/queue/:id/complete', async (req, res, next) => {
+router.post('/queue/:id/complete', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
-    const item = await req.app.locals.prisma.omniWorkItem.findUnique({ where: { id: req.params.id } });
+    const item = await assignedToCaller(req, res, 'omniWorkItem', 'assignedTo');
+    if (!item) return;
     const handleTime = item.assignedAt ? Math.round((Date.now() - new Date(item.assignedAt).getTime()) / 1000) : 0;
     const waitTime = item.assignedAt ? Math.round((new Date(item.assignedAt).getTime() - new Date(item.queuedAt).getTime()) / 1000) : 0;
     res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Completed', completedAt: new Date(), handleTime, waitTime } }));
   } catch (err) { next(err); }
 });
-router.post('/queue/:id/transfer', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: req.body.toUserId, assignedAt: new Date() } })); }
-  catch (err) { next(err); }
+router.post('/queue/:id/transfer', requirePermission('cases', 'edit'), async (req, res, next) => {
+  try {
+    if (!(await assignedToCaller(req, res, 'omniWorkItem', 'assignedTo'))) return;
+    res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: req.body.toUserId, assignedAt: new Date() } }));
+  } catch (err) { next(err); }
 });
 
 // Chat sessions
-router.get('/chat', async (req, res, next) => {
+router.get('/chat', requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const { status, agentId } = req.query;
     const where = {};
@@ -81,20 +116,23 @@ router.post('/chat', async (req, res, next) => {
     res.status(201).json(session);
   } catch (err) { next(err); }
 });
-router.post('/chat/:id/accept', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.chatSession.update({ where: { id: req.params.id }, data: { agentId: req.userId, status: 'Active' } })); }
+router.post('/chat/:id/accept', requirePermission('cases', 'edit'), async (req, res, next) => {
+  try { await claim(req, res, 'chatSession', 'agentId', { status: 'Active' }); }
   catch (err) { next(err); }
 });
-router.post('/chat/:id/message', async (req, res, next) => {
+router.post('/chat/:id/message', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
-    const session = await req.app.locals.prisma.chatSession.findUnique({ where: { id: req.params.id } });
+    const session = await assignedToCaller(req, res, 'chatSession', 'agentId');
+    if (!session) return;
     const transcript = [...(session.transcript || []), { sender: req.body.sender || 'agent', message: req.body.message, timestamp: new Date() }];
     res.json(await req.app.locals.prisma.chatSession.update({ where: { id: req.params.id }, data: { transcript } }));
   } catch (err) { next(err); }
 });
-router.post('/chat/:id/end', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.chatSession.update({ where: { id: req.params.id }, data: { status: 'Ended', endedAt: new Date(), rating: req.body.rating } })); }
-  catch (err) { next(err); }
+router.post('/chat/:id/end', requirePermission('cases', 'edit'), async (req, res, next) => {
+  try {
+    if (!(await assignedToCaller(req, res, 'chatSession', 'agentId'))) return;
+    res.json(await req.app.locals.prisma.chatSession.update({ where: { id: req.params.id }, data: { status: 'Ended', endedAt: new Date(), rating: req.body.rating } }));
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

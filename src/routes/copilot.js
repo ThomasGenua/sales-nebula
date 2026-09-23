@@ -1,10 +1,16 @@
 const { Router } = require('express');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
+const { canReach } = require('../middleware/access');
+const { crudModelFor } = require('../utils/crud');
 const { complete, isConfigured, AiError } = require('../services/claude');
 // The tighter limit meant for model calls was defined and attached to nothing.
 const { limiters } = require('../middleware/rateLimit');
 
 const router = Router();
+
+// The module each action writes, whose edit permission it takes. These ran for
+// anyone signed in, and update_deal_stage moved any deal by id.
+const ACTION_MODULES = { create_task: 'activities', log_call: 'activities', update_deal_stage: 'deals' };
 
 // Ask copilot
 router.post('/ask', authenticate, limiters.ai, async (req, res, next) => {
@@ -135,6 +141,12 @@ router.post('/actions', authenticate, async (req, res, next) => {
     };
     const handler = actions[action];
     if (!handler) return res.status(400).json({ error: `Unknown action. Available: ${Object.keys(actions).join(', ')}` });
+    const module = ACTION_MODULES[action];
+    if (!permits(req, module, 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    // A deal the caller may change, as the deals router would require.
+    if (action === 'update_deal_stage' && params?.dealId && !(await canReach(req, 'deals', 'deal', params.dealId, 'Edit'))) {
+      return res.status(404).json({ error: 'Deal not found' });
+    }
     const result = await handler();
     res.json(result);
   } catch (err) { next(err); }
@@ -143,10 +155,15 @@ router.post('/actions', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Record insights
+// Read any record by id for anyone signed in; now one the caller may read.
 router.get('/insights/:module/:id', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, id } = req.params;
+    const modelName = crudModelFor(module);
+    if (!modelName) return res.status(400).json({ error: `No insights for ${module}` });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    if (!(await canReach(req, module, modelName, id))) return res.status(404).json({ error: 'Not found' });
     const insights = [];
     if (module === 'deals') {
       const deal = await prisma.deal.findUnique({ where: { id }, include: { account: true } });
