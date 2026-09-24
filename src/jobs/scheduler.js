@@ -11,6 +11,7 @@
 
 const { logger } = require('../services/logger');
 const graphMailbox = require('../services/graphMailbox');
+const { notify } = require('../services/notify');
 
 let Queue, cron;
 try { Queue = require('bull'); } catch (e) { Queue = null; }
@@ -185,14 +186,12 @@ const handlers = {
         } else {
           // Popup, Push and SMS all land in the notification feed for now;
           // SMS has no transport and silently dropping it would be worse.
-          await prisma.notification.create({
-            data: {
-              title: 'Reminder',
-              message,
-              userId: reminder.userId,
-              recordModule: reminder.eventId ? 'calendar' : 'activities',
-              recordId: reminder.eventId || reminder.activityId || null,
-            },
+          await notify(prisma, 'reminders', {
+            title: 'Reminder',
+            message,
+            userId: reminder.userId,
+            recordModule: reminder.eventId ? 'calendar' : 'activities',
+            recordId: reminder.eventId || reminder.activityId || null,
           });
         }
 
@@ -420,15 +419,13 @@ const handlers = {
     let alerted = 0;
     for (const deal of staleDeals) {
       if (deal.ownerId && !pending.has(`${deal.ownerId}:${deal.id}`)) {
-        await prisma.notification.create({
-          data: {
-            title: 'Stale Deal Alert',
-            message: `"${deal.name}" has had no activity in 30+ days`,
-            userId: deal.ownerId,
-            recordModule: 'deals', recordId: deal.id,
-          },
+        const sent = await notify(prisma, 'dealAlerts', {
+          title: 'Stale Deal Alert',
+          message: `"${deal.name}" has had no activity in 30+ days`,
+          userId: deal.ownerId,
+          recordModule: 'deals', recordId: deal.id,
         });
-        alerted++;
+        if (sent) alerted++;
       }
     }
     return { staleDeals: staleDeals.length, alerted };
@@ -482,13 +479,11 @@ const handlers = {
         if (!escalate) await prisma.case.update({ where: { id: cs.id }, data: { slaBreached: true } });
         // ownerId is a plain column, so a stale one must not fail the run.
         const recipient = cs.assignedId || cs.ownerId;
-        const sent = recipient && await prisma.notification.create({
-          data: {
-            title: 'SLA Breach Warning',
-            message: `Case ${cs.caseNumber} has breached ${policy.priority} SLA (${policy.firstResponseMinutes}min response time)`,
-            userId: recipient,
-            recordModule: 'cases', recordId: cs.id,
-          },
+        const sent = recipient && await notify(prisma, 'caseAlerts', {
+          title: 'SLA Breach Warning',
+          message: `Case ${cs.caseNumber} has breached ${policy.priority} SLA (${policy.firstResponseMinutes}min response time)`,
+          userId: recipient,
+          recordModule: 'cases', recordId: cs.id,
         }).catch(() => null);
         if (sent) warned++;
       }

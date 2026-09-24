@@ -30,6 +30,7 @@ const { logger } = require('./logger');
 const { plainFieldProblem } = require('../utils/modelFields');
 const { visibleWhere, isAdmin } = require('../middleware/rowSecurity');
 const { evaluateConditions, COMPARE_OPERATORS } = require('./workflowEngine');
+const { notify } = require('./notify');
 
 const APPROVER_TYPES = ['user', 'role', 'manager', 'queue', 'team'];
 const FINAL_ACTIONS = ['none', 'updateField', 'createNotification'];
@@ -107,9 +108,7 @@ async function buildApprovalSteps(prisma, processSteps, submitter) {
 async function notifyApprovers(prisma, request, stepOrder, title, message) {
   const rows = await prisma.approvalStep.findMany({ where: { requestId: request.id, stepOrder, status: 'Pending' }, select: { approverId: true } });
   for (const { approverId } of rows) {
-    await prisma.notification.create({
-      data: { title, message, userId: approverId, recordModule: request.module, recordId: request.recordId },
-    });
+    await notify(prisma, 'approvals', { title, message, userId: approverId, recordModule: request.module, recordId: request.recordId });
   }
 }
 
@@ -229,12 +228,10 @@ async function runFinalAction(prisma, request, process, outcome) {
       const to = config.userId ? [config.userId] : modelName ? await recordOwners(prisma, modelName, request.recordId) : [];
       // The submitter hears of every outcome already.
       for (const userId of to.filter(id => id !== request.submittedById)) {
-        await prisma.notification.create({
-          data: {
-            title: `Approval ${outcome.toLowerCase()}`,
-            message: config.message || `${process.name}: ${outcome.toLowerCase()}`,
-            userId, recordModule: request.module, recordId: request.recordId,
-          },
+        await notify(prisma, 'approvals', {
+          title: `Approval ${outcome.toLowerCase()}`,
+          message: config.message || `${process.name}: ${outcome.toLowerCase()}`,
+          userId, recordModule: request.module, recordId: request.recordId,
         });
       }
     } else {

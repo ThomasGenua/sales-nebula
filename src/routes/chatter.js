@@ -1,9 +1,11 @@
 const { Router } = require('express');
-const { authenticate, permits } = require('../middleware/auth');
+const { authenticate, permits, hasPermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere } = require('../middleware/access');
-const { isAdmin } = require('../middleware/rowSecurity');
+const { isAdmin, buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { crudModelFor } = require('../utils/crud');
+const { modelHasField } = require('../utils/modelFields');
+const { notify } = require('../services/notify');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -163,18 +165,25 @@ router.post('/', async (req, res, next) => {
       include: postInclude,
     });
 
-    // Notify mentioned users
+    // Notify mentioned users. A post on a record is quoted only to those who
+    // may read the record; the notification handed its text to anyone named.
     if (mentionUserIds?.length > 0) {
       const author = await prisma.user.findUnique({ where: { id: req.userId }, select: { firstName: true, lastName: true } });
-      for (const uid of mentionUserIds) {
-        await prisma.notification.create({
-          data: {
-            title: 'You were mentioned',
-            message: `${author.firstName} ${author.lastName} mentioned you: "${body.substring(0, 100)}"`,
-            userId: uid,
-            recordModule: parentModule,
-            recordId: parentId,
-          },
+      const modelName = parentModule ? crudModelFor(parentModule) : null;
+      const mentioned = await prisma.user.findMany({ where: { id: { in: mentionUserIds } }, include: { role: { include: { permissions: true } } } });
+      for (const user of mentioned) {
+        let mayRead = !parentModule;
+        if (parentModule && modelName && hasPermission(user, parentModule, 'read')) {
+          const filter = await buildAccessFilter(prisma, user, parentModule, { modelName });
+          mayRead = !!(await prisma[modelName].findFirst({ where: applyAccessFilter({ id: String(parentId), ...(modelHasField(modelName, 'deletedAt') && { deletedAt: null }) }, filter), select: { id: true } }));
+        }
+        await notify(prisma, 'mentions', {
+          title: 'You were mentioned',
+          message: mayRead
+            ? `${author.firstName} ${author.lastName} mentioned you: "${body.substring(0, 100)}"`
+            : `${author.firstName} ${author.lastName} mentioned you in a post on a record you cannot open`,
+          userId: user.id,
+          ...(mayRead && { recordModule: parentModule, recordId: parentId }),
         });
       }
     }
@@ -200,9 +209,7 @@ router.post('/:id/comments', async (req, res, next) => {
     // Notify post author
     if (post.authorId !== req.userId) {
       const commenter = await prisma.user.findUnique({ where: { id: req.userId }, select: { firstName: true } });
-      await prisma.notification.create({
-        data: { title: 'New comment on your post', message: `${commenter.firstName} commented: "${body.substring(0, 80)}"`, userId: post.authorId },
-      });
+      await notify(prisma, 'mentions', { title: 'New comment on your post', message: `${commenter.firstName} commented: "${body.substring(0, 80)}"`, userId: post.authorId });
     }
 
     res.status(201).json(comment);

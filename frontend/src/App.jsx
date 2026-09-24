@@ -2129,25 +2129,67 @@ function SettingsPage() {
       )}
 
       {activeTab === "notifications" && (
-        <div className={panel} style={panelStyle}>
-          <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Notification Preferences</h3>
-          <div className="space-y-4">
-            {[["Deal updates", "Get notified when deals change stage"], ["New leads", "Alerts for newly assigned leads"], ["Case assignments", "Notifications for case routing"], ["Task reminders", "Reminders for upcoming due dates"], ["Mentions", "When someone mentions you in a comment"], ["Weekly digest", "Weekly summary of your pipeline"]].map(([title, desc], i) => (
-              <div key={i} className="flex items-center justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
-                <div>
-                  <div className="text-sm" style={heading}>{title}</div>
-                  <div className="text-xs" style={dim}>{desc}</div>
-                </div>
-                <div className="w-10 h-5 rounded-full relative cursor-pointer touch-manipulation" style={{ background: "var(--sn-amber)" }}>
-                  <div className="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow" />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <NotificationPreferences className={panel} style={panelStyle} setToast={setToast} />
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+/** The notifications a user can turn off, as the API names them (services/notify.js). */
+const NOTIFICATION_SETTINGS = [
+  ["mentions", "Mentions and comments", "When someone mentions you, or comments on your post"],
+  ["approvals", "Approvals", "Requests waiting on you, and decisions on your own"],
+  ["reminders", "Reminders", "Reminders you set on events and activities"],
+  ["dealAlerts", "Stale deal alerts", "Your open deals with no activity in 30 days"],
+  ["caseAlerts", "SLA warnings", "Your cases that pass their service level"],
+];
+
+/**
+ * Which notifications this user gets. The switches here were drawn always on,
+ * saved nothing, and named notifications the app never sends (new leads, case
+ * assignments, a weekly digest); these are the ones it sends, and each is
+ * stored with the user's preferences and honoured when a notification is made.
+ */
+function NotificationPreferences({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [prefs, setPrefs] = useState(null);
+  useEffect(() => {
+    if (demoMode) { setPrefs({}); return; }
+    apiFetch("/users/me/preferences").then(d => setPrefs(d.notifications || {})).catch(() => setPrefs({}));
+  }, [apiFetch, demoMode]);
+  const toggle = async (kind) => {
+    const before = prefs;
+    const next = { ...prefs, [kind]: prefs[kind] === false };   // on unless turned off
+    setPrefs(next);
+    try { await apiFetch("/users/me/preferences", { method: "PUT", body: { notifications: next } }); }
+    catch (e) { setPrefs(before); setToast({ message: e.message, type: "error" }); }
+  };
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Notification Preferences</h3>
+      {prefs === null ? <Spinner label="Loading preferences" /> : (
+        <div className="space-y-4">
+          {NOTIFICATION_SETTINGS.map(([kind, title, desc]) => {
+            const on = prefs[kind] !== false;
+            return (
+              <div key={kind} className="flex items-center justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+                <div>
+                  <div className="text-sm" style={{ color: "var(--sn-cream)" }}>{title}</div>
+                  <div className="text-xs" style={{ color: "var(--sn-dim)" }}>{desc}</div>
+                </div>
+                <button type="button" role="switch" aria-checked={on} aria-label={title} disabled={demoMode} onClick={() => toggle(kind)}
+                  className="w-10 h-5 rounded-full relative cursor-pointer touch-manipulation transition-colors disabled:opacity-50"
+                  style={{ background: on ? "var(--sn-amber)" : "var(--sn-rule)" }}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? "right-0.5" : "left-0.5"}`} />
+                </button>
+              </div>
+            );
+          })}
+          {demoMode && <p className="text-xs" style={{ color: "var(--sn-dim)" }}>Preferences are unavailable in demo mode.</p>}
+        </div>
+      )}
     </div>
   );
 }

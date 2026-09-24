@@ -3,6 +3,7 @@ const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { fireWebhookEvent } = require('../services/webhooks');
+const { notify } = require('../services/notify');
 const {
   APPROVER_TYPES, APPROVAL_MODELS, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
   finalActionProblem, runFinalAction, findVisibleRecord, canSeeAllRequests,
@@ -285,9 +286,7 @@ router.post('/requests/:id/approve', async (req, res, next) => {
       await notifyApprovers(prisma, request, nextStepNum, `Approval Required (Step ${nextStepNum})`, request.process.name);
     } else {
       // The submitter only ever heard about rejections.
-      await prisma.notification.create({
-        data: { title: 'Approval Granted', message: comments || `${request.process.name} was approved`, userId: request.submittedById, recordModule: request.module, recordId: request.recordId },
-      });
+      await notify(prisma, 'approvals', { title: 'Approval Granted', message: comments || `${request.process.name} was approved`, userId: request.submittedById, recordModule: request.module, recordId: request.recordId });
       finalAction = await runFinalAction(prisma, request, request.process, 'Approved');
       await fireWebhookEvent(prisma, 'approval.completed', { id: request.id, module: request.module, recordId: request.recordId, status: 'Approved' });
     }
@@ -317,9 +316,7 @@ router.post('/requests/:id/reject', async (req, res, next) => {
     await settleStep(prisma, request, currentStep, 'Rejected', comments);
     await closeOpenSteps(prisma, request.id);
 
-    await prisma.notification.create({
-      data: { title: 'Approval Rejected', message: comments || 'Your request was rejected', userId: request.submittedById, recordModule: request.module, recordId: request.recordId },
-    });
+    await notify(prisma, 'approvals', { title: 'Approval Rejected', message: comments || 'Your request was rejected', userId: request.submittedById, recordModule: request.module, recordId: request.recordId });
     const finalAction = await runFinalAction(prisma, request, request.process, 'Rejected');
     await fireWebhookEvent(prisma, 'approval.completed', { id: request.id, module: request.module, recordId: request.recordId, status: 'Rejected' });
 
