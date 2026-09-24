@@ -8,7 +8,8 @@
  * changed its records. These run for every route on the router they are
  * mounted on, including the ones added later.
  */
-const { requirePermission } = require('./auth');
+const { Prisma } = require('@prisma/client');
+const { requirePermission, permits } = require('./auth');
 const { buildAccessFilter, applyAccessFilter } = require('./rowSecurity');
 const { looksLikeId, modelHasField } = require('../utils/modelFields');
 
@@ -62,4 +63,37 @@ async function reachableWhere(req, module, modelName, where = {}, minLevel = 'Re
   return applyAccessFilter({ ...where, ...live }, filter);
 }
 
-module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere };
+/**
+ * Why `data` may not link its record to the records its keys name, or null.
+ * A key to another module's record (an activity's deal, a document's
+ * account) must name a live record, in a module the caller may read, that
+ * row security lets them see. Keys were stored as sent, so a record could be
+ * filed on anyone's deal, and the hidden record's name read back through the
+ * link. Keys to tables outside the record modules (users, territories) are
+ * left to the database. On an update, pass the record as it is: a key that
+ * keeps its value is not a new link.
+ */
+async function linkRefusal(req, modelName, data, current = null) {
+  // Required here, not above: the CRUD router requires this file.
+  const { crudModuleFor } = require('../utils/crud');
+  const model = Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === String(modelName).toLowerCase());
+  if (!model || !data) return null;
+  for (const relation of model.fields) {
+    if (relation.kind !== 'object' || relation.relationFromFields?.length !== 1) continue;
+    const key = relation.relationFromFields[0];
+    const value = data[key];
+    if (value === undefined || value === null || value === '') continue;
+    if (current && current[key] === value) continue;
+    const target = relation.type.charAt(0).toLowerCase() + relation.type.slice(1);
+    const module = crudModuleFor(target);
+    if (!module) continue;
+    const found = permits(req, module, 'read') && await req.app.locals.prisma[target].findFirst({
+      where: await reachableWhere(req, module, target, { id: String(value) }),
+      select: { id: true },
+    });
+    if (!found) return `${key} does not name a ${module.replace(/s$/, '')} you can see`;
+  }
+  return null;
+}
+
+module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere, linkRefusal };
