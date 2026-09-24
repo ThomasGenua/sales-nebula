@@ -1296,8 +1296,8 @@ function ContactsPage() {
       { key: "email", label: "Email" }, { key: "phone", label: "Phone" },
       { key: "mobilePhone", label: "Mobile" }, { key: "title", label: "Job Title" },
       { key: "department", label: "Department" }, { key: "leadSource", label: "Lead Source" },
-      { key: "mailingCity", label: "City" }, { key: "mailingState", label: "State" },
-      { key: "mailingCountry", label: "Country" }, { key: "status", label: "Status" },
+      { key: "city", label: "City" }, { key: "state", label: "State" },
+      { key: "country", label: "Country" }, { key: "status", label: "Status" },
     ]}
     formFields={[
       { key: "firstName", label: "First Name", required: true }, { key: "lastName", label: "Last Name", required: true },
@@ -1319,7 +1319,7 @@ function LeadsPage() {
     formFields={[
       { key: "firstName", label: "First Name", required: true }, { key: "lastName", label: "Last Name", required: true },
       { key: "email", label: "Email", type: "email" }, { key: "phone", label: "Phone", type: "tel" },
-      { key: "company", label: "Company" }, { key: "title", label: "Title" },
+      { key: "company", label: "Company", required: true }, { key: "title", label: "Title" },
       { key: "status", label: "Status", type: "select", options: ["New","Contacted","Qualified","Unqualified","Nurture"] },
       { key: "source", label: "Source", type: "select", options: ["Web","Referral","Campaign","Social","Partner","Other"] },
     ]} />;
@@ -1348,7 +1348,7 @@ function DealsPage() {
       { key: "probability", label: "Probability", render: v => `${v||0}%` },
       { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "source", label: "Source" }, { key: "type", label: "Type" },
-      { key: "nextStep", label: "Next Step" }, { key: "description", label: "Description" },
+      { key: "description", label: "Description" },
     ]}
     formFields={[
       { key: "name", label: "Deal Name", required: true }, { key: "value", label: "Value", type: "number" },
@@ -1382,12 +1382,12 @@ function ActivitiesPage() {
     columns={[
       { key: "subject", label: "Subject" }, { key: "type", label: "Type", render: typeBadge },
       { key: "status", label: "Status" },
-      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "dueDate", label: "Due", render: (v, row) => (v || row?.date) ? new Date(v || row.date).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "subject", label: "Subject", required: true },
       { key: "type", label: "Type", type: "select", options: ["Call","Email","Meeting","Task","Demo","Follow-up"] },
-      { key: "status", label: "Status", type: "select", options: ["Open","InProgress","Completed","Deferred","Cancelled"] },
+      { key: "status", label: "Status", type: "select", options: ["Scheduled","Pending","Open","InProgress","Completed","Deferred","Cancelled"] },
       { key: "priority", label: "Priority", type: "select", options: ["Low","Medium","High"] },
       { key: "dueDate", label: "Due Date", type: "date" }, { key: "duration", label: "Duration (min)", type: "number" },
       { key: "description", label: "Notes", type: "textarea" },
@@ -1415,13 +1415,13 @@ function CasesPage() {
 function ProductsPage() {
   return <ModulePage title="Products" icon={Package} endpoint="/products"
     columns={[
-      { key: "name", label: "Product" }, { key: "code", label: "Code" },
+      { key: "name", label: "Product" }, { key: "sku", label: "SKU" },
       { key: "category", label: "Category" },
       { key: "price", label: "Price", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
       { key: "active", label: "Active", render: v => v !== false ? <Badge color="success">Yes</Badge> : <Badge color="neutral">No</Badge> },
     ]}
     formFields={[
-      { key: "name", label: "Product Name", required: true }, { key: "code", label: "Product Code" },
+      { key: "name", label: "Product Name", required: true }, { key: "sku", label: "SKU", required: true },
       { key: "category", label: "Category" }, { key: "price", label: "Price", type: "number", required: true },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
@@ -1430,14 +1430,14 @@ function ProductsPage() {
 function QuotesPage() {
   return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes"
     columns={[
-      { key: "name", label: "Quote" }, { key: "quoteNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
-      { key: "expirationDate", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "name", label: "Quote" }, { key: "number", label: "#" }, { key: "status", label: "Status" },
+      { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "validUntil", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "name", label: "Quote Name", required: true },
-      { key: "status", label: "Status", type: "select", options: ["Draft","Pending","Approved","Rejected","Accepted"] },
-      { key: "expirationDate", label: "Expiration", type: "date" }, { key: "discount", label: "Discount %", type: "number" },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Pending Approval","Accepted","Rejected","Expired"] },
+      { key: "validUntil", label: "Expiration", type: "date" }, { key: "discount", label: "Discount", type: "number" },
       { key: "terms", label: "Terms", type: "textarea" },
     ]} />;
 }
@@ -1445,8 +1445,8 @@ function QuotesPage() {
 function InvoicesPage() {
   return <ModulePage title="Invoices" icon={DollarSign} endpoint="/invoices"
     columns={[
-      { key: "invoiceNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "number", label: "#" }, { key: "status", label: "Status" },
+      { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
       { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
@@ -1461,14 +1461,14 @@ function CampaignsPage() {
     columns={[
       { key: "name", label: "Campaign" }, { key: "type", label: "Type" }, { key: "status", label: "Status" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "budgetedCost", label: "Budget", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
+      { key: "budget", label: "Budget", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
     ]}
     formFields={[
       { key: "name", label: "Name", required: true },
       { key: "type", label: "Type", type: "select", options: ["Email","Social","Webinar","Event","Content","PPC","Referral"] },
       { key: "status", label: "Status", type: "select", options: ["Planned","Active","Completed","Cancelled"] },
       { key: "startDate", label: "Start", type: "date" }, { key: "endDate", label: "End", type: "date" },
-      { key: "budgetedCost", label: "Budget", type: "number" },
+      { key: "budget", label: "Budget", type: "number" },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
 }
@@ -1513,14 +1513,24 @@ function KnowledgePage() {
     formFields={[{ key: "title", label: "Title", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Archived"] },{ key: "category", label: "Category" },{ key: "body", label: "Body", type: "textarea" }]}
   />;
 }
+/**
+ * Accounts as select options, for records that belong to one (contracts,
+ * orders, subscriptions, entitlements): the first 200 by name.
+ */
+function useAccountOptions() {
+  const { data } = useApi("/accounts?limit=200&sortBy=name&sortDir=asc");
+  return (data?.data || []).map(a => ({ value: a.id, label: a.name }));
+}
+
 function ContractsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Contracts" icon={FileText} endpoint="/contracts"
     columns={[
       { key: "contractNumber", label: "#" }, { key: "name", label: "Contract" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Activated'?'success':v==='Terminated'?'danger':v==='Expired'?'warning':'neutral'}>{v||'Draft'}</Badge> },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "value", label: "Value", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
+      { key: "value", label: "Value", render: (v, row) => (v ?? row?.totalValue) ? `$${((v ?? row.totalValue)/1000).toFixed(0)}K` : "-" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },
@@ -1532,23 +1542,25 @@ function ContractsPage() {
       { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "description", label: "Description" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" },{ key: "value", label: "Value", type: "number" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true },{ key: "value", label: "Value", type: "number" }]}
   />;
 }
 function OrdersPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Orders" icon={Package} endpoint="/orders"
     columns={[
       { key: "name", label: "Order" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Fulfilled'?'success':v==='Cancelled'?'danger':v==='Activated'?'info':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v||0).toLocaleString(...fmt())}</span> },
+      { key: "total", label: "Total", render: (v, row) => <span className="font-mono">${(v ?? row?.totalAmount ?? 0).toLocaleString(...fmt())}</span> },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },
     ]}
-    formFields={[{ key: "name", label: "Order Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },{ key: "totalAmount", label: "Total", type: "number" }]}
+    formFields={[{ key: "name", label: "Order Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },{ key: "total", label: "Total", type: "number" }]}
   />;
 }
 function SubscriptionsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Subscriptions" icon={RefreshCw} endpoint="/subscriptions"
     columns={[
       { key: "subscriptionNumber", label: "#" },
@@ -1561,7 +1573,7 @@ function SubscriptionsPage() {
       { key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },
       { key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },
     ]}
-    formFields={[{ key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },{ key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },{ key: "unitPrice", label: "Unit Price", type: "number", required: true },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" }]}
+    formFields={[{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },{ key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },{ key: "unitPrice", label: "Unit Price", type: "number", required: true },{ key: "quantity", label: "Quantity", type: "number" },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true }]}
   />;
 }
 function WorkOrdersPage() {
@@ -1586,18 +1598,19 @@ function WorkOrdersPage() {
   />;
 }
 function EntitlementsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Entitlements" icon={Shield} endpoint="/entitlements"
     columns={[
       { key: "name", label: "Entitlement" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Expired'?'danger':'neutral'}>{v||'Inactive'}</Badge> },
       { key: "type", label: "Type" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "casesPerEntitlement", label: "Case Limit", render: v => v || "Unlimited" },
+      { key: "casesPerEntitlement", label: "Case Limit", render: (v, row) => v ?? row?.casesAllowed ?? "Unlimited" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },{ key: "type", label: "Type" },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" },{ key: "casesPerEntitlement", label: "Case Limit", type: "number" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },{ key: "type", label: "Type" },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true },{ key: "casesPerEntitlement", label: "Case Limit", type: "number" }]}
   />;
 }
 function CustomObjectsPage() {
@@ -1684,14 +1697,16 @@ function ForecastsPage() {
   const { data, loading } = useApi("/forecasts/current");
   if (loading) return <Spinner />;
   const f = data || {};
+  const amount = v => money(v || 0, f.currency || "USD", { notation: "compact" });
+  const scale = Math.max(f.quota || 0, f.pipeline || 0, 1);
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Forecasts</h1>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Closed" value={`$${((f.closed || 0) / 1000).toFixed(0)}K`} icon={CheckCircle2} color="success" />
-        <StatCard label="Commit" value={`$${((f.commit || 0) / 1000).toFixed(0)}K`} icon={Target} color="primary" />
-        <StatCard label="Best Case" value={`$${((f.bestCase || 0) / 1000).toFixed(0)}K`} icon={TrendingUp} color="purple" />
-        <StatCard label="Pipeline" value={`$${((f.pipeline || 0) / 1000).toFixed(0)}K`} icon={BarChart3} color="cyan" />
+        <StatCard label="Closed" value={amount(f.closed)} icon={CheckCircle2} color="success" />
+        <StatCard label="Commit" value={amount(f.commit)} icon={Target} color="primary" />
+        <StatCard label="Best Case" value={amount(f.bestCase)} icon={TrendingUp} color="purple" />
+        <StatCard label="Pipeline" value={amount(f.pipeline)} icon={BarChart3} color="cyan" />
       </div>
       {f.categories && (
         <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
@@ -1701,9 +1716,9 @@ function ForecastsPage() {
               <div key={cat} className="flex items-center gap-3">
                 <div className="w-24 sm:w-32 text-xs text-[#7E8598] truncate">{cat}</div>
                 <div className="flex-1 h-5 bg-[#0E1630] rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-[#F5A623] to-[#FBBF24] rounded-full" style={{ width: `${Math.min(100, (val / (f.quota || 1)) * 100)}%` }} />
+                  <div className="h-full bg-gradient-to-r from-[#F5A623] to-[#FBBF24] rounded-full" style={{ width: `${Math.min(100, ((val || 0) / scale) * 100)}%` }} />
                 </div>
-                <div className="w-20 text-right text-xs font-mono text-[#C8C2B4]">${(val / 1000).toFixed(0)}K</div>
+                <div className="w-20 text-right text-xs font-mono text-[#C8C2B4]">{amount(val)}</div>
               </div>
             ))}
           </div>
@@ -2724,14 +2739,14 @@ function TerritoriesPage() {
       { key: "description", label: "Description" },
     ]}
     filterDefs={[
-      { key: "type", label: "Type", type: "select", options: ["Region","State","City","Custom"] },
+      { key: "type", label: "Type", type: "select", options: ["Sales","Support","Partner","Region","State","City","Custom"] },
     ]}
     detailFields={[
       { key: "name", label: "Name" }, { key: "type", label: "Type" },
       { key: "description", label: "Description" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Sales","Support","Partner","Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
   />;
 }
 // ── Documents ──
