@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
-const { editableFields, modelHasField } = require('../utils/modelFields');
+const { editableFields, modelHasField, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -204,9 +204,11 @@ router.put('/push-preferences', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const existing = await prisma.pushPreference.findFirst({ where: { userId: req.user.id } }).catch(() => null);
+    // The preference row's own columns, and always the caller's.
+    const { userId, ...data } = columnsFrom('pushPreference', req.body);
     const prefs = existing
-      ? await prisma.pushPreference.update({ where: { id: existing.id }, data: req.body })
-      : await prisma.pushPreference.create({ data: { ...req.body, userId: req.user.id } });
+      ? await prisma.pushPreference.update({ where: { id: existing.id }, data })
+      : await prisma.pushPreference.create({ data: { ...data, userId: req.user.id } });
     res.json(prefs);
   } catch (err) { next(err); }
 });

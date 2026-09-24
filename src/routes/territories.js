@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -33,7 +34,7 @@ router.post('/', authenticate, requirePermission('territories', 'edit'), auditMi
 });
 
 router.put('/:id', authenticate, requirePermission('territories', 'edit'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.update({ where: { id: req.params.id }, data: req.body }); res.json(t); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.update({ where: { id: req.params.id }, data: columnsFrom('territory', req.body) }); res.json(t); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('territories', 'full'), auditMiddleware, async (req, res, next) => {

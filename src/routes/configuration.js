@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { invalidateOrgWideDefaultCache, invalidateHierarchyCache } = require('../middleware/rowSecurity');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'edit'));
@@ -16,11 +17,11 @@ router.get('/validation-rules', async (req, res, next) => {
   catch (err) { next(err); }
 });
 router.post('/validation-rules', async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.validationRule.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.validationRule.create({ data: columnsFrom('validationRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/validation-rules/:id', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.validationRule.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.validationRule.update({ where: { id: req.params.id }, data: columnsFrom('validationRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.delete('/validation-rules/:id', async (req, res, next) => {
@@ -67,11 +68,11 @@ router.get('/record-types', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 router.post('/record-types', async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.recordType.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.recordType.create({ data: columnsFrom('recordType', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/record-types/:id', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.recordType.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.recordType.update({ where: { id: req.params.id }, data: columnsFrom('recordType', req.body) })); }
   catch (err) { next(err); }
 });
 router.delete('/record-types/:id', async (req, res, next) => {
@@ -88,11 +89,11 @@ router.get('/page-layouts', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 router.post('/page-layouts', async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.pageLayout.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.pageLayout.create({ data: columnsFrom('pageLayout', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/page-layouts/:id', async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.pageLayout.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.pageLayout.update({ where: { id: req.params.id }, data: columnsFrom('pageLayout', req.body) })); }
   catch (err) { next(err); }
 });
 router.delete('/page-layouts/:id', async (req, res, next) => {

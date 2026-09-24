@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { createNumbered, CONTRACT_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = createCrudRouter('contract', 'contracts', {
   include: {
@@ -54,7 +55,9 @@ router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), 
     const { id, createdAt, updatedAt, contractNumber, ...contractData } = original;
     const amendment = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
-        ...contractData, ...req.body,
+        // The amendment's own columns from the body: relation keys were nested
+        // writes into the account and its deals.
+        ...contractData, ...columnsFrom('contract', req.body),
         name: `${original.name} (Amendment)`,
         status: 'Draft', parentContractId: original.id,
         version: (original.version || 1) + 1,

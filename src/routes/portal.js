@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, hasPermission, validatePassword } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -20,9 +21,10 @@ router.put('/config', authenticate, requirePermission('admin', 'full'), auditMid
   try {
     const prisma = req.app.locals.prisma;
     const existing = await prisma.portalConfig.findFirst();
+    const data = columnsFrom('portalConfig', req.body);
     const config = existing
-      ? await prisma.portalConfig.update({ where: { id: existing.id }, data: req.body })
-      : await prisma.portalConfig.create({ data: req.body });
+      ? await prisma.portalConfig.update({ where: { id: existing.id }, data })
+      : await prisma.portalConfig.create({ data });
     await req.audit({ action: 'update', module: 'portal', recordId: config.id, details: 'Portal config updated' });
     res.json(config);
   } catch (err) { next(err); }

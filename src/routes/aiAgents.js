@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 // The app integrates Claude only; these templates named gpt-4.
 const { aiModel } = require('../services/claude');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -34,7 +35,7 @@ router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddlewa
 });
 
 router.put('/:id', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.update({ where: { id: req.params.id }, data: req.body }); res.json(a); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.update({ where: { id: req.params.id }, data: columnsFrom('aiAgent', req.body) }); res.json(a); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {

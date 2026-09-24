@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -25,7 +26,7 @@ router.get('/rules', async (req, res, next) => {
 router.post('/rules', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.duplicateRule.create({ data: req.body });
+    const rule = await prisma.duplicateRule.create({ data: columnsFrom('duplicateRule', req.body) });
     res.status(201).json(rule);
   } catch (err) { next(err); }
 });
@@ -33,7 +34,7 @@ router.post('/rules', requirePermission('admin', 'edit'), async (req, res, next)
 router.put('/rules/:id', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.duplicateRule.update({ where: { id: req.params.id }, data: req.body });
+    const rule = await prisma.duplicateRule.update({ where: { id: req.params.id }, data: columnsFrom('duplicateRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
 });

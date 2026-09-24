@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -32,12 +33,20 @@ router.get('/bundles/:id', requirePermission('products', 'read'), async (req, re
   } catch (err) { next(err); }
 });
 
+// A bundle's, price book's or schedule's own columns, and each item's: the
+// body and its items went to Prisma whole, so relation keys were nested writes.
+const rowsOf = (model, parentKey, rows) => (Array.isArray(rows) ? rows : []).map(row => {
+  const data = columnsFrom(model, row);
+  delete data[parentKey];
+  return data;
+});
+
 router.post('/bundles', requirePermission('products', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, ...data } = req.body;
+    const { items } = req.body;
     const bundle = await prisma.productBundle.create({
-      data: { ...data, items: { create: items || [] } },
+      data: { ...columnsFrom('productBundle', req.body), items: { create: rowsOf('productBundleItem', 'bundleId', items) } },
       include: { items: { include: { product: true } } },
     });
     await req.audit({ action: 'create', module: 'products', recordId: bundle.id, details: `Created bundle: ${bundle.name}` });
@@ -48,11 +57,11 @@ router.post('/bundles', requirePermission('products', 'edit'), async (req, res, 
 router.put('/bundles/:id', requirePermission('products', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { items, id, createdAt, updatedAt, ...data } = req.body;
+    const { items } = req.body;
     if (items) await prisma.productBundleItem.deleteMany({ where: { bundleId: req.params.id } });
     const bundle = await prisma.productBundle.update({
       where: { id: req.params.id },
-      data: { ...data, ...(items && { items: { create: items } }) },
+      data: { ...columnsFrom('productBundle', req.body), ...(items && { items: { create: rowsOf('productBundleItem', 'bundleId', items) } }) },
       include: { items: { include: { product: true } } },
     });
     res.json(bundle);
@@ -113,9 +122,9 @@ router.get('/pricebooks', requirePermission('products', 'read'), async (req, res
 router.post('/pricebooks', requirePermission('products', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { entries, ...data } = req.body;
+    const { entries } = req.body;
     const pricebook = await prisma.pricebook.create({
-      data: { ...data, entries: { create: entries || [] } },
+      data: { ...columnsFrom('pricebook', req.body), entries: { create: rowsOf('pricebookEntry', 'pricebookId', entries) } },
       include: { entries: { include: { product: true } } },
     });
     res.status(201).json(pricebook);
@@ -125,11 +134,11 @@ router.post('/pricebooks', requirePermission('products', 'edit'), async (req, re
 router.put('/pricebooks/:id', requirePermission('products', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { entries, id, createdAt, updatedAt, ...data } = req.body;
+    const { entries } = req.body;
     if (entries) await prisma.pricebookEntry.deleteMany({ where: { pricebookId: req.params.id } });
     const pricebook = await prisma.pricebook.update({
       where: { id: req.params.id },
-      data: { ...data, ...(entries && { entries: { create: entries } }) },
+      data: { ...columnsFrom('pricebook', req.body), ...(entries && { entries: { create: rowsOf('pricebookEntry', 'pricebookId', entries) } }) },
       include: { entries: { include: { product: true } } },
     });
     res.json(pricebook);
@@ -193,10 +202,10 @@ router.get('/discount-schedules', requirePermission('products', 'read'), async (
 router.post('/discount-schedules', requirePermission('products', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { tiers, productIds, ...data } = req.body;
+    const { tiers, productIds } = req.body;
     const schedule = await prisma.discountSchedule.create({
       data: {
-        ...data,
+        ...columnsFrom('discountSchedule', req.body),
         // Accept the short names callers have been sending as well.
         tiers: {
           create: (tiers || []).map(t => ({

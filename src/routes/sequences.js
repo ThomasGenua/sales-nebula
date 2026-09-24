@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -62,8 +63,7 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
 router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, enrollments, _count, stats, ...data } = req.body;
-    const sequence = await prisma.emailSequence.update({ where: { id: req.params.id }, data });
+    const sequence = await prisma.emailSequence.update({ where: { id: req.params.id }, data: columnsFrom('emailSequence', req.body) });
     res.json(sequence);
   } catch (err) { next(err); }
 });

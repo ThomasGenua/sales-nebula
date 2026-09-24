@@ -4,6 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -131,7 +132,8 @@ router.put('/config', authenticate, requirePermission('admin', 'full'), auditMid
   try {
     const prisma = req.app.locals.prisma;
     const existing = await prisma.emailToCaseConfig.findFirst();
-    const config = existing ? await prisma.emailToCaseConfig.update({ where: { id: existing.id }, data: req.body }) : await prisma.emailToCaseConfig.create({ data: req.body });
+    const data = columnsFrom('emailToCaseConfig', req.body);
+    const config = existing ? await prisma.emailToCaseConfig.update({ where: { id: existing.id }, data }) : await prisma.emailToCaseConfig.create({ data });
     await req.audit({ action: 'update', module: 'emailToCase', recordId: config.id, details: 'Config updated' });
     res.json(config);
   } catch (err) { next(err); }

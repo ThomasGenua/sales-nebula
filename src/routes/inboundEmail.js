@@ -4,7 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { encrypt, decrypt } = require('../utils/secretBox');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
-const { pickModelFields } = require('../utils/modelFields');
+const { pickModelFields, columnsFrom } = require('../utils/modelFields');
 const {
   ingestMessages, recordPoll,
   normalizeSubject, extractCaseRef, stripQuotedReply,
@@ -103,7 +103,7 @@ router.post('/accounts', authenticate, requirePermission('admin', 'full'), audit
 router.put('/accounts/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, passwordSet, messageCount, recentPolls, ...data } = req.body;
+    const data = columnsFrom('inboundEmailAccount', req.body);
     // Only re-encrypt when a new password was actually supplied
     if (data.password) data.password = encrypt(data.password);
     else delete data.password;

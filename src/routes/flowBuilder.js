@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { queryWithIncludes, columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
@@ -28,7 +28,7 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const flow = await req.app.locals.prisma.flowDefinition.create({
-      data: { ...req.body, createdById: req.userId, canvas: req.body.canvas || { nodes: [], edges: [] } },
+      data: { ...columnsFrom('flowDefinition', req.body), createdById: req.userId, canvas: req.body.canvas || { nodes: [], edges: [] } },
     });
     await req.app.locals.prisma.flowVersion.create({ data: { flowId: flow.id, version: 1, canvas: flow.canvas } });
     res.status(201).json(flow);
@@ -38,7 +38,7 @@ router.post('/', requirePermission('admin', 'edit'), async (req, res, next) => {
 router.put('/:id', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const flow = await prisma.flowDefinition.update({ where: { id: req.params.id }, data: req.body });
+    const flow = await prisma.flowDefinition.update({ where: { id: req.params.id }, data: columnsFrom('flowDefinition', req.body) });
     if (req.body.canvas) {
       const v = await prisma.flowVersion.findFirst({ where: { flowId: flow.id }, orderBy: { version: 'desc' } });
       await prisma.flowVersion.create({ data: { flowId: flow.id, version: (v?.version || 0) + 1, canvas: req.body.canvas } });
@@ -144,7 +144,7 @@ router.post('/:id/elements', authenticate, requirePermission('admin', 'full'), a
 router.put('/:flowId/elements/:elementId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const el = await prisma.flowElement.update({ where: { id: req.params.elementId }, data: req.body });
+    const el = await prisma.flowElement.update({ where: { id: req.params.elementId }, data: columnsFrom('flowElement', req.body) });
     res.json(el);
   } catch (err) { next(err); }
 });

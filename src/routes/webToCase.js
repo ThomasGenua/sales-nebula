@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -74,7 +75,8 @@ router.put('/config', authenticate, requirePermission('admin', 'full'), auditMid
   try {
     const prisma = req.app.locals.prisma;
     const existing = await prisma.webToCaseConfig.findFirst().catch(() => null);
-    const config = existing ? await prisma.webToCaseConfig.update({ where: { id: existing.id }, data: req.body }) : await prisma.webToCaseConfig.create({ data: req.body });
+    const data = columnsFrom('webToCaseConfig', req.body);
+    const config = existing ? await prisma.webToCaseConfig.update({ where: { id: existing.id }, data }) : await prisma.webToCaseConfig.create({ data });
     res.json(config);
   } catch (err) { next(err); }
 });

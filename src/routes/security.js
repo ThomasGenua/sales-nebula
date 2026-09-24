@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const { limiters } = require('../middleware/rateLimit');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
-const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
+const { queryWithIncludes, pickModelFields, columnsFrom } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
 const router = Router();
 
@@ -162,10 +162,10 @@ router.get('/encryption/policies', authenticate, requirePermission('admin', 'rea
   try { res.json({ data: await req.app.locals.prisma.encryptionPolicy.findMany() }); } catch (err) { next(err); }
 });
 router.post('/encryption/policies', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.encryptionPolicy.create({ data: req.body })); } catch (err) { next(err); }
+  try { res.status(201).json(await req.app.locals.prisma.encryptionPolicy.create({ data: columnsFrom('encryptionPolicy', req.body) })); } catch (err) { next(err); }
 });
 router.put('/encryption/policies/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.encryptionPolicy.update({ where: { id: req.params.id }, data: req.body })); } catch (err) { next(err); }
+  try { res.json(await req.app.locals.prisma.encryptionPolicy.update({ where: { id: req.params.id }, data: columnsFrom('encryptionPolicy', req.body) })); } catch (err) { next(err); }
 });
 router.post('/encryption/rotate-key', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
@@ -10,11 +11,11 @@ router.get('/product-rules', async (req, res, next) => {
   catch (err) { next(err); }
 });
 router.post('/product-rules', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.productRule.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.productRule.create({ data: columnsFrom('productRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/product-rules/:id', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.productRule.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.productRule.update({ where: { id: req.params.id }, data: columnsFrom('productRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.delete('/product-rules/:id', requirePermission('products', 'full'), async (req, res, next) => {
@@ -28,11 +29,11 @@ router.get('/price-rules', async (req, res, next) => {
   catch (err) { next(err); }
 });
 router.post('/price-rules', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.priceRule.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.priceRule.create({ data: columnsFrom('priceRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/price-rules/:id', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.priceRule.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.priceRule.update({ where: { id: req.params.id }, data: columnsFrom('priceRule', req.body) })); }
   catch (err) { next(err); }
 });
 
@@ -42,7 +43,7 @@ router.get('/guided-selling', async (req, res, next) => {
   catch (err) { next(err); }
 });
 router.post('/guided-selling', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.guidedSellingRule.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.guidedSellingRule.create({ data: columnsFrom('guidedSellingRule', req.body) })); }
   catch (err) { next(err); }
 });
 router.post('/guided-selling/recommend', async (req, res, next) => {
@@ -68,7 +69,7 @@ router.get('/discount-schedules', async (req, res, next) => {
   catch (err) { next(err); }
 });
 router.post('/discount-schedules', requirePermission('products', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.discountSchedule.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.discountSchedule.create({ data: columnsFrom('discountSchedule', req.body) })); }
   catch (err) { next(err); }
 });
 router.post('/discount-schedules/calculate', async (req, res, next) => {
