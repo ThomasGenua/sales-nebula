@@ -319,13 +319,18 @@ function rankResults(candidates, parsedQuery, { totalDocs = 1, avgTokenCount = 1
   return ranked.slice(0, limit);
 }
 
-/** Expand query terms through a synonym table. */
+/**
+ * Expand query terms through a synonym table. Query terms are stemmed, so a
+ * synonym is compared and added stemmed too: "customers" went into the query
+ * as a term the index, which holds "customer", can never match.
+ */
 function expandSynonyms(terms, synonyms = []) {
+  const norm = w => stem(foldAccents(String(w ?? '')).toLowerCase().trim());
   const expanded = new Set(terms);
   for (const t of terms) {
     for (const s of synonyms) {
-      if (s.term === t) expanded.add(s.synonym);
-      else if (s.twoWay && s.synonym === t) expanded.add(s.term);
+      if (s.term === t || norm(s.term) === t) expanded.add(norm(s.synonym));
+      else if (s.twoWay && (s.synonym === t || norm(s.synonym) === t)) expanded.add(norm(s.term));
     }
   }
   return [...expanded];
@@ -372,13 +377,16 @@ function editDistance(a, b, maxDistance = Infinity) {
  */
 const MODULE_INDEX_MAP = {
   contacts:  { title: r => `${r.firstName || ''} ${r.lastName || ''}`.trim(), subtitle: r => r.title || r.accountName, body: r => [r.email, r.phone, r.mobile, r.description].filter(Boolean).join(' '), keywords: r => [r.department, r.leadSource].filter(Boolean).join(' ') },
-  leads:     { title: r => `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.company, subtitle: r => r.company, body: r => [r.email, r.phone, r.description, r.status].filter(Boolean).join(' '), keywords: r => [r.leadSource, r.industry].filter(Boolean).join(' ') },
+  leads:     { title: r => `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.company, subtitle: r => r.company, body: r => [r.email, r.phone, r.description, r.status].filter(Boolean).join(' '), keywords: r => [r.source || r.leadSource, r.industry].filter(Boolean).join(' ') },
   accounts:  { title: r => r.name, subtitle: r => r.industry, body: r => [r.website, r.phone, r.description, r.billingCity, r.billingCountry].filter(Boolean).join(' '), keywords: r => [r.type, r.accountNumber].filter(Boolean).join(' ') },
-  deals:     { title: r => r.name, subtitle: r => r.stage, body: r => [r.description, r.nextStep, r.type].filter(Boolean).join(' '), keywords: r => [r.leadSource].filter(Boolean).join(' ') },
+  deals:     { title: r => r.name, subtitle: r => r.stage, body: r => [r.description, r.nextStep, r.type].filter(Boolean).join(' '), keywords: r => [r.source || r.leadSource].filter(Boolean).join(' ') },
   cases:     { title: r => r.subject, subtitle: r => `${r.caseNumber || ''} ${r.status || ''}`.trim(), body: r => [r.description, r.resolution, r.contactEmail].filter(Boolean).join(' '), keywords: r => [r.type, r.priority, r.origin].filter(Boolean).join(' ') },
   products:  { title: r => r.name, subtitle: r => r.category || r.sku, body: r => [r.description, r.sku, r.manufacturer].filter(Boolean).join(' '), keywords: r => [r.category, r.type].filter(Boolean).join(' ') },
-  quotes:    { title: r => `${r.quoteNumber || ''} ${r.name || ''}`.trim(), subtitle: r => r.status, body: r => r.description, keywords: r => r.stage },
-  invoices:  { title: r => `${r.invoiceNumber || ''} ${r.name || ''}`.trim(), subtitle: r => r.status, body: r => r.description, keywords: null },
+  // A quote's and an invoice's number is `number` (quoteNumber/invoiceNumber
+  // stay empty) and their text is notes and terms: an invoice has no name, so
+  // with neither title part set every invoice was skipped as untitled.
+  quotes:    { title: r => `${r.quoteNumber || r.number || ''} ${r.name || ''}`.trim(), subtitle: r => r.status, body: r => [r.notes, r.terms].filter(Boolean).join(' '), keywords: r => r.stage },
+  invoices:  { title: r => `${r.invoiceNumber || r.number || ''} ${r.name || ''}`.trim(), subtitle: r => r.status, body: r => [r.notes, r.terms].filter(Boolean).join(' '), keywords: null },
   contracts: { title: r => `${r.contractNumber || ''} ${r.name || ''}`.trim(), subtitle: r => r.status, body: r => r.description, keywords: r => r.type },
   documents: { title: r => r.name, subtitle: r => r.category, body: r => [r.description, r.fileName].filter(Boolean).join(' '), keywords: r => r.type },
   projects:  { title: r => r.name, subtitle: r => r.status, body: r => [r.description, r.code].filter(Boolean).join(' '), keywords: r => r.priority },

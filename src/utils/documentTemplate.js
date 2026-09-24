@@ -11,15 +11,18 @@ function generateDocumentHtml(type, data) {
   const dateStr = formatDate(data.date);
   const dueStr = isInvoice ? formatDate(data.dueDate) : formatDate(data.validUntil);
   const dueDateLabel = isInvoice ? 'Due Date' : 'Valid Until';
+  // Amounts in data.currency when the caller passes one (the organisation's
+  // default currency); without it, US dollars as before.
+  const money = amount => currency(amount, data.currency || 'USD');
 
   const items = (data.items || []).map(item => `
     <tr>
       <td style="padding:8px;border-bottom:1px solid #eee;">${esc(item.name)}</td>
       <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${esc(item.sku || '')}</td>
       <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${item.quantity}</td>
-      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${currency(item.unitPrice)}</td>
-      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${item.discount ? currency(item.discount) : '-'}</td>
-      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;font-weight:600;">${currency(item.total)}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${money(item.unitPrice)}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${item.discount ? money(item.discount) : '-'}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;font-weight:600;">${money(item.total)}</td>
     </tr>
   `).join('');
 
@@ -40,7 +43,7 @@ function generateDocumentHtml(type, data) {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>${title} ${number}</title>
+  <title>${title} ${esc(number)}</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; color:#333; padding:40px; max-width:800px; margin:auto; }
@@ -73,7 +76,7 @@ function generateDocumentHtml(type, data) {
       <p style="color:#666;margin-top:4px;">#${esc(number)}</p>
     </div>
     <div style="text-align:right;">
-      <span class="badge badge-${(data.status || '').toLowerCase()}">${esc(data.status || 'Draft')}</span>
+      <span class="badge badge-${esc((data.status || 'Draft').toLowerCase())}">${esc(data.status || 'Draft')}</span>
       <p style="margin-top:8px;font-size:13px;color:#666;">Date: ${dateStr}</p>
       <p style="font-size:13px;color:#666;">${dueDateLabel}: ${dueStr}</p>
     </div>
@@ -107,10 +110,10 @@ function generateDocumentHtml(type, data) {
   </table>
 
   <div class="totals">
-    <div class="row"><span>Subtotal</span><span>${currency(data.subtotal)}</span></div>
-    ${data.discount ? `<div class="row"><span>Discount</span><span style="color:#e74c3c;">-${currency(data.discount)}</span></div>` : ''}
-    <div class="row"><span>Tax</span><span>${currency(data.tax)}</span></div>
-    <div class="row total"><span>Total</span><span>${currency(data.total)}</span></div>
+    <div class="row"><span>Subtotal</span><span>${money(data.subtotal)}</span></div>
+    ${data.discount ? `<div class="row"><span>Discount</span><span style="color:#e74c3c;">-${money(data.discount)}</span></div>` : ''}
+    <div class="row"><span>Tax</span><span>${money(data.tax)}</span></div>
+    <div class="row total"><span>Total</span><span>${money(data.total)}</span></div>
   </div>
 
   ${data.terms ? `<div class="terms"><h3>Terms</h3><p>${esc(data.terms)}</p></div>` : ''}
@@ -130,15 +133,22 @@ function generateDocumentHtml(type, data) {
 </html>`;
 }
 
+// In UTC: due and valid-until dates are stored as UTC midnight, so on a
+// server west of UTC they printed as the day before.
 function formatDate(date) {
   if (!date) return 'N/A';
   const d = new Date(date);
-  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  if (isNaN(d)) return 'N/A';
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 }
 
 function currency(amount, currencyCode = 'USD') {
-  if (amount === null || amount === undefined) return '$0.00';
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(amount);
+  const n = Number(amount) || 0;
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(n);
+  } catch {
+    return `${currencyCode} ${n.toFixed(2)}`;
+  }
 }
 
 function esc(str) {
