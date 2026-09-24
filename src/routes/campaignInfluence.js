@@ -2,6 +2,10 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { queryWithIncludes } = require('../utils/modelFields');
+const { currencyContext } = require('../utils/currency');
+
+// Money here is in the default currency: a deal's value is in its own, and
+// influenced revenue was added up across deals as if they shared one.
 
 const router = Router();
 router.use(authenticate);
@@ -75,7 +79,7 @@ router.post('/', requirePermission('campaigns', 'edit'), async (req, res, next) 
     if (!deal) return res.status(400).json({ error: 'dealId does not name a deal you can see', code: 'LINK_NOT_VISIBLE' });
     const contact = !contactId || (permits(req, 'contacts', 'read') && await prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }), select: { id: true } }));
     if (!contact) return res.status(400).json({ error: 'contactId does not name a contact you can see', code: 'LINK_NOT_VISIBLE' });
-    const revenue = deal.value * (influence || 0) / 100;
+    const revenue = (await currencyContext(prisma)).toBase(deal.value, deal.currency) * (influence || 0) / 100;
 
     const ci = await prisma.campaignInfluence.upsert({
       where: { campaignId_dealId_model: { campaignId, dealId, model: model || 'FirstTouch' } },
@@ -98,13 +102,14 @@ router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), requir
 
     const existing = await prisma.campaignInfluence.findMany({ where: { dealId: req.params.dealId } });
     if (existing.length === 0) return res.json({ message: 'No campaign touches found' });
+    const dealValue = (await currencyContext(prisma)).toBase(deal.value, deal.currency);
 
     if (model === 'Linear') {
       const share = 100 / existing.length;
       for (const ci of existing) {
         await prisma.campaignInfluence.update({
           where: { id: ci.id },
-          data: { influence: share, revenue: deal.value * share / 100, model: 'Linear' },
+          data: { influence: share, revenue: dealValue * share / 100, model: 'Linear' },
         });
       }
     } else if (model === 'FirstTouch') {
@@ -112,7 +117,7 @@ router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), requir
       for (let i = 0; i < sorted.length; i++) {
         await prisma.campaignInfluence.update({
           where: { id: sorted[i].id },
-          data: { influence: i === 0 ? 100 : 0, revenue: i === 0 ? deal.value : 0, model: 'FirstTouch', isPrimary: i === 0 },
+          data: { influence: i === 0 ? 100 : 0, revenue: i === 0 ? dealValue : 0, model: 'FirstTouch', isPrimary: i === 0 },
         });
       }
     } else if (model === 'LastTouch') {
@@ -120,7 +125,7 @@ router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), requir
       for (let i = 0; i < sorted.length; i++) {
         await prisma.campaignInfluence.update({
           where: { id: sorted[i].id },
-          data: { influence: i === 0 ? 100 : 0, revenue: i === 0 ? deal.value : 0, model: 'LastTouch', isPrimary: i === 0 },
+          data: { influence: i === 0 ? 100 : 0, revenue: i === 0 ? dealValue : 0, model: 'LastTouch', isPrimary: i === 0 },
         });
       }
     }
@@ -138,12 +143,15 @@ module.exports = router;
 router.get('/attribution', authenticate, requirePermission('campaigns', 'read'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { model = 'linear', period = '90' } = req.query;
-    const since = new Date(Date.now() - (+period) * 86400000);
+    const { model = 'linear' } = req.query;
+    // A number of days; anything else made an invalid date and a 500.
+    const period = parseInt(req.query.period) || 90;
+    const since = new Date(Date.now() - period * 86400000);
     const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', {
       where: { createdAt: { gte: since } },
-      include: { campaign: { select: { name: true, type: true } }, deal: { select: { value: true, stage: true } } },
+      include: { campaign: { select: { name: true, type: true } }, deal: { select: { value: true, currency: true, stage: true } } },
     }).catch(() => []));
+    const ctx = await currencyContext(prisma);
     const byCampaign = {};
     influences.forEach(inf => {
       const key = inf.campaignId;
@@ -151,10 +159,10 @@ router.get('/attribution', authenticate, requirePermission('campaigns', 'read'),
       byCampaign[key].touches++;
       // The share is `influence`, a percentage; `influencePercentage` is no
       // column, so each touch was credited with the whole deal.
-      if (inf.deal?.stage === 'Closed Won') { byCampaign[key].revenue += (inf.deal.value || 0) * inf.influence / 100; byCampaign[key].deals++; }
+      if (inf.deal?.stage === 'Closed Won') { byCampaign[key].revenue += ctx.toBase(inf.deal.value, inf.deal.currency) * inf.influence / 100; byCampaign[key].deals++; }
     });
     const report = Object.values(byCampaign).sort((a, b) => b.revenue - a.revenue);
-    res.json({ model, period: +period, campaigns: report });
+    res.json({ model, period, currency: ctx.base, campaigns: report });
   } catch (err) { next(err); }
 });
 
@@ -167,11 +175,12 @@ router.get('/roi', authenticate, requirePermission('campaigns', 'read'), require
   try {
     const prisma = req.app.locals.prisma;
     const campaigns = await prisma.campaign.findMany({ where: await reachableWhere(req, 'campaigns', 'campaign'), select: { id: true, name: true, budget: true, actualCost: true } });
-    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: { in: campaigns.map(c => c.id) } }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []));
+    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: { in: campaigns.map(c => c.id) } }, include: { deal: { select: { value: true, currency: true, stage: true } } } }).catch(() => []));
+    const ctx = await currencyContext(prisma);
     const result = [];
     for (const c of campaigns) {
       const influenced = influences.filter(i => i.campaignId === c.id);
-      const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + ((i.deal?.value || 0) * i.influence / 100), 0);
+      const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + (ctx.toBase(i.deal.value, i.deal.currency) * i.influence / 100), 0);
       const cost = c.actualCost || c.budget || 0;
       result.push({ campaignId: c.id, name: c.name, cost, attributedRevenue: revenue, roi: cost ? Math.round((revenue - cost) / cost * 100) : 0, deals: influenced.length });
     }
@@ -185,7 +194,9 @@ router.get('/roi', authenticate, requirePermission('campaigns', 'read'), require
 router.get('/attribution-models', authenticate, requirePermission('campaigns', 'read'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } }));
+    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, currency: true, stage: true } } } }));
+    const ctx = await currencyContext(prisma);
+    const valueOf = i => ctx.toBase(i.deal?.value, i.deal?.currency);
     const wonInfluences = influences.filter(i => i.deal?.stage === 'Closed Won');
     // First-touch attribution
     const firstTouch = {};
@@ -202,7 +213,7 @@ router.get('/attribution-models', authenticate, requirePermission('campaigns', '
     Object.values(dealGroups).forEach(group => {
       // A touch's date is touchDate; there is no influenceDate.
       group.sort((a, b) => new Date(a.touchDate || a.createdAt) - new Date(b.touchDate || b.createdAt));
-      const dealValue = group[0].deal?.value || 0;
+      const dealValue = valueOf(group[0]);
       if (group.length > 0) {
         const first = group[0].campaign?.name || 'Unknown';
         firstTouch[first] = (firstTouch[first] || 0) + dealValue;
@@ -212,6 +223,7 @@ router.get('/attribution-models', authenticate, requirePermission('campaigns', '
         group.forEach(g => { const n = g.campaign?.name || 'Unknown'; linear[n] = (linear[n] || 0) + share; });
       }
     });
-    res.json({ models: { firstTouch, lastTouch, linear }, totalInfluencedRevenue: wonInfluences.reduce((s, i) => s + (i.deal?.value || 0), 0), totalInfluences: influences.length, wonInfluences: wonInfluences.length });
+    // Each won deal once: its value was added once per touch.
+    res.json({ currency: ctx.base, models: { firstTouch, lastTouch, linear }, totalInfluencedRevenue: Object.values(dealGroups).reduce((s, group) => s + valueOf(group[0]), 0), totalInfluences: influences.length, wonInfluences: wonInfluences.length });
   } catch (err) { next(err); }
 });

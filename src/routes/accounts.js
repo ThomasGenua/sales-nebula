@@ -155,12 +155,15 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const id = req.params.id;
     const [account, contacts, deals, cases, activities] = await Promise.all([
-      prisma.account.findUnique({ where: { id } }),
+      prisma.account.findFirst({ where: { id, deletedAt: null }, select: { id: true } }),
       readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.count({ where }), 0),
       readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, select: { stage: true, value: true, currency: true } })),
       readable(req, 'cases', 'case', { accountId: id, createdAt: { gte: new Date(Date.now() - 90 * 86400000) } }, where => prisma.case.findMany({ where, select: { priority: true, status: true } })),
       readable(req, 'activities', 'activity', { accountId: id, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } }, where => prisma.activity.count({ where }), 0),
     ]);
+    // The account was read and never checked, so any id, a deleted account's
+    // included, was scored as an account with nothing on it.
+    if (!account) return res.status(404).json({ error: 'Not found' });
     const ctx = await currencyContext(prisma);
     let score = 50;
     if (contacts > 3) score += 10; else if (contacts === 0) score -= 15;
@@ -168,7 +171,8 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     if (wonDeals.length > 0) score += 15;
     const openDeals = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
     if (openDeals.length > 0) score += 10;
-    const criticalCases = cases.filter(c => c.priority === 'Critical' && c.status !== 'Closed');
+    // Open ones, as /:id/stats counts them: a resolved case was still critical here.
+    const criticalCases = cases.filter(c => c.priority === 'Critical' && !['Resolved', 'Closed'].includes(c.status));
     if (criticalCases.length > 0) score -= 20;
     if (activities > 5) score += 15; else if (activities === 0) score -= 10;
     score = Math.max(0, Math.min(100, score));

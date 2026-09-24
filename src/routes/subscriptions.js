@@ -1,8 +1,25 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { SUBSCRIPTION_NUMBER } = require('../utils/numbering');
+
+/**
+ * `data` with its totalPrice worked out as unit price times quantity, unless
+ * the caller set a total of their own. The column is required and the
+ * subscription page sends no total, so a create from it answered 500; and an
+ * edit to the price (the page sends the old total back) kept the old total.
+ */
+function withTotalPrice(data, current = null) {
+  const sent = key => data[key] !== undefined && data[key] !== '';
+  const changed = key => sent(key) && (!current || String(data[key]) !== String(current[key]));
+  if (changed('totalPrice')) return data;
+  if (current && !changed('unitPrice') && !changed('quantity')) return data;
+  const unitPrice = Number(sent('unitPrice') ? data.unitPrice : current?.unitPrice) || 0;
+  const quantity = Number(sent('quantity') ? data.quantity : current?.quantity) || 1;
+  return { ...data, totalPrice: unitPrice * quantity };
+}
 
 const router = createCrudRouter('subscription', 'subscriptions', {
   include: {
@@ -16,18 +33,34 @@ const router = createCrudRouter('subscription', 'subscriptions', {
     ],
   }),
   numbering: SUBSCRIPTION_NUMBER,
+  // A subscription must have an account, its dates and a price; without them
+  // the create answered 500.
+  validate: (data) => {
+    const errors = {};
+    for (const field of ['accountId', 'startDate', 'endDate']) if (!data[field]) errors[field] = 'Required';
+    if (data.unitPrice === undefined || data.unitPrice === '' || !Number.isFinite(Number(data.unitPrice))) errors.unitPrice = 'Required';
+    return { valid: Object.keys(errors).length === 0, errors };
+  },
+  beforeCreate: (data) => withTotalPrice(data),
+  beforeUpdate: async (data, req) => {
+    if (data.unitPrice === undefined && data.quantity === undefined) return data;
+    const current = await req.app.locals.prisma.subscription.findUnique({ where: { id: req.params.id }, select: { unitPrice: true, quantity: true, totalPrice: true } });
+    return current ? withTotalPrice(data, current) : data;
+  },
 });
 
 // Renew subscription
 router.post('/:id/renew', authenticate, requirePermission('subscriptions', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const sub = await prisma.subscription.findUnique({ where: { id: req.params.id } });
+    const sub = await prisma.subscription.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
-    const { term, priceAdjustment } = req.body;
+    const { priceAdjustment } = req.body;
+    // A number of months: sent as text it was appended to the month.
+    const term = parseInt(req.body.term) || sub.term || 12;
     const newStart = sub.endDate ? new Date(sub.endDate) : new Date();
     const newEnd = new Date(newStart);
-    newEnd.setMonth(newEnd.getMonth() + (term || sub.term || 12));
+    newEnd.setMonth(newEnd.getMonth() + term);
     const renewed = await prisma.subscription.update({
       where: { id: req.params.id },
       data: {
@@ -62,8 +95,11 @@ router.post('/:id/change-plan', authenticate, requirePermission('subscriptions',
     const prisma = req.app.locals.prisma;
     const { productId, unitPrice, quantity, effective } = req.body;
     if (!productId && !unitPrice) return res.status(400).json({ error: 'productId or unitPrice required' });
-    const sub = await prisma.subscription.findUnique({ where: { id: req.params.id } });
+    const sub = await prisma.subscription.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
+    // A live product the caller can see; the id was stored as sent.
+    const linkProblem = await linkRefusal(req, 'subscription', { productId }, sub);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const updated = await prisma.subscription.update({
       where: { id: req.params.id },
       data: {
@@ -83,13 +119,15 @@ router.post('/:id/change-plan', authenticate, requirePermission('subscriptions',
 router.get('/stats/overview', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Over the live subscriptions the caller may see; this counted everyone's.
+    const visible = where => reachableWhere(req, 'subscriptions', 'subscription', where);
     const [total, active, cancelled, expiringSoon] = await Promise.all([
-      prisma.subscription.count({ where: { deletedAt: null } }),
-      prisma.subscription.count({ where: { status: 'Active', deletedAt: null } }),
-      prisma.subscription.count({ where: { status: 'Cancelled', deletedAt: null } }),
-      prisma.subscription.count({ where: { status: 'Active', endDate: { lte: new Date(Date.now() + 30 * 86400000) }, deletedAt: null } }),
+      prisma.subscription.count({ where: await visible() }),
+      prisma.subscription.count({ where: await visible({ status: 'Active' }) }),
+      prisma.subscription.count({ where: await visible({ status: 'Cancelled' }) }),
+      prisma.subscription.count({ where: await visible({ status: 'Active', endDate: { lte: new Date(Date.now() + 30 * 86400000) } }) }),
     ]);
-    const activeSubs = await prisma.subscription.findMany({ where: { status: 'Active', deletedAt: null } });
+    const activeSubs = await prisma.subscription.findMany({ where: await visible({ status: 'Active' }) });
     const mrr = activeSubs.reduce((s, sub) => {
       const monthly = sub.billingFrequency === 'Monthly' ? parseFloat(sub.totalPrice) || 0
         : sub.billingFrequency === 'Quarterly' ? (parseFloat(sub.totalPrice) || 0) / 3
@@ -106,12 +144,17 @@ module.exports = router;
 router.get('/:id/health', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const sub = await prisma.subscription.findUnique({ where: { id: req.params.id } });
+    const sub = await prisma.subscription.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!sub) return res.status(404).json({ error: 'Not found' });
     const daysLeft = sub.endDate ? Math.floor((new Date(sub.endDate) - Date.now()) / 86400000) : null;
     const issues = [];
     if (daysLeft !== null && daysLeft < 30) issues.push('Expiring soon');
-    if (sub.paymentStatus === 'overdue') issues.push('Payment overdue');
+    // A subscription has no paymentStatus, so this never fired: payment is
+    // overdue when one of its invoices (that the caller may see) is.
+    const overdueInvoices = permits(req, 'invoices', 'read')
+      ? await prisma.invoice.count({ where: await reachableWhere(req, 'invoices', 'invoice', { subscriptionId: sub.id, OR: [{ status: 'Overdue' }, { status: 'Sent', dueDate: { lt: new Date() } }] }) })
+      : 0;
+    if (overdueInvoices) issues.push('Payment overdue');
     if (sub.status === 'Cancelled') issues.push('Cancelled');
     res.json({ subscriptionId: sub.id, status: sub.status, daysRemaining: daysLeft, health: issues.length === 0 ? 'healthy' : issues.length < 2 ? 'warning' : 'critical', issues });
   } catch (err) { next(err); }
@@ -130,7 +173,11 @@ router.get('/:id/usage', authenticate, async (req, res, next) => {
 router.get('/:id/invoices', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const invoices = await prisma.invoice.findMany({ where: { subscriptionId: req.params.id, deletedAt: null }, orderBy: { createdAt: 'desc' } });
+    // Invoices only with their read permission, and only those row security
+    // lets the caller see, as an account's timeline lists them.
+    const invoices = permits(req, 'invoices', 'read')
+      ? await prisma.invoice.findMany({ where: await reachableWhere(req, 'invoices', 'invoice', { subscriptionId: req.params.id }), orderBy: { createdAt: 'desc' } })
+      : [];
     res.json(invoices);
   } catch (err) { next(err); }
 });
@@ -139,7 +186,8 @@ router.get('/:id/invoices', authenticate, async (req, res, next) => {
 router.get('/analytics/churn-risk', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const subs = await prisma.subscription.findMany({ where: { status: 'Active', deletedAt: null }, include: { account: { select: { name: true } } } });
+    // The subscriptions the caller may see; this listed everyone's.
+    const subs = await prisma.subscription.findMany({ where: await reachableWhere(req, 'subscriptions', 'subscription', { status: 'Active' }), include: { account: { select: { name: true } } } });
     const atRisk = subs.filter(s => {
       const daysToEnd = s.endDate ? (new Date(s.endDate) - Date.now()) / 86400000 : 999;
       return daysToEnd < 30 && !s.autoRenew;
@@ -153,7 +201,7 @@ router.get('/analytics/churn-risk', authenticate, async (req, res, next) => {
 router.get('/analytics/cohorts', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const subs = await prisma.subscription.findMany({ where: { deletedAt: null }, select: { status: true, startDate: true, endDate: true, totalPrice: true, createdAt: true } });
+    const subs = await prisma.subscription.findMany({ where: await reachableWhere(req, 'subscriptions', 'subscription'), select: { status: true, startDate: true, endDate: true, totalPrice: true, createdAt: true } });
     const cohorts = {};
     subs.forEach(s => {
       const month = new Date(s.startDate || s.createdAt).toISOString().substring(0, 7);

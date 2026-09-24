@@ -76,12 +76,19 @@ const router = createCrudRouter('contact', 'contacts', {
         if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
         if (Object.keys(data).length) await prisma.contact.update({ where: { id: primaryId }, data });
 
-        // Re-link all relations from merged record to primary
+        // Re-link all relations from merged record to primary. Its quotes,
+        // invoices, documents, contracts and campaign sends were left, and the
+        // delete below cut them loose from any contact.
         await Promise.all([
           prisma.deal.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
           prisma.activity.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
           prisma.email.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
           prisma.case.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
+          prisma.quote.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
+          prisma.invoice.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
+          prisma.document.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
+          prisma.contract.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
+          prisma.campaignRecipient.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
         ]);
 
         // Delete merged record
@@ -184,10 +191,15 @@ router.get('/:id/relationships', authenticate, async (req, res, next) => {
 router.post('/:id/convert-to-lead', authenticate, requirePermission('leads', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const contact = await prisma.contact.findUnique({ where: { id: req.params.id } });
+    const contact = await prisma.contact.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    // A lead's company is the contact's account, where the caller can see it;
+    // it was the contact's department ("Engineering").
+    const account = contact.accountId
+      ? await readable(req, 'accounts', 'account', { id: contact.accountId }, where => prisma.account.findFirst({ where, select: { name: true } }), null)
+      : null;
     const lead = await prisma.lead.create({
-      data: { firstName: contact.firstName, lastName: contact.lastName, email: contact.email, phone: contact.phone, company: contact.department || '', title: contact.title, status: 'New', source: contact.leadSource || 'Existing Contact', ownerId: req.user.id },
+      data: { firstName: contact.firstName, lastName: contact.lastName, email: contact.email, phone: contact.phone, company: account?.name || '', title: contact.title, status: 'New', source: contact.leadSource || 'Existing Contact', ownerId: req.user.id },
     });
     await req.audit({ action: 'create', module: 'leads', recordId: lead.id, details: `Converted from contact ${contact.id}` });
     res.status(201).json(lead);

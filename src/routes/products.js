@@ -1,6 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
-const { auditMiddleware } = require('../middleware/audit');
-const { requirePermission, authenticate } = require('../middleware/auth');
+const { requirePermission, authenticate, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
+const { currencyContext } = require('../utils/currency');
 
 const router = createCrudRouter('product', 'products', {
   searchFilter: (q) => ({
@@ -22,7 +23,8 @@ const router = createCrudRouter('product', 'products', {
     router.get('/categories/list', requirePermission('products', 'read'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const products = await prisma.product.findMany({ select: { category: true }, distinct: ['category'] });
+        // Of the live products the caller may see; deleted ones' categories were listed.
+        const products = await prisma.product.findMany({ where: await reachableWhere(req, 'products', 'product'), select: { category: true }, distinct: ['category'] });
         const categories = products.map(p => p.category).filter(Boolean).sort();
         res.json({ data: categories });
       } catch (err) { next(err); }
@@ -40,8 +42,9 @@ const router = createCrudRouter('product', 'products', {
           { sku: { contains: search, mode: 'insensitive' } },
         ];
 
+        // Live products only: a deleted product was still offered for quoting.
         const products = await prisma.product.findMany({
-          where,
+          where: await reachableWhere(req, 'products', 'product', where),
           orderBy: { name: 'asc' },
           select: { id: true, name: true, sku: true, price: true, category: true, unit: true, description: true },
         });
@@ -53,10 +56,12 @@ const router = createCrudRouter('product', 'products', {
     router.post('/:id/clone', requirePermission('products', 'edit'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const source = await prisma.product.findUnique({ where: { id: req.params.id } });
+        // A live product; a deleted one was cloned, deletedAt and all, into a
+        // deleted copy. (A second clone route below never answered and is gone.)
+        const source = await prisma.product.findFirst({ where: { id: req.params.id, deletedAt: null } });
         if (!source) return res.status(404).json({ error: 'Not found' });
 
-        const { id, createdAt, updatedAt, ...data } = source;
+        const { id, createdAt, updatedAt, deletedAt, ...data } = source;
         data.name = `${data.name} (Copy)`;
         data.sku = `${data.sku}-COPY-${Date.now().toString(36).slice(-4)}`;
 
@@ -83,24 +88,29 @@ const router = createCrudRouter('product', 'products', {
     router.get('/stats/overview', requirePermission('products', 'read'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
+        // Over the live products the caller may see; deleted ones were counted.
+        const visible = where => reachableWhere(req, 'products', 'product', where);
         const [total, active, categories] = await Promise.all([
-          prisma.product.count(),
-          prisma.product.count({ where: { active: true } }),
-          prisma.product.findMany({ select: { category: true }, distinct: ['category'] }),
+          prisma.product.count({ where: await visible() }),
+          prisma.product.count({ where: await visible({ active: true }) }),
+          prisma.product.findMany({ where: await visible(), select: { category: true }, distinct: ['category'] }),
         ]);
 
-        const products = await prisma.product.findMany({ select: { price: true, cost: true, category: true } });
+        const products = await prisma.product.findMany({ where: await visible(), select: { price: true, cost: true, category: true } });
         const avgPrice = products.length > 0 ? products.reduce((s, p) => s + p.price, 0) / products.length : 0;
         const avgMargin = products.length > 0 ? products.reduce((s, p) => s + (p.price > 0 ? (p.price - p.cost) / p.price * 100 : 0), 0) / products.length : 0;
 
-        // Revenue by product (from deal line items)
-        const lineItems = await prisma.dealLineItem.findMany({
-          where: { productId: { not: null } },
-          select: { productId: true, total: true },
-        });
+        // Revenue by product (from deal line items), on the live deals the
+        // caller may see and in the default currency: it summed every deal's
+        // lines, deleted and other reps' included, across currencies.
+        const lineItems = permits(req, 'deals', 'read') ? await prisma.dealLineItem.findMany({
+          where: { productId: { not: null }, deal: { is: await reachableWhere(req, 'deals', 'deal') } },
+          select: { productId: true, total: true, deal: { select: { currency: true } } },
+        }) : [];
+        const ctx = await currencyContext(prisma);
         const revenueByProduct = {};
         lineItems.forEach(li => {
-          revenueByProduct[li.productId] = (revenueByProduct[li.productId] || 0) + li.total;
+          revenueByProduct[li.productId] = (revenueByProduct[li.productId] || 0) + ctx.toBase(li.total, li.deal?.currency);
         });
 
         res.json({
@@ -135,26 +145,16 @@ router.get('/:id/inventory', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const product = await prisma.product.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, quantityOnHand: true, reorderPoint: true, reorderQuantity: true } });
+    // Quoted from quotes' lines, which are QuoteItem rows (QuoteLineItem is
+    // written by nothing, so this was always 0); both on live quotes and orders.
     const [quotedQty, orderedQty] = await Promise.all([
-      prisma.quoteLineItem.aggregate({ where: { productId: req.params.id }, _sum: { quantity: true } }),
-      prisma.orderItem.aggregate({ where: { productId: req.params.id }, _sum: { quantity: true } }),
+      prisma.quoteItem.aggregate({ where: { productId: req.params.id, quote: { deletedAt: null } }, _sum: { quantity: true } }),
+      prisma.orderItem.aggregate({ where: { productId: req.params.id, order: { deletedAt: null } }, _sum: { quantity: true } }),
     ]);
     if (!product) return res.status(404).json({ error: 'Product not found' });
     // Unset stock levels used to read as 0 <= 0, so every product needed a reorder.
     const needsReorder = product.quantityOnHand != null && product.reorderPoint != null && product.quantityOnHand <= product.reorderPoint;
     res.json({ ...product, quotedQuantity: quotedQty._sum.quantity || 0, orderedQuantity: orderedQty._sum.quantity || 0, needsReorder });
-  } catch (err) { next(err); }
-});
-
-// Clone product
-router.post('/:id/clone', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const original = await prisma.product.findUnique({ where: { id: req.params.id } });
-    if (!original) return res.status(404).json({ error: 'Not found' });
-    const { id, createdAt, updatedAt, code, ...data } = original;
-    const clone = await prisma.product.create({ data: { ...data, name: `${original.name} (Copy)`, sku: code ? `${code}-COPY` : null, active: false } });
-    res.status(201).json(clone);
   } catch (err) { next(err); }
 });
 

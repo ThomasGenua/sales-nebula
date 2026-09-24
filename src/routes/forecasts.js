@@ -98,6 +98,21 @@ function forecastAccess({ approve = false, action = 'approve' } = {}) {
 // approve and reopen; the totals are summed from the items.
 const EDITABLE_FIELDS = ['name', 'period', 'periodStart', 'periodEnd', 'quotaAmount', 'territoryId', 'notes'];
 
+// An item's category, as the figures read them. Any other name was stored
+// and then counted as pipeline and nothing else.
+const CATEGORIES = ['Closed', 'Commit', 'Best Case', 'Pipeline', 'Omitted'];
+
+/** The category a deal's item starts in, from its probability. */
+const categoryFor = probability => (probability >= 90 ? 'Commit' : probability >= 70 ? 'Best Case' : 'Pipeline');
+
+/** Today's calendar quarter: its first and last instant, and its label (Q3-2026). */
+function currentQuarter(now = new Date()) {
+  const q = Math.floor(now.getMonth() / 3);
+  const start = new Date(now.getFullYear(), q * 3, 1);
+  const end = new Date(new Date(now.getFullYear(), q * 3 + 3, 1).getTime() - 1);
+  return { period: `Q${q + 1}-${now.getFullYear()}`, start, end };
+}
+
 // LIST forecasts
 router.get('/', requirePermission('deals', 'read'), async (req, res, next) => {
   try {
@@ -110,6 +125,51 @@ router.get('/', requirePermission('deals', 'read'), async (req, res, next) => {
     // The filters narrow the forecasts the caller may see, not every one.
     const forecasts = await prisma.forecast.findMany({ where: await visibleForecastWhere(req, where), include: await includeFor(req), orderBy: { periodStart: 'desc' } });
     res.json({ data: forecasts });
+  } catch (err) { next(err); }
+});
+
+// GET the caller's own forecast for the period today falls in, as the
+// Forecasts page reads it. The page asked for /current, which GET /:id took
+// for a forecast id, so it always had a 404. Figures come from figuresFor,
+// in the default currency; `categories` is each category's own amount. With
+// no forecast filed for today, it is this quarter's, drafted from the
+// caller's deals as POST would file it, and not saved (id null).
+router.get('/current', requirePermission('deals', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const now = new Date();
+    const dealWhere = await reachableWhere(req, 'deals', 'deal');
+    const ctx = await currencyContext(prisma);
+    const filed = await prisma.forecast.findFirst({
+      where: { userId: req.userId, periodStart: { lte: now }, periodEnd: { gte: now } },
+      orderBy: { periodStart: 'desc' },
+      include: { items: { where: { deal: { is: dealWhere } }, select: { category: true, amount: true, overrideAmount: true } } },
+    });
+    let forecast = filed;
+    if (!forecast) {
+      const { period, start, end } = currentQuarter(now);
+      const deals = await prisma.deal.findMany({
+        where: await reachableWhere(req, 'deals', 'deal', { ownerId: req.userId, stage: { notIn: ['Closed Won', 'Closed Lost'] }, closeDate: { gte: start, lte: end } }),
+        select: { value: true, currency: true, probability: true },
+      });
+      const items = deals.map(d => ({ category: categoryFor(d.probability), amount: ctx.toBase(d.value, d.currency), overrideAmount: null }));
+      forecast = { id: null, name: null, period, periodStart: start, periodEnd: end, status: null, quotaAmount: 0, userId: req.userId, items };
+    }
+    const { commit, bestCase, pipeline, closed } = await figuresFor(prisma, forecast, dealWhere, ctx);
+    const categories = { Closed: closed };
+    for (const item of forecast.items) {
+      if (item.category === 'Omitted' || item.category === 'Closed') continue;
+      categories[item.category] = (categories[item.category] || 0) + (item.overrideAmount != null ? item.overrideAmount : item.amount);
+    }
+    res.json({
+      id: forecast.id, name: forecast.name, period: forecast.period,
+      periodStart: forecast.periodStart, periodEnd: forecast.periodEnd,
+      status: forecast.status, filed: !!filed, currency: ctx.base,
+      quota: forecast.quotaAmount, commit, bestCase, pipeline, closed,
+      attainment: forecast.quotaAmount > 0 ? Math.round(closed / forecast.quotaAmount * 100) : 0,
+      gap: Math.max(0, forecast.quotaAmount - closed),
+      categories,
+    });
   } catch (err) { next(err); }
 });
 
@@ -129,6 +189,11 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { period, periodStart, periodEnd, quotaAmount, territoryId, userId, status, ...rest } = req.body;
+    // Without these the create reached Prisma with no period and an invalid
+    // date, and answered 500.
+    if (!period || !periodStart || !periodEnd || Number.isNaN(new Date(periodStart).getTime()) || Number.isNaN(new Date(periodEnd).getTime())) {
+      return res.status(400).json({ error: 'period, periodStart and periodEnd (dates) are required' });
+    }
 
     // The creator owns it unless a manager or admin files it for a report, and
     // it starts Open. `rest` overrode both, so a rep could file an Approved
@@ -167,7 +232,7 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
       amount: ctx.toBase(d.value, d.currency),
       probability: d.probability,
       closeDate: d.closeDate,
-      category: d.probability >= 90 ? 'Commit' : d.probability >= 70 ? 'Best Case' : 'Pipeline',
+      category: categoryFor(d.probability),
     }));
 
     const commit = items.filter(i => i.category === 'Commit').reduce((s, i) => s + i.amount, 0);
@@ -229,6 +294,7 @@ router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), forecastAcc
   try {
     const prisma = req.app.locals.prisma;
     const { category, overrideAmount, notes } = req.body;
+    if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: `category must be one of: ${CATEGORIES.join(', ')}` });
     // An item of the forecast in the path: any forecast's items went by id.
     // Its deal must be one the caller can see, as GET shows only those; the
     // reply carries the whole deal.
