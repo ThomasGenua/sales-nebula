@@ -71,9 +71,10 @@ async function reachableWhere(req, module, modelName, where = {}, minLevel = 'Re
  * filed on anyone's deal, and the hidden record's name read back through the
  * link. Keys to tables outside the record modules (users, territories) are
  * left to the database. On an update, pass the record as it is: a key that
- * keeps its value is not a new link.
+ * keeps its value is not a new link. A bulk write passes one `seen` Map for
+ * all its rows, so each linked record is looked up once.
  */
-async function linkRefusal(req, modelName, data, current = null) {
+async function linkRefusal(req, modelName, data, current = null, seen = new Map()) {
   // Required here, not above: the CRUD router requires this file.
   const { crudModuleFor } = require('../utils/crud');
   const model = Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === String(modelName).toLowerCase());
@@ -87,11 +88,14 @@ async function linkRefusal(req, modelName, data, current = null) {
     const target = relation.type.charAt(0).toLowerCase() + relation.type.slice(1);
     const module = crudModuleFor(target);
     if (!module) continue;
-    const found = permits(req, module, 'read') && await req.app.locals.prisma[target].findFirst({
-      where: await reachableWhere(req, module, target, { id: String(value) }),
-      select: { id: true },
-    });
-    if (!found) return `${key} does not name a ${module.replace(/s$/, '')} you can see`;
+    const cacheKey = `${target}:${value}`;
+    if (!seen.has(cacheKey)) {
+      seen.set(cacheKey, permits(req, module, 'read') && !!(await req.app.locals.prisma[target].findFirst({
+        where: await reachableWhere(req, module, target, { id: String(value) }),
+        select: { id: true },
+      })));
+    }
+    if (!seen.get(cacheKey)) return `${key} does not name a ${module.replace(/s$/, '')} you can see`;
   }
   return null;
 }

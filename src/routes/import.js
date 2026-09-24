@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 
 // Only administrators import records on someone else's behalf; everyone
@@ -151,6 +151,10 @@ router.post('/execute', async (req, res, next) => {
       }
     }
 
+    // A row may link only to records the importer can see (a contact's
+    // account); each linked record is looked up once for the whole file.
+    const seen = new Map();
+
     // Process in batches of 100
     const batchSize = 100;
     for (let i = 0; i < records.length; i += batchSize) {
@@ -184,6 +188,9 @@ router.post('/execute', async (req, res, next) => {
 
           if (existingId) {
             if (updateDuplicates) {
+              const current = await prisma[config.model].findUnique({ where: { id: existingId } });
+              const refusal = await linkRefusal(req, config.model, data, current, seen);
+              if (refusal) { results.errors.push({ row: rowNum, error: refusal }); results.skipped++; continue; }
               await prisma[config.model].update({ where: { id: existingId }, data });
               results.updated++;
             } else {
@@ -196,6 +203,9 @@ router.post('/execute', async (req, res, next) => {
           if (config.fields.includes('ownerId') && !data.ownerId) {
             data.ownerId = req.userId;
           }
+
+          const refusal = await linkRefusal(req, config.model, data, null, seen);
+          if (refusal) { results.errors.push({ row: rowNum, error: refusal }); results.skipped++; continue; }
 
           const created = await prisma[config.model].create({ data });
 

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields, modelHasField } = require('../utils/modelFields');
 
 const router = Router();
@@ -111,7 +111,9 @@ router.post('/sync', authenticate, async (req, res, next) => {
     // "permission" rewrote accounts and roles: anyone signed in could make
     // themselves an administrator. A change is now one of the sync modules,
     // takes edit permission on it, writes the model's own columns, and
-    // updates only records the caller may change.
+    // updates only records the caller may change. Links (a deal's account)
+    // must name records the caller can see.
+    const seen = new Map();
     for (const change of changes.slice(0, 500)) {
       try {
         const model = SYNC_MODELS[change?.module];
@@ -120,14 +122,18 @@ router.post('/sync', authenticate, async (req, res, next) => {
         const data = editableFields(model, change.data);
         if (change.action === 'create') {
           if (modelHasField(model, 'ownerId')) data.ownerId = req.userId;
+          const refusal = await linkRefusal(req, model, data, null, seen);
+          if (refusal) throw new Error(refusal);
           const record = await prisma[model].create({ data });
           results.push({ id: change.localId, serverId: record.id, status: 'created' });
         } else if (change.action === 'update') {
-          const { count } = await prisma[model].updateMany({
+          const current = await prisma[model].findFirst({
             where: await reachableWhere(req, change.module, model, { id: String(change.id) }, 'Edit'),
-            data,
           });
-          if (!count) throw new Error('Not found');
+          if (!current) throw new Error('Not found');
+          const refusal = await linkRefusal(req, model, data, current, seen);
+          if (refusal) throw new Error(refusal);
+          await prisma[model].update({ where: { id: current.id }, data });
           results.push({ id: change.id, status: 'updated' });
         }
       } catch (e) { results.push({ id: change?.id || change?.localId, status: 'error', error: e.message }); }
