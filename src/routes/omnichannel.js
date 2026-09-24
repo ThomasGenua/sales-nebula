@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { isAdmin } = require('../middleware/rowSecurity');
+const { reachableWhere } = require('../middleware/access');
+const { columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
@@ -36,16 +38,19 @@ async function assignedToCaller(req, res, model, agentField) {
 }
 
 // Channel config
+// Open to anyone signed in: a channel holds its name, type, status, routing
+// type, priority, capacity, queue and skills, and no credentials.
 router.get('/channels', async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.omniChannel.findMany({ orderBy: { priority: 'asc' } }) }); }
   catch (err) { next(err); }
 });
+// The channel's own columns; the body went to the write whole.
 router.post('/channels', requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.omniChannel.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.omniChannel.create({ data: columnsFrom('omniChannel', req.body) })); }
   catch (err) { next(err); }
 });
 router.put('/channels/:id', requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.omniChannel.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.omniChannel.update({ where: { id: req.params.id }, data: columnsFrom('omniChannel', req.body) })); }
   catch (err) { next(err); }
 });
 
@@ -59,16 +64,22 @@ router.get('/queue', requirePermission('cases', 'read'), async (req, res, next) 
     res.json({ data: await req.app.locals.prisma.omniWorkItem.findMany({ where, orderBy: [{ priority: 'asc' }, { queuedAt: 'asc' }] }) });
   } catch (err) { next(err); }
 });
-router.post('/route', async (req, res, next) => {
+// Creating a work item, like starting a chat, is cases edit; both took a
+// session alone.
+router.post('/route', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { type, recordId, module, priority, skills } = req.body;
     const item = await prisma.omniWorkItem.create({ data: { type, recordId, module, priority: priority || 5, skills: skills || [] } });
-    // Auto-route based on channel config
+    // Auto-route based on channel config, passing over agents whose presence
+    // says they are not available: the check a second POST /route handler
+    // made, which this one shadowed, so it never ran.
     const channels = await prisma.omniChannel.findMany({ where: { status: 'Online' }, orderBy: { priority: 'asc' } });
     for (const ch of channels) {
       if (ch.routingType === 'Least Active') {
-        const agents = await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: 'Active' }, _count: true, orderBy: { _count: { assignedTo: 'asc' } } });
+        const away = new Set((await prisma.agentPresence.findMany({ where: { status: { notIn: ['available', 'Available'] } }, select: { userId: true } })).map(p => p.userId));
+        const agents = (await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: 'Active' }, _count: true, orderBy: { _count: { assignedTo: 'asc' } } }))
+          .filter(a => !away.has(a.assignedTo));
         if (agents.length > 0) {
           await prisma.omniWorkItem.update({ where: { id: item.id }, data: { assignedTo: agents[0].assignedTo, status: 'Assigned', assignedAt: new Date(), channelId: ch.id } });
           break;
@@ -108,7 +119,7 @@ router.get('/chat', requirePermission('cases', 'read'), async (req, res, next) =
     res.json({ data: await req.app.locals.prisma.chatSession.findMany({ where, orderBy: { startedAt: 'desc' }, take: 50 }) });
   } catch (err) { next(err); }
 });
-router.post('/chat', async (req, res, next) => {
+router.post('/chat', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const session = await req.app.locals.prisma.chatSession.create({
       data: { visitorId: req.body.visitorId || 'anon', visitorName: req.body.visitorName, visitorEmail: req.body.visitorEmail, channel: req.body.channel || 'web', department: req.body.department, transcript: [] },
@@ -138,7 +149,8 @@ router.post('/chat/:id/end', requirePermission('cases', 'edit'), async (req, res
 module.exports = router;
 
 // Queue statistics
-router.get('/queues/stats', authenticate, async (req, res, next) => {
+// Service work, so cases read; it answered anyone signed in.
+router.get('/queues/stats', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const queues = await prisma.omnichannelQueue.findMany({ where: { active: true } }).catch(() => []);
@@ -153,39 +165,41 @@ router.get('/queues/stats', authenticate, async (req, res, next) => {
 });
 
 // Agent presence
-router.post('/presence', authenticate, async (req, res, next) => {
+// It says who takes routed service work, so it is cases edit, and it is the
+// caller's own: only an admin may set another agent's (`userId`). This was an
+// upsert on userId, which is not unique, so Prisma refused it and the catch
+// answered with the request echoed back; no presence was ever stored.
+router.post('/presence', authenticate, requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { status, capacity } = req.body;
-    const presence = await prisma.agentPresence.upsert({
-      where: { userId: req.user.id },
-      update: { status: status || 'available', capacity, lastPing: new Date() },
-      create: { userId: req.user.id, status: status || 'available', capacity: capacity || 5, lastPing: new Date() },
-    }).catch(() => ({ userId: req.user.id, status }));
+    if ((status != null && typeof status !== 'string') || (capacity != null && !Number.isInteger(capacity))) {
+      return res.status(400).json({ error: 'status must be text and capacity a whole number' });
+    }
+    const userId = req.body.userId ? String(req.body.userId) : req.user.id;
+    if (userId !== req.user.id) {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'You can only set your own presence' });
+      if (!(await prisma.user.findUnique({ where: { id: userId }, select: { id: true } }))) return res.status(400).json({ error: 'userId does not name a user' });
+    }
+    const existing = await prisma.agentPresence.findFirst({ where: { userId } });
+    const presence = existing
+      ? await prisma.agentPresence.update({ where: { id: existing.id }, data: { status: status || 'available', ...(capacity != null && { capacity }), lastPing: new Date() } })
+      : await prisma.agentPresence.create({ data: { userId, status: status || 'available', capacity: capacity || 5, lastPing: new Date() } });
     res.json(presence);
   } catch (err) { next(err); }
 });
 
-// Route work item to best agent
-router.post('/route', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { itemType, itemId, skill, priority } = req.body;
-    const agents = await prisma.agentPresence.findMany({ where: { status: 'available' } }).catch(() => []);
-    if (!agents.length) return res.json({ routed: false, reason: 'No available agents' });
-    const best = agents.sort((a, b) => (a.currentLoad || 0) - (b.currentLoad || 0))[0];
-    res.json({ routed: true, agentId: best.userId, itemType, itemId });
-  } catch (err) { next(err); }
-});
-
 // Channel metrics
-router.get('/channels/metrics', authenticate, async (req, res, next) => {
+// Case counts: cases read, over the live cases the caller can see. They
+// counted every case for anyone signed in.
+router.get('/channels/metrics', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const channels = ['phone','email','chat','social','web'];
+    const recent = await reachableWhere(req, 'cases', 'case', { createdAt: { gte: new Date(Date.now() - 30*86400000) } });
     const metrics = [];
     for (const ch of channels) {
-      const count = await prisma.case.count({ where: { origin: ch, deletedAt: null, createdAt: { gte: new Date(Date.now() - 30*86400000) } } }).catch(() => 0);
+      const count = await prisma.case.count({ where: { AND: [recent, { origin: ch }] } }).catch(() => 0);
       metrics.push({ channel: ch, casesLast30Days: count });
     }
     res.json(metrics);

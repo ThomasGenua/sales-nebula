@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { canReach, reachableWhere } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
@@ -78,15 +79,19 @@ router.post('/segments/calculate', requirePermission('contacts', 'read'), async 
 });
 
 // Data Streams
-router.get('/streams', async (req, res, next) => {
+// A stream is integration configuration (its source and field mapping), which
+// admin edit writes, so reading it is admin read; ingesting records customer
+// data, so it takes contacts edit. Both answered anyone signed in.
+router.get('/streams', requirePermission('admin', 'read'), async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.dataStream.findMany() }); }
   catch (err) { next(err); }
 });
+// The stream's own columns; the body went to the create whole.
 router.post('/streams', requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.dataStream.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.dataStream.create({ data: columnsFrom('dataStream', req.body) })); }
   catch (err) { next(err); }
 });
-router.post('/streams/:id/ingest', async (req, res, next) => {
+router.post('/streams/:id/ingest', requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const stream = await req.app.locals.prisma.dataStream.findUnique({ where: { id: req.params.id } });
     if (!stream || !stream.active) return res.status(400).json({ error: 'Stream inactive' });
@@ -120,12 +125,17 @@ router.get('/profiles/:contactId', authenticate, requirePermission('contacts', '
 });
 
 // Track event
-router.post('/events', authenticate, async (req, res, next) => {
+// Recorded an event on any contact id for anyone signed in. Recording customer
+// events takes contacts edit, and the contact must be a live one the caller
+// can see. CdpEvent.contactId has no relation, so linkRefusal cannot check it.
+router.post('/events', authenticate, requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { contactId, eventType, properties, source } = req.body;
     if (!contactId || !eventType) return res.status(400).json({ error: 'contactId and eventType required' });
-    const event = await prisma.cdpEvent.create({ data: { contactId, type: eventType, properties, source: source || 'api', createdAt: new Date() } });
+    const contact = await prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }), select: { id: true } });
+    if (!contact) return res.status(400).json({ error: 'contactId does not name a contact you can see', code: 'LINK_NOT_VISIBLE' });
+    const event = await prisma.cdpEvent.create({ data: { contactId: contact.id, type: eventType, properties, source: source || 'api', createdAt: new Date() } });
     res.status(201).json(event);
   } catch (err) { next(err); }
 });
@@ -171,7 +181,9 @@ router.post('/segments/:id/evaluate', authenticate, requirePermission('contacts'
 });
 
 // Journey analytics
-router.get('/journeys/:id/analytics', authenticate, async (req, res, next) => {
+// Analytics, so reports read, as the funnel and cohort reports take; it
+// answered anyone signed in. It holds step names and counts, no people.
+router.get('/journeys/:id/analytics', authenticate, requirePermission('reports', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const journey = await prisma.journey.findUnique({ where: { id: req.params.id } });

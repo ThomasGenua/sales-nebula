@@ -3,6 +3,7 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
+const { columnsFrom } = require('../utils/modelFields');
 const {
   haversineDistance, isValidPoint, boundingBox, pointInPolygon, polygonBounds,
   polygonArea, polygonCentroid, circleToPolygon, encodeGeohash, clusterByGeohash,
@@ -112,6 +113,9 @@ router.get('/geocode', authenticate, async (req, res, next) => {
 });
 
 // Store a resolved coordinate. The lookup itself happens outside the API.
+// The cache is shared and feeds everyone's maps, and any signed-in user could
+// overwrite any entry. Now anyone may add an address the cache lacks, or give
+// a failed lookup its first coordinate; replacing an entry takes admin edit.
 router.post('/geocode', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -133,6 +137,9 @@ router.post('/geocode', authenticate, async (req, res, next) => {
     };
 
     const existing = await prisma.geocodeCache.findFirst({ where: { addressHash: hash } });
+    if (existing && !(existing.failed && !failed) && !permits(req, 'admin', 'edit')) {
+      return res.status(403).json({ error: 'That address is already in the geocode cache; replacing it needs admin edit permission' });
+    }
     const record = existing
       ? await prisma.geocodeCache.update({ where: { id: existing.id }, data })
       : await prisma.geocodeCache.create({ data });
@@ -424,7 +431,11 @@ router.post('/areas', authenticate, requirePermission('admin', 'edit'), auditMid
 router.put('/areas/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, markerCount, ...data } = req.body;
+    // The area's own columns. The body went to the update whole, so a relation
+    // key was a nested write (`markers` could rewrite every marker's owner);
+    // deletedAt is DELETE's to set, at admin full.
+    const data = columnsFrom('mapArea', req.body);
+    delete data.deletedAt;
     if (data.polygon) {
       const ring = data.polygon.map(pt => ({ lat: +(pt.lat ?? pt[1]), lng: +(pt.lng ?? pt[0]) }));
       if (ring.length < 3) return res.status(400).json({ error: 'polygon needs at least three points' });

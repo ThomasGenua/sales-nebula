@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { isAdmin } = require('../middleware/rowSecurity');
-const { editableFields } = require('../utils/modelFields');
+const { editableFields, columnsFrom } = require('../utils/modelFields');
 const {
   parseRRule, expandRecurrence, describeRRule,
   buildICalendar, parseICalendar, findFreeSlots, mergeIntervals,
@@ -117,6 +117,23 @@ function editableEventWhere(user) {
 /** A live event by id, when `scope` lets the user at it; null otherwise. */
 function findEvent(prisma, id, scope, args = {}) {
   return prisma.calendarEvent.findFirst({ where: { AND: [{ id: String(id), deletedAt: null }, scope] }, ...args });
+}
+
+/**
+ * Resource bookings as the user may see them. A booking for an event outside
+ * visibleEventWhere shows only when the resource is busy: it named the event
+ * and its title, and its purpose repeats that title (POST /events books with
+ * it), Private and Confidential events included.
+ */
+async function bookingsSeenBy(req, bookings) {
+  const ids = [...new Set(bookings.map(b => b.eventId).filter(Boolean))];
+  const seen = new Set(ids.length ? (await req.app.locals.prisma.calendarEvent.findMany({
+    where: { AND: [{ id: { in: ids } }, visibleEventWhere(req.user)] }, select: { id: true },
+  })).map(e => e.id) : []);
+  return bookings.map(b => (!b.eventId || seen.has(b.eventId) ? b : {
+    id: b.id, resourceId: b.resourceId, startAt: b.startAt, endAt: b.endAt, status: b.status,
+    purpose: 'Busy', event: { title: 'Busy' },
+  }));
 }
 
 // ── EVENTS ────────────────────────────────────────────────────────────
@@ -745,7 +762,11 @@ router.post('/resources', authenticate, requirePermission('admin', 'edit'), audi
 router.put('/resources/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
+    // The resource's own columns. The body went to the update whole, so
+    // `bookings` was a nested write into anyone's bookings; deletedAt is
+    // DELETE's to set, at admin full.
+    const data = columnsFrom('calendarResource', req.body);
+    delete data.deletedAt;
     const resource = await prisma.calendarResource.update({ where: { id: req.params.id }, data });
     res.json(resource);
   } catch (err) { next(err); }
@@ -772,7 +793,9 @@ router.get('/resources/:id/schedule', authenticate, async (req, res, next) => {
     });
     const totalMs = bookings.reduce((s, b) => s + (new Date(b.endAt) - new Date(b.startAt)), 0);
     const windowMs = rangeEnd - rangeStart;
-    res.json({ resourceId: req.params.id, rangeStart, rangeEnd, bookings, utilizationPercent: windowMs > 0 ? +((totalMs / windowMs) * 100).toFixed(1) : 0 });
+    // Every booking named its event's title for anyone signed in; one for an
+    // event the caller cannot see is now busy time only.
+    res.json({ resourceId: req.params.id, rangeStart, rangeEnd, bookings: await bookingsSeenBy(req, bookings), utilizationPercent: windowMs > 0 ? +((totalMs / windowMs) * 100).toFixed(1) : 0 });
   } catch (err) { next(err); }
 });
 
@@ -837,7 +860,8 @@ router.post('/bookings/:id/cancel', authenticate, requirePermission('activities'
     const found = await prisma.resourceBooking.findFirst({ where: { id: req.params.id, ...whose }, select: { id: true } });
     if (!found) return res.status(404).json({ error: 'Booking not found' });
     const booking = await prisma.resourceBooking.update({ where: { id: found.id }, data: { status: 'Cancelled' } });
-    res.json(booking);
+    // An admin cancelling a private event's booking read its title back.
+    res.json((await bookingsSeenBy(req, [booking]))[0]);
   } catch (err) { next(err); }
 });
 
@@ -849,7 +873,8 @@ router.post('/bookings/:id/approve', authenticate, requirePermission('admin', 'e
       where: { id: req.params.id },
       data: { status: approve === false ? 'Rejected' : 'Confirmed', approvedById: req.user.id, approvedAt: new Date() },
     });
-    res.json(booking);
+    // As in the schedule: the purpose of an event the approver cannot see stays hidden.
+    res.json((await bookingsSeenBy(req, [booking]))[0]);
   } catch (err) { next(err); }
 });
 
