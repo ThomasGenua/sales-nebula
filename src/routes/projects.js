@@ -1,9 +1,10 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { moduleAccess, recordAccess, reachableWhere } = require('../middleware/access');
+const { moduleAccess, recordAccess, reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { editableFields, scalarOrderBy } = require('../utils/modelFields');
+const { currencyContext, sumInBase } = require('../utils/currency');
 const {
   calculateCriticalPath, wouldCreateCycle, assignWbsCodes,
   rollUpProgress, buildGanttRows, addDays, diffDays,
@@ -79,30 +80,47 @@ async function recalcProject(prisma, projectId) {
   });
 }
 
+/** Milestones with whether each is overdue and the days left, as the pages show them. */
+function withDueState(milestones) {
+  const now = new Date();
+  return milestones.map(m => ({
+    ...m,
+    isOverdue: m.dueDate && !m.completedAt && new Date(m.dueDate) < now,
+    daysRemaining: m.dueDate && !m.completedAt ? Math.ceil(diffDays(now, m.dueDate)) : null,
+  }));
+}
+
 // ── PROJECTS ──────────────────────────────────────────────────────────
 
 router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, search, status, health, managerId, accountId, mine, sortBy = 'createdAt', sortDir = 'desc' } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 50, 200);
+    const current = Math.max(parseInt(page, 10) || 1, 1);
     const where = { deletedAt: null };
-    if (search) where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { code: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }];
+    // Search and mine=true both narrow; mine replaced the search's OR, so
+    // searching your own projects returned all of them.
+    const and = [];
+    if (search) and.push({ OR: [{ name: { contains: search, mode: 'insensitive' } }, { code: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }] });
     if (status) where.status = status;
     if (health) where.health = health;
     if (managerId) where.managerId = managerId;
     if (accountId) where.accountId = accountId;
-    if (mine === 'true') where.OR = [{ managerId: req.user.id }, { ownerId: req.user.id }, { resources: { some: { userId: req.user.id } } }];
+    if (mine === 'true') and.push({ OR: [{ managerId: req.user.id }, { ownerId: req.user.id }, { resources: { some: { userId: req.user.id } } }] });
+    if (and.length) where.AND = and;
     const visible = await reachableWhere(req, 'projects', 'project', where);
 
     const [data, total] = await Promise.all([
       prisma.project.findMany({
-        where: visible, skip: (+page - 1) * +limit, take: +limit,
+        where: visible, skip: (current - 1) * take, take,
         orderBy: scalarOrderBy('project', sortBy, sortDir) || { createdAt: 'desc' },
-        include: { _count: { select: { tasks: true, milestones: true, resources: true } } },
+        // Live tasks: deleted ones are kept (soft) and were counted.
+        include: { _count: { select: { tasks: { where: { deletedAt: null } }, milestones: true, resources: true } } },
       }),
       prisma.project.count({ where: visible }),
     ]);
-    res.json({ data, total, page: +page, limit: +limit });
+    res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });
 
@@ -114,7 +132,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
       include: {
         milestones: { orderBy: { sortOrder: 'asc' } },
         resources: true,
-        _count: { select: { tasks: true, timeEntries: true } },
+        _count: { select: { tasks: { where: { deletedAt: null } }, timeEntries: { where: { deletedAt: null } } } },
       },
     });
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -133,6 +151,10 @@ router.post('/', authenticate, requirePermission('projects', 'edit'), auditMiddl
     const { name, code, description, status, priority, startDate, endDate, budget, estimatedHours, currency, managerId, accountId, dealId, contactId, resources } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
     if (startDate && endDate && new Date(endDate) < new Date(startDate)) return res.status(400).json({ error: 'endDate must be after startDate' });
+    // The account, deal and contact a project is for must be records the caller
+    // can see; they were stored as sent, and the project named them back.
+    const linkProblem = await linkRefusal(req, 'project', { accountId, dealId, contactId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     const project = await prisma.project.create({
       data: {
@@ -164,7 +186,8 @@ router.post('/', authenticate, requirePermission('projects', 'edit'), auditMiddl
 router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    if (!(await projectToChange(req, res, req.params.id))) return;
+    const current = await projectToChange(req, res, req.params.id);
+    if (!current) return;
     const data = {};
     for (const f of PROJECT_FIELDS) if (req.body[f] !== undefined) data[f] = req.body[f];
     for (const f of ['startDate', 'endDate', 'actualStart', 'actualEnd']) {
@@ -173,6 +196,9 @@ router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMid
     if (data.startDate && data.endDate && data.endDate < data.startDate) {
       return res.status(400).json({ error: 'endDate must be after startDate' });
     }
+    // A new account, deal or contact link only to a record the caller can see, as on create.
+    const linkProblem = await linkRefusal(req, 'project', data, current);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     if (data.status === 'Active' && !data.actualStart) data.actualStart = new Date();
     if (data.status === 'Completed') { data.actualEnd = new Date(); data.percentComplete = 100; }
 
@@ -257,7 +283,12 @@ router.post('/:id/tasks', authenticate, requirePermission('projects', 'edit'), a
       },
     });
 
-    for (const depId of dependsOn || []) {
+    // Predecessors in this project only, as POST /tasks/:taskId/dependencies
+    // requires; any task id was linked, another project's included.
+    const predecessors = Array.isArray(dependsOn) && dependsOn.length
+      ? (await prisma.projectTask.findMany({ where: { id: { in: dependsOn.map(String) }, projectId: project.id, deletedAt: null }, select: { id: true } })).map(t => t.id)
+      : [];
+    for (const depId of predecessors) {
       const existing = await prisma.taskDependency.findMany({ where: { successor: { projectId: project.id } } });
       if (wouldCreateCycle(existing, depId, task.id)) continue;
       await prisma.taskDependency.create({ data: { predecessorId: depId, successorId: task.id, dependencyType: 'FS', lagDays: 0 } }).catch(() => {});
@@ -286,6 +317,10 @@ router.put('/tasks/:taskId', authenticate, requirePermission('projects', 'edit')
     if (data.startDate && data.endDate && data.endDate < data.startDate) {
       return res.status(400).json({ error: 'endDate must be after startDate' });
     }
+    // A parent from this project, as on create; any task id was taken.
+    if (data.parentTaskId && !(await prisma.projectTask.findFirst({ where: { id: String(data.parentTaskId), projectId: existing.projectId, deletedAt: null }, select: { id: true } }))) {
+      return res.status(400).json({ error: 'parentTaskId not found in this project' });
+    }
     // Reparenting must not create a loop in the hierarchy
     if (data.parentTaskId) {
       let cursor = data.parentTaskId, guard = 0;
@@ -312,8 +347,17 @@ router.delete('/tasks/:taskId', authenticate, requirePermission('projects', 'edi
     const task = await prisma.projectTask.findFirst({ where: { id: req.params.taskId, deletedAt: null } });
     if (!task) return res.status(404).json({ error: 'Task not found' });
     if (!(await projectToChange(req, res, task.projectId, { team: true }))) return;
-    await prisma.projectTask.updateMany({ where: { OR: [{ id: task.id }, { parentTaskId: task.id }] }, data: { deletedAt: new Date() } });
-    await prisma.taskDependency.deleteMany({ where: { OR: [{ predecessorId: task.id }, { successorId: task.id }] } });
+    // The task and everything under it, however deep, with their links. Only
+    // direct subtasks went, so deeper ones were left under a deleted parent:
+    // gone from the Gantt, still counted in the totals.
+    const ids = [task.id];
+    for (let level = [task.id]; level.length;) {
+      const children = await prisma.projectTask.findMany({ where: { parentTaskId: { in: level }, deletedAt: null }, select: { id: true } });
+      level = children.map(c => c.id).filter(id => !ids.includes(id));
+      ids.push(...level);
+    }
+    await prisma.projectTask.updateMany({ where: { id: { in: ids } }, data: { deletedAt: new Date() } });
+    await prisma.taskDependency.deleteMany({ where: { OR: [{ predecessorId: { in: ids } }, { successorId: { in: ids } }] } });
     await recalcProject(prisma, task.projectId);
     res.json({ deleted: true });
   } catch (err) { next(err); }
@@ -327,13 +371,33 @@ router.post('/:id/tasks/reorder', authenticate, requirePermission('projects', 'e
     if (!Array.isArray(moves)) return res.status(400).json({ error: 'moves array required' });
     const project = await projectToChange(req, res, req.params.id, { team: true });
     if (!project) return;
+    // A new parent is a live task of this project, never the task itself or one
+    // beneath it: any id went, another project's included, and a loop dropped
+    // its tasks from the Gantt. Checked in the order the moves apply, before
+    // any is written.
+    const parentFor = m => (m.parentTaskId === undefined ? undefined : m.parentTaskId ? String(m.parentTaskId) : null);
+    const parentOf = new Map((await prisma.projectTask.findMany({ where: { projectId: project.id, deletedAt: null }, select: { id: true, parentTaskId: true } }))
+      .map(t => [t.id, t.parentTaskId]));
+    for (const m of moves) {
+      if (!m?.taskId) continue;
+      const taskId = String(m.taskId), parent = parentFor(m);
+      if (parent === undefined) continue;
+      if (parent !== null) {
+        if (!parentOf.has(parent)) return res.status(400).json({ error: `parentTaskId ${parent} is not a task in this project` });
+        for (let cursor = parent, steps = 0; cursor && steps <= parentOf.size; cursor = parentOf.get(cursor), steps++) {
+          if (cursor === taskId) return res.status(400).json({ error: 'A task cannot move under itself or one of its subtasks' });
+        }
+      }
+      if (parentOf.has(taskId)) parentOf.set(taskId, parent);
+    }
     let updated = 0;
     for (const m of moves) {
-      if (!m.taskId) continue;
+      if (!m?.taskId) continue;
+      const parent = parentFor(m);
       // This project's tasks only; a move named any task in any project.
       const { count } = await prisma.projectTask.updateMany({
         where: { id: String(m.taskId), projectId: project.id },
-        data: { sortOrder: m.sortOrder ?? 0, ...(m.parentTaskId !== undefined && { parentTaskId: m.parentTaskId }) },
+        data: { sortOrder: m.sortOrder ?? 0, ...(parent !== undefined && { parentTaskId: parent }) },
       }).catch(() => ({ count: 0 }));
       updated += count;
     }
@@ -411,7 +475,9 @@ router.get('/:id/gantt', authenticate, async (req, res, next) => {
     const rows = buildGanttRows(tasks, cpm.schedule, wbs);
 
     const links = dependencies.map(d => ({ id: d.id, source: d.predecessorId, target: d.successorId, type: d.dependencyType, lagDays: d.lagDays }));
-    const milestones = await prisma.projectMilestone.findMany({ where: { projectId: project.id }, orderBy: { dueDate: 'asc' } });
+    // With isOverdue, which the Milestones tab (fed from here) reads; only
+    // GET /:id/milestones worked it out, so nothing ever showed as overdue.
+    const milestones = withDueState(await prisma.projectMilestone.findMany({ where: { projectId: project.id }, orderBy: { dueDate: 'asc' } }));
 
     res.json({
       project: { id: project.id, name: project.name, startDate: project.startDate, endDate: project.endDate, percentComplete: project.percentComplete },
@@ -458,13 +524,7 @@ router.get('/:id/milestones', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const milestones = await prisma.projectMilestone.findMany({ where: { projectId: req.params.id }, orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }] });
-    const now = new Date();
-    const enriched = milestones.map(m => ({
-      ...m,
-      isOverdue: m.dueDate && !m.completedAt && new Date(m.dueDate) < now,
-      daysRemaining: m.dueDate && !m.completedAt ? Math.ceil(diffDays(now, m.dueDate)) : null,
-    }));
-    res.json(enriched);
+    res.json(withDueState(milestones));
   } catch (err) { next(err); }
 });
 
@@ -528,13 +588,17 @@ router.get('/:id/resources', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const resources = await prisma.projectResource.findMany({ where: { projectId: req.params.id } });
+    // Who each member is: the Team tab had only their role to show.
+    const users = new Map((await prisma.user.findMany({
+      where: { id: { in: resources.map(r => r.userId) } }, select: { id: true, firstName: true, lastName: true },
+    })).map(u => [u.id, u]));
     const enriched = [];
     for (const r of resources) {
       const [assigned, logged] = await Promise.all([
         prisma.projectTask.count({ where: { projectId: req.params.id, assignedToId: r.userId, deletedAt: null, status: { notIn: ['Completed', 'Cancelled'] } } }),
         prisma.timeEntry.aggregate({ where: { projectId: req.params.id, userId: r.userId, deletedAt: null }, _sum: { hours: true } }),
       ]);
-      enriched.push({ ...r, openTasks: assigned, hoursLogged: logged._sum.hours || 0 });
+      enriched.push({ ...r, user: users.get(r.userId) || null, openTasks: assigned, hoursLogged: logged._sum.hours || 0 });
     }
     res.json(enriched);
   } catch (err) { next(err); }
@@ -722,7 +786,9 @@ router.post('/templates', authenticate, requirePermission('projects', 'edit'), a
           durationDays: t.durationDays ?? 1, estimatedHours: t.estimatedHours != null ? +t.estimatedHours : null,
           defaultRole: t.defaultRole, sortOrder: t.sortOrder ?? i,
           templateKey: t.templateKey || `t${i}`, parentKey: t.parentKey || null,
-          dependsOnKeys: t.dependsOnKeys || null,
+          // A Json column: Prisma refuses a plain null, so every task without
+          // dependencies failed the save. Left out, the column stays empty.
+          dependsOnKeys: t.dependsOnKeys || undefined,
         },
       });
     }
@@ -762,7 +828,8 @@ router.post('/:id/save-as-template', authenticate, requirePermission('projects',
           sortOrder: t.sortOrder ?? i,
           templateKey: keyFor.get(t.id),
           parentKey: t.parentTaskId ? keyFor.get(t.parentTaskId) : null,
-          dependsOnKeys: predKeys.length ? predKeys : null,
+          // Not a plain null, which a Json column refuses (see POST /templates).
+          dependsOnKeys: predKeys.length ? predKeys : undefined,
         },
       });
     }
@@ -784,6 +851,9 @@ router.post('/from-template/:templateId', authenticate, requirePermission('proje
 
     const { name, startDate, accountId, dealId, managerId, budget } = req.body;
     const start = startDate ? new Date(startDate) : new Date();
+    // As for POST /: only an account and deal the caller can see.
+    const linkProblem = await linkRefusal(req, 'project', { accountId, dealId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     const project = await prisma.project.create({
       data: {
@@ -874,8 +944,11 @@ router.get('/analytics/portfolio', authenticate, async (req, res, next) => {
     // The projects the caller can see; this totalled every budget.
     const projects = await prisma.project.findMany({
       where: await reachableWhere(req, 'projects', 'project'),
-      select: { id: true, name: true, status: true, health: true, percentComplete: true, budget: true, actualCost: true, startDate: true, endDate: true },
+      select: { id: true, name: true, status: true, health: true, percentComplete: true, budget: true, actualCost: true, currency: true, startDate: true, endDate: true },
     });
+    // Money totals in the default currency: each project's budget and cost
+    // are in its own, and were added up as they stood.
+    const ctx = await currencyContext(prisma);
     const active = projects.filter(p => ['Planning', 'Active'].includes(p.status));
     const now = new Date();
     const atRisk = active.filter(p => p.health !== 'Green');
@@ -888,11 +961,13 @@ router.get('/analytics/portfolio', authenticate, async (req, res, next) => {
     res.json({
       totalProjects: projects.length, activeProjects: active.length,
       atRisk: atRisk.length, overdue: overdue.length, overBudget: overBudget.length,
-      totalBudget: +projects.reduce((s, p) => s + (p.budget || 0), 0).toFixed(2),
-      totalActualCost: +projects.reduce((s, p) => s + (p.actualCost || 0), 0).toFixed(2),
+      totalBudget: +sumInBase(projects, ctx, 'budget').toFixed(2),
+      totalActualCost: +sumInBase(projects, ctx, 'actualCost').toFixed(2),
+      currency: ctx.base,
       avgCompletion: active.length ? Math.round(active.reduce((s, p) => s + p.percentComplete, 0) / active.length) : 0,
       byStatus, byHealth,
-      watchList: [...atRisk, ...overdue].slice(0, 10),
+      // Once each: an overdue project is usually at risk too, and was listed twice.
+      watchList: [...new Set([...atRisk, ...overdue])].slice(0, 10),
     });
   } catch (err) { next(err); }
 });

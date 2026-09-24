@@ -121,6 +121,30 @@ function findEvent(prisma, id, scope, args = {}) {
 }
 
 /**
+ * One occurrence of a series changed on its own: the exception row already
+ * standing for that slot is updated, or one is made from the series. PUT
+ * scope=occurrence and moving a single occurrence both write through this.
+ */
+async function saveOccurrence(prisma, master, originalStart, fields) {
+  const existing = await prisma.calendarEvent.findFirst({ where: { parentEventId: master.id, originalStart } });
+  if (existing) return { event: await prisma.calendarEvent.update({ where: { id: existing.id }, data: fields }), created: false };
+  const durationMs = new Date(master.endAt) - new Date(master.startAt);
+  const { id, createdAt, updatedAt, externalUid, ...base } = master;
+  const event = await prisma.calendarEvent.create({
+    data: {
+      ...base,
+      startAt: fields.startAt || originalStart,
+      endAt: fields.endAt || new Date(originalStart.getTime() + durationMs),
+      ...fields,
+      isRecurring: false, rrule: null, recurrenceEnd: null,
+      parentEventId: master.id, originalStart, isException: true,
+      externalUid: crypto.randomUUID(),
+    },
+  });
+  return { event, created: true };
+}
+
+/**
  * Resource bookings as the user may see them. A booking for an event outside
  * visibleEventWhere shows only when the resource is busy: it named the event
  * and its title, and its purpose repeats that title (POST /events books with
@@ -212,7 +236,12 @@ router.get('/view/:mode', authenticate, async (req, res, next) => {
     }
 
     // Everyone's calendar is an admin's view; all=true showed it to anyone.
-    const where = req.query.all === 'true' && isAdmin(req.user) ? visibleEventWhere(req.user) : { ownerId: req.user.id };
+    // Otherwise the user's own events and the invitations they have not
+    // declined: this showed only events they own, so a meeting they were
+    // invited to never reached their calendar, even once accepted.
+    const where = req.query.all === 'true' && isAdmin(req.user)
+      ? visibleEventWhere(req.user)
+      : { OR: [{ ownerId: req.user.id }, { invitees: { some: { userId: req.user.id, responseStatus: { not: 'Declined' } } } }] };
     const events = await expandEventsInRange(prisma, where, rangeStart, rangeEnd, { include: { invitees: true } });
 
     // Bucket by ISO date for direct grid rendering
@@ -377,29 +406,15 @@ router.put('/events/:id', authenticate, requirePermission('activities', 'edit'),
     // Single occurrence of a series: materialize an exception record
     if (scope === 'occurrence' && occurrenceIso && master.isRecurring) {
       const originalStart = new Date(occurrenceIso);
-      const durationMs = new Date(master.endAt) - new Date(master.startAt);
-      const existing = await prisma.calendarEvent.findFirst({ where: { parentEventId: master.id, originalStart } });
-
-      if (existing) {
-        const updated = await prisma.calendarEvent.update({ where: { id: existing.id }, data: fields });
-        return res.json({ ...updated, scope: 'occurrence' });
-      }
-
-      const { id, createdAt, updatedAt, externalUid, ...base } = master;
-      const exception = await prisma.calendarEvent.create({
-        data: {
-          ...base,
-          startAt: fields.startAt || originalStart,
-          endAt: fields.endAt || new Date(originalStart.getTime() + durationMs),
-          ...fields,
-          isRecurring: false, rrule: null, recurrenceEnd: null,
-          parentEventId: master.id, originalStart, isException: true,
-          externalUid: crypto.randomUUID(),
-        },
-      });
-      await req.audit({ action: 'update', module: 'calendar', recordId: master.id, details: `Occurrence modified: ${originalStart.toISOString()}` });
-      return res.json({ ...exception, scope: 'occurrence' });
+      if (isNaN(originalStart)) return res.status(400).json({ error: 'Invalid occurrence' });
+      const { event, created } = await saveOccurrence(prisma, master, originalStart, fields);
+      if (created) await req.audit({ action: 'update', module: 'calendar', recordId: master.id, details: `Occurrence modified: ${originalStart.toISOString()}` });
+      return res.json({ ...event, scope: 'occurrence' });
     }
+
+    // A series is one that has a rule. Given alone, a new rule never expanded,
+    // and a cleared one left a "series" whose first date showed in every range.
+    if ('rrule' in fields && !master.isException) fields.isRecurring = !!fields.rrule;
 
     // This and following: cap the original series, start a new one
     if (scope === 'following' && occurrenceIso && master.isRecurring) {
@@ -473,15 +488,23 @@ router.delete('/events/:id', authenticate, requirePermission('activities', 'edit
 router.patch('/events/:id/move', authenticate, requirePermission('activities', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const [baseId] = req.params.id.split('::');
+    const [baseId, occurrenceIso] = req.params.id.split('::');
     const { startAt, endAt } = req.body;
     if (!startAt || !endAt) return res.status(400).json({ error: 'startAt and endAt required' });
     const s = new Date(startAt), e = new Date(endAt);
+    if (isNaN(s) || isNaN(e)) return res.status(400).json({ error: 'Invalid date format' });
     if (e <= s) return res.status(400).json({ error: 'endAt must be after startAt' });
 
     // This moved anyone's event with a session alone.
-    if (!(await findEvent(prisma, baseId, editableEventWhere(req.user), { select: { id: true } }))) {
-      return res.status(404).json({ error: 'Event not found' });
+    const master = await findEvent(prisma, baseId, editableEventWhere(req.user));
+    if (!master) return res.status(404).json({ error: 'Event not found' });
+
+    // Dropping one occurrence of a series somewhere else moves that occurrence
+    // alone, as an exception (saveOccurrence). It moved the whole series.
+    if (occurrenceIso && master.isRecurring) {
+      const originalStart = new Date(occurrenceIso);
+      if (isNaN(originalStart)) return res.status(400).json({ error: 'Invalid occurrence' });
+      return res.json((await saveOccurrence(prisma, master, originalStart, { startAt: s, endAt: e })).event);
     }
     const updated = await prisma.calendarEvent.update({ where: { id: baseId }, data: { startAt: s, endAt: e } });
     const rems = await prisma.reminder.findMany({ where: { eventId: baseId, status: 'Pending' } });
@@ -584,8 +607,11 @@ router.delete('/events/:eventId/invitees/:inviteeId', authenticate, requirePermi
 router.get('/invitations/pending', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const now = new Date();
+    // A series still running counts, though its first occurrence has passed.
+    const upcoming = { OR: [{ startAt: { gte: now } }, { isRecurring: true, OR: [{ recurrenceEnd: null }, { recurrenceEnd: { gte: now } }] }] };
     const invitations = await prisma.eventInvitee.findMany({
-      where: { userId: req.user.id, responseStatus: 'NeedsAction', event: { deletedAt: null, startAt: { gte: new Date() } } },
+      where: { userId: req.user.id, responseStatus: 'NeedsAction', event: { deletedAt: null, ...upcoming } },
       include: { event: true },
       orderBy: { createdAt: 'desc' },
       take: 50,
@@ -979,8 +1005,10 @@ router.post('/feeds', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { name, eventTypes, includeDeclined } = req.body;
     const token = crypto.randomBytes(24).toString('hex');
+    // eventTypes is a Json column, which Prisma refuses a plain null for, so a
+    // feed created without it (the usual case) failed; left out, it stays empty.
     const feed = await prisma.calendarFeed.create({
-      data: { userId: req.user.id, token, name: name || 'My Calendar', eventTypes: eventTypes || null, includeDeclined: !!includeDeclined },
+      data: { userId: req.user.id, token, name: name || 'My Calendar', eventTypes: eventTypes || undefined, includeDeclined: !!includeDeclined },
     });
     await req.audit({ action: 'create', module: 'calendar', recordId: feed.id, details: 'Calendar feed created' });
     res.status(201).json({ ...feed, url: `${req.protocol}://${req.get('host')}/api/calendar/feed/${token}.ics` });
@@ -1007,14 +1035,19 @@ router.get('/feed/:token.ics', async (req, res, next) => {
 
     const rangeStart = new Date(Date.now() - 90 * 86400000);
     const rangeEnd = new Date(Date.now() + 365 * 86400000);
-    const where = { ownerId: feed.userId };
+    // The user's calendar as /view/:mode shows it: their own events and the
+    // invitations they have not declined, declined ones too if the feed asks.
+    // This published only the events they own, and includeDeclined did nothing.
+    const invited = feed.includeDeclined ? { userId: feed.userId } : { userId: feed.userId, responseStatus: { not: 'Declined' } };
+    const where = { OR: [{ ownerId: feed.userId }, { invitees: { some: invited } }] };
     const types = Array.isArray(feed.eventTypes) ? feed.eventTypes : null;
     if (types?.length) where.eventType = { in: types };
 
     // Publish masters with their RRULE so clients expand natively
     const events = await prisma.calendarEvent.findMany({
-      where: { ...where, deletedAt: null, isException: false, OR: [{ isRecurring: true }, { startAt: { lte: rangeEnd }, endAt: { gte: rangeStart } }] },
-      include: { invitees: true, reminders: true },
+      where: { AND: [where, { deletedAt: null, isException: false, OR: [{ isRecurring: true }, { startAt: { lte: rangeEnd }, endAt: { gte: rangeStart } }] }] },
+      // The feed user's own alarms; every attendee's reminders came along.
+      include: { invitees: true, reminders: { where: { userId: feed.userId } } },
       orderBy: { startAt: 'asc' },
       take: 2000,
     });
@@ -1104,7 +1137,9 @@ router.get('/analytics/summary', authenticate, async (req, res, next) => {
     }
 
     const withOthers = events.filter(e => (e.invitees || []).length > 1);
-    const declined = await prisma.eventInvitee.count({ where: { userId: req.user.id, responseStatus: 'Declined', event: { startAt: { gte: rangeStart } } } });
+    // In the same period, and live events only: this counted declines of
+    // future and deleted events too.
+    const declined = await prisma.eventInvitee.count({ where: { userId: req.user.id, responseStatus: 'Declined', event: { deletedAt: null, startAt: { gte: rangeStart, lte: rangeEnd } } } });
 
     res.json({
       periodDays: days,
