@@ -130,8 +130,11 @@ module.exports = router;
 router.get('/deferred/aging', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const schedules = await prisma.revenueSchedule.findMany({ where: { status: { not: 'Fully Recognized' } }, include: { entries: { where: { recognizedAt: null } } } });
-    const aging = { current: 0, thirtyDays: 0, sixtyDays: 0, ninetyPlus: 0 };
+    // Nothing writes 'Fully Recognized' (a schedule is Active, Completed or
+    // Cancelled), so a cancelled schedule's periods counted as deferred.
+    const schedules = await prisma.revenueSchedule.findMany({ where: { status: { not: 'Cancelled' } }, include: { entries: { where: { recognizedAt: null } } } });
+    // 60-89 days has its own bucket; it was counted as ninety-plus.
+    const aging = { current: 0, thirtyDays: 0, sixtyDays: 0, ninetyDays: 0, ninetyPlus: 0 };
     schedules.forEach(s => {
       s.entries.forEach(e => {
         const days = Math.floor((Date.now() - new Date(e.period)) / 86400000);
@@ -139,6 +142,7 @@ router.get('/deferred/aging', authenticate, requirePermission('invoices', 'read'
         if (days < 0) aging.current += amt;
         else if (days < 30) aging.thirtyDays += amt;
         else if (days < 60) aging.sixtyDays += amt;
+        else if (days < 90) aging.ninetyDays += amt;
         else aging.ninetyPlus += amt;
       });
     });
@@ -150,12 +154,14 @@ router.get('/deferred/aging', authenticate, requirePermission('invoices', 'read'
 router.get('/by-product', authenticate, requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const schedules = await queryWithIncludes(prisma, 'revenueSchedule', 'findMany', { include: { contract: { select: { name: true } }, entries: true } }).catch(() => []);
+    // An entry has a status, not a `recognized` flag, so everything counted
+    // as deferred; cancelled schedules counted too, and a failure answered [].
+    const schedules = await queryWithIncludes(prisma, 'revenueSchedule', 'findMany', { where: { status: { not: 'Cancelled' } }, include: { contract: { select: { name: true } }, entries: true } });
     const byProduct = {};
     schedules.forEach(s => {
       const key = s.contractId;
       if (!byProduct[key]) byProduct[key] = { contractId: key, name: s.contract?.name, recognized: 0, deferred: 0 };
-      s.entries.forEach(e => { if (e.recognized) byProduct[key].recognized += e.amount || 0; else byProduct[key].deferred += e.amount || 0; });
+      s.entries.forEach(e => { if (e.status === 'Recognized') byProduct[key].recognized += e.amount || 0; else byProduct[key].deferred += e.amount || 0; });
     });
     res.json(Object.values(byProduct));
   } catch (err) { next(err); }

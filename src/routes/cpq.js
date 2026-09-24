@@ -225,7 +225,12 @@ router.post('/discount-schedules', requirePermission('products', 'edit'), async 
 router.delete('/discount-schedules/:id', requirePermission('products', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.discountSchedule.delete({ where: { id: req.params.id } });
+    // Its links to products do not cascade (tiers do), so a schedule on any
+    // product failed to delete on the foreign key. The links go with it.
+    await prisma.$transaction([
+      prisma.productDiscountSchedule.deleteMany({ where: { scheduleId: req.params.id } }),
+      prisma.discountSchedule.delete({ where: { id: req.params.id } }),
+    ]);
     res.json({ success: true });
   } catch (err) { next(err); }
 });

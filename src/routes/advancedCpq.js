@@ -58,7 +58,8 @@ router.post('/guided-selling/recommend', async (req, res, next) => {
       }
     }
     const unique = [...new Set(products)];
-    const productRecords = unique.length > 0 ? await req.app.locals.prisma.product.findMany({ where: { id: { in: unique } } }) : [];
+    // Never a deleted product a rule still names.
+    const productRecords = unique.length > 0 ? await req.app.locals.prisma.product.findMany({ where: { id: { in: unique }, deletedAt: null } }) : [];
     res.json({ recommended: productRecords });
   } catch (err) { next(err); }
 });
@@ -92,7 +93,9 @@ router.post('/discount-schedules/calculate', async (req, res, next) => {
 router.post('/validate-quote', async (req, res, next) => {
   try {
     const { lineItems } = req.body;
-    const productRules = await req.app.locals.prisma.productRule.findMany({ where: { active: true, type: 'Validation' } });
+    // Alert rules as well: only Validation rules were loaded, so the warning
+    // branch below never ran.
+    const productRules = await req.app.locals.prisma.productRule.findMany({ where: { active: true, type: { in: ['Validation', 'Alert'] } } });
     const errors = []; const warnings = [];
     for (const rule of productRules) {
       const conditions = rule.conditions || [];
@@ -140,11 +143,9 @@ router.post('/simulate', authenticate, async (req, res, next) => {
 router.get('/approval-matrix', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rules = await prisma.cpqApprovalRule.findMany({ where: { active: true }, orderBy: { priority: 'asc' } }).catch(() => [
-      { threshold: 10000, approver: 'Sales Manager', autoApprove: false },
-      { threshold: 50000, approver: 'VP Sales', autoApprove: false },
-      { threshold: 100000, approver: 'CRO', autoApprove: false },
-    ]);
+    // A failed query answered a made-up matrix (Sales Manager, VP Sales, CRO)
+    // as if it were configured; it is an error now.
+    const rules = await prisma.cpqApprovalRule.findMany({ where: { active: true }, orderBy: { priority: 'asc' } });
     res.json(rules);
   } catch (err) { next(err); }
 });

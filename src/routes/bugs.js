@@ -52,7 +52,9 @@ router.get('/', authenticate, requirePermission('cases', 'read'), async (req, re
     ];
     if (status) where.status = status;
     if (open === 'true') where.status = { in: OPEN_STATUSES };
-    if (open === 'false') where.status = { in: ['Closed', 'Rejected', 'Duplicate'] };
+    // Everything not open. Listing Closed, Rejected and Duplicate left a
+    // Verified or Deferred bug on neither the open nor the closed tab.
+    if (open === 'false') where.status = { notIn: OPEN_STATUSES };
     if (severity) where.severity = severity;
     if (priority) where.priority = priority;
     if (type) where.type = type;
@@ -60,13 +62,17 @@ router.get('/', authenticate, requirePermission('cases', 'read'), async (req, re
     if (releaseId) where.fixedInReleaseId = releaseId;
     if (component) where.component = component;
 
+    // Pages step by the size actually taken: a limit over 200 skipped by the
+    // limit but took 200, and a non-number limit or page failed the query.
+    const take = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const pageNo = Math.max(parseInt(page, 10) || 1, 1);
     const [data, total] = await Promise.all([
       // A sort names one of the bug's own columns; a relation name here sorted
       // by, and so probed, the related rows.
-      prisma.bug.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: scalarOrderBy('bug', sortBy, sortDir) || { createdAt: 'desc' } }),
+      prisma.bug.findMany({ where, skip: (pageNo - 1) * take, take, orderBy: scalarOrderBy('bug', sortBy, sortDir) || { createdAt: 'desc' } }),
       prisma.bug.count({ where }),
     ]);
-    res.json({ data, total, page: +page, limit: +limit });
+    res.json({ data, total, page: pageNo, limit: take });
   } catch (err) { next(err); }
 });
 

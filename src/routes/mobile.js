@@ -48,15 +48,18 @@ router.post('/push', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Mobile notifications feed
+// Mobile notifications feed. `limit` was ignored (always 50), and unread
+// counted every row: the column is `read`, not `readAt`. `body` is the
+// message, which the bell shows under the title.
 router.get('/notifications', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const notifications = await prisma.notification.findMany({
-      where: { userId: req.user.id },
-      orderBy: { createdAt: 'desc' }, take: 50,
-    });
-    res.json({ data: notifications, unread: notifications.filter(n => !n.readAt).length });
+    const take = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const [notifications, unread] = await Promise.all([
+      prisma.notification.findMany({ where: { userId: req.user.id }, orderBy: { createdAt: 'desc' }, take }),
+      prisma.notification.count({ where: { userId: req.user.id, read: false } }),
+    ]);
+    res.json({ data: notifications.map(n => ({ ...n, body: n.message })), unread });
   } catch (err) { next(err); }
 });
 
@@ -65,11 +68,12 @@ router.get('/feed', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { limit = 20, before } = req.query;
-    // The column is assignedId; assignedToId failed every request.
-    const where = { OR: [{ ownerId: req.user.id }, { assignedId: req.user.id }] };
+    // The column is assignedId; assignedToId failed every request. Deleted
+    // activities stay out.
+    const where = { OR: [{ ownerId: req.user.id }, { assignedId: req.user.id }], deletedAt: null };
     if (before) where.createdAt = { lt: new Date(before) };
     const activities = await prisma.activity.findMany({
-      where, orderBy: { createdAt: 'desc' }, take: +limit,
+      where, orderBy: { createdAt: 'desc' }, take: Math.min(parseInt(limit, 10) || 20, 200),
       select: { id: true, type: true, subject: true, status: true, createdAt: true, dueDate: true },
     });
     res.json({ data: activities });
@@ -166,6 +170,11 @@ router.post('/quick-log', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { type, subject, contactId, dealId, duration, notes } = req.body;
     if (!type || !subject) return res.status(400).json({ error: 'type and subject required' });
+    // As a synced create: activities edit, and only on a contact or deal the
+    // caller can see. This logged against any id, with no permission at all.
+    if (!permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for activities' });
+    const refusal = await linkRefusal(req, 'activity', { contactId, dealId });
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     const activity = await prisma.activity.create({
       data: { type, subject, description: notes, duration: +duration || null, status: 'Completed', ownerId: req.user.id, ...(contactId && { contactId }), ...(dealId && { dealId }) },
     });
@@ -186,8 +195,11 @@ router.get('/devices', authenticate, async (req, res, next) => {
 router.delete('/devices/:deviceId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.mobileDevice.deleteMany({ where: { id: req.params.deviceId, userId: req.user.id } });
-    res.json({ removed: true });
+    // By the device's own id, which is what the app knows, or the row id.
+    const { count } = await prisma.mobileDevice.deleteMany({
+      where: { userId: req.user.id, OR: [{ id: req.params.deviceId }, { deviceId: req.params.deviceId }] },
+    });
+    res.json({ removed: count > 0 });
   } catch (err) { next(err); }
 });
 
