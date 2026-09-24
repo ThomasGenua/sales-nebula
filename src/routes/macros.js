@@ -65,7 +65,8 @@ router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'),
 router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const macro = await prisma.macro.findUnique({ where: { id: req.params.id } });
+    // A live, active macro. A deleted one still ran if it was active.
+    const macro = await prisma.macro.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!macro || !macro.active) return res.status(404).json({ error: 'Macro not found or inactive' });
     const { recordId } = req.body;
     if (!recordId) return res.status(400).json({ error: 'recordId required' });
@@ -108,8 +109,10 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
 router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const macro = await prisma.macro.findUnique({ where: { id: req.params.id } });
-    if (!macro) return res.status(404).json({ error: 'Macro not found' });
+    // A live, active macro, as for a single run. This ran deleted and
+    // inactive ones.
+    const macro = await prisma.macro.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!macro || !macro.active) return res.status(404).json({ error: 'Macro not found or inactive' });
     const { recordIds } = req.body;
     if (!Array.isArray(recordIds) || !recordIds.length) return res.status(400).json({ error: 'recordIds required' });
     const delegate = MACRO_MODELS[macro.module];

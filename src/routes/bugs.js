@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 
@@ -109,6 +109,10 @@ router.post('/', authenticate, requirePermission('cases', 'edit'), auditMiddlewa
     if (severity && !SEVERITIES.includes(severity)) return res.status(400).json({ error: `severity must be one of: ${SEVERITIES.join(', ')}` });
     if (priority && !PRIORITIES.includes(priority)) return res.status(400).json({ error: `priority must be one of: ${PRIORITIES.join(', ')}` });
     if (type && !TYPES.includes(type)) return res.status(400).json({ error: `type must be one of: ${TYPES.join(', ')}` });
+    // The case it is reported from must be a live one the caller can see
+    // (cases read, and row security). Any id was taken and recorded.
+    const linkProblem = await linkRefusal(req, 'bug', { caseId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     const bug = await prisma.bug.create({
       data: {
@@ -131,12 +135,9 @@ router.post('/', authenticate, requirePermission('cases', 'edit'), auditMiddlewa
       await prisma.bugWatcher.create({ data: { bugId: bug.id, userId } }).catch(() => {});
     }
 
-    // Note the linkage on the originating case
+    // Note the linkage on the bug. An update of the case stood here too; it
+    // set nothing (`set: undefined` is no value), on any case id.
     if (caseId) {
-      await prisma.case.update({
-        where: { id: caseId },
-        data: { description: { set: undefined } },
-      }).catch(() => {});
       await prisma.bugComment.create({
         data: { bugId: bug.id, userId: req.user.id, body: `Reported from case ${caseId}`, isInternal: true },
       }).catch(() => {});
@@ -317,7 +318,13 @@ router.put('/releases/:id', authenticate, requirePermission('admin', 'edit'), as
     // The release's own columns: the rest of the body went to Prisma whole.
     const data = columnsFrom('release', req.body);
     if (data.releaseDate) data.releaseDate = new Date(data.releaseDate);
-    if (data.status === 'Released' && !data.actualReleaseDate) data.actualReleaseDate = new Date();
+    // Release has no actualReleaseDate, so marking one Released always failed.
+    // releaseDate is the date its notes give; it is stamped when the release
+    // becomes Released, unless the request gives one.
+    if (data.status === 'Released' && !data.releaseDate) {
+      const current = await prisma.release.findUnique({ where: { id: req.params.id }, select: { status: true } });
+      if (current?.status !== 'Released') data.releaseDate = new Date();
+    }
     res.json(await prisma.release.update({ where: { id: req.params.id }, data }));
   } catch (err) { next(err); }
 });

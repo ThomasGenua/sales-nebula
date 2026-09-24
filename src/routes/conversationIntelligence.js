@@ -179,19 +179,21 @@ router.post('/dialer/call', authenticate, auditMiddleware, async (req, res, next
     const { contactId, phone } = req.body;
     if (!phone && !contactId) return res.status(400).json({ error: 'phone or contactId required' });
     // A contact it names, whose number it dials and on whom the call is filed,
-    // must be one the caller can see: any contact's number went back to
-    // anyone signed in, by id.
-    if (contactId && !(permits(req, 'contacts', 'read') && await canReach(req, 'contacts', 'contact', contactId))) {
-      return res.status(404).json({ error: 'Contact not found' });
+    // must be a live one the caller can see: any contact's number went back
+    // to anyone signed in, by id, and then a deleted contact's still did, as
+    // canReach does not look at deletedAt.
+    let contact = null;
+    if (contactId) {
+      contact = permits(req, 'contacts', 'read') && await prisma.contact.findFirst({
+        where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }),
+        select: { id: true, phone: true },
+      });
+      if (!contact) return res.status(404).json({ error: 'Contact not found' });
     }
-    let phoneNumber = phone;
-    if (contactId && !phone) {
-      const contact = await prisma.contact.findUnique({ where: { id: contactId }, select: { phone: true } });
-      phoneNumber = contact?.phone;
-    }
+    const phoneNumber = phone || contact?.phone;
     if (!phoneNumber) return res.status(400).json({ error: 'No phone number available' });
     const call = await prisma.callRecording.create({
-      data: { title: `Call to ${phoneNumber}`, userId: req.user.id, contactId, status: 'InProgress' },
+      data: { title: `Call to ${phoneNumber}`, userId: req.user.id, contactId: contact?.id, status: 'InProgress' },
     });
     res.json({ callId: call.id, phone: phoneNumber, status: 'connecting' });
   } catch (err) { next(err); }

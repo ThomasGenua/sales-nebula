@@ -87,11 +87,14 @@ router.post('/:id/convert-to-order', authenticate, requirePermission('orders', '
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
+    // The order is the caller's, as one they create is. It had no owner or
+    // creator, so row security's ownership arm matched nobody.
     const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
       data: {
         name: `Order - ${quote.name}`, status: 'Draft',
         accountId: quote.accountId, dealId: quote.dealId, contactId: quote.contactId,
         totalAmount: quote.totalAmount, quoteId: quote.id,
+        ownerId: req.user.id, createdById: req.user.id,
       },
     });
     await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Accepted', orderId: order.id } });

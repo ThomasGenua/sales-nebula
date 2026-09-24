@@ -56,8 +56,12 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
     const obj = await prisma.customObject.create({
       data: {
         label, apiName: name, pluralLabel: pluralLabel || `${label}s`, description, createdById: req.user.id,
+        // A field's options and position are its picklistValues (a list of
+        // strings) and sortOrder. They were written as options and order,
+        // which CustomObjectField does not have, so an object created with
+        // fields failed.
         ...(fields?.length && {
-          fields: { create: fields.map((f, i) => ({ label: f.label, apiName: f.apiName || f.label.replace(/\s+/g, '_') + '__c', type: f.type || 'Text', required: f.required || false, unique: f.unique || false, defaultValue: f.defaultValue || null, options: f.options || null, order: i + 1 })) },
+          fields: { create: fields.map((f, i) => ({ label: f.label, apiName: f.apiName || f.label.replace(/\s+/g, '_') + '__c', type: f.type || 'Text', required: f.required || false, unique: f.unique || false, defaultValue: f.defaultValue || null, picklistValues: [].concat(f.options ?? []).map(String), sortOrder: i + 1 })) },
         }),
       },
       include: { fields: true },
@@ -106,12 +110,26 @@ router.post('/:id/fields', authenticate, requirePermission('admin', 'full'), asy
   } catch (err) { next(err); }
 });
 
+// Only a field of the object in the path. The field id alone reached any
+// object's fields, whatever object the URL named.
 router.put('/:id/fields/:fieldId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const { data } = pickModelFields('customObjectField', req.body); delete data.id; delete data.objectId; const field = await prisma.customObjectField.update({ where: { id: req.params.fieldId }, data }); res.json(field); } catch (err) { next(err); }
+  try {
+    const prisma = req.app.locals.prisma;
+    const { data } = pickModelFields('customObjectField', req.body); delete data.id; delete data.objectId;
+    const found = await prisma.customObjectField.findFirst({ where: { id: req.params.fieldId, objectId: req.params.id }, select: { id: true } });
+    if (!found) return res.status(404).json({ error: 'Not found' });
+    const field = await prisma.customObjectField.update({ where: { id: found.id }, data });
+    res.json(field);
+  } catch (err) { next(err); }
 });
 
+// Only a field of the object in the path, as for the update above.
 router.delete('/:id/fields/:fieldId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { await req.app.locals.prisma.customObjectField.delete({ where: { id: req.params.fieldId } }); res.json({ success: true }); } catch (err) { next(err); }
+  try {
+    const { count } = await req.app.locals.prisma.customObjectField.deleteMany({ where: { id: req.params.fieldId, objectId: req.params.id } });
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 // Records CRUD (dynamic data stored as JSON)
