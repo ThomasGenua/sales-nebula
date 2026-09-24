@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
-const { columnsFrom, looksLikeId } = require('../utils/modelFields');
+const { columnsFrom, looksLikeId, plainFieldProblem } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -80,6 +80,10 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
     for (const action of macro.actions) {
       try {
         if (action.type === 'updateField') {
+          // A plain field, as workflows and approvals may set: this wrote any
+          // column (deletedAt, the owner) or relation the macro named.
+          const problem = plainFieldProblem(delegate, action.field, action.value);
+          if (problem) throw new Error(problem);
           await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });
           results.push({ action: 'updateField', field: action.field, success: true });
         } else if (action.type === 'addComment') {
@@ -124,6 +128,9 @@ router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res,
         if (!editable.has(String(recordId))) throw new Error('Not found');
         for (const action of macro.actions) {
           if (action.type === 'updateField') {
+            // A plain field only, as for a single run.
+            const problem = plainFieldProblem(delegate, action.field, action.value);
+            if (problem) throw new Error(problem);
             await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });
           }
         }
@@ -146,7 +153,7 @@ router.get('/templates', authenticate, async (req, res, next) => {
     { name: 'Close Case', description: 'Set case status to Closed and add comment', actions: [{ type: 'updateField', field: 'status', value: 'Closed' }, { type: 'addComment', body: 'Case resolved and closed.' }] },
     { name: 'Escalate Case', description: 'Set priority to Critical and reassign', actions: [{ type: 'updateField', field: 'priority', value: 'Critical' }, { type: 'updateField', field: 'status', value: 'Escalated' }] },
     { name: 'Follow Up Reminder', description: 'Create a follow-up task', actions: [{ type: 'createTask', subject: 'Follow up', dueInDays: 3 }] },
-    { name: 'Log Outbound Call', description: 'Create call activity', actions: [{ type: 'logActivity', type: 'Call', direction: 'Outbound' }] },
+    { name: 'Log Outbound Call', description: 'Create call activity', actions: [{ type: 'logActivity', activityType: 'Call', direction: 'Outbound' }] },
     { name: 'Send Thank You', description: 'Send thank you email', actions: [{ type: 'sendEmail', template: 'thank_you' }] },
   ];
   res.json(templates);
