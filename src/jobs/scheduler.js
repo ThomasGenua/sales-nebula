@@ -84,6 +84,29 @@ async function withRetry(jobName, fn, maxRetries = 3) {
 /** A scheduled rule sweeps its whole module; do not let one run the table. */
 const SCHEDULED_WORKFLOW_LIMIT = 500;
 
+/**
+ * Whether a reminder's user may still see its event, by the rule of
+ * visibleEventWhere in routes/calendar: its owner or an invitee (an edited
+ * occurrence through its series), or an admin for an event not marked
+ * private. Taken off the event, or with it deleted, they were still sent its
+ * title, which is also a reminder's default message.
+ */
+async function eventStillVisible(reminder) {
+  const { isAdmin } = require('../middleware/rowSecurity');
+  const user = await prisma.user.findUnique({ where: { id: reminder.userId }, include: { role: true } });
+  if (!user?.active) return false;
+  const participant = {
+    OR: [
+      { ownerId: user.id },
+      { invitees: { some: { userId: user.id } } },
+      { parentEvent: { is: { invitees: { some: { userId: user.id } } } } },
+    ],
+  };
+  const scope = isAdmin(user) ? { OR: [participant, { visibility: { notIn: ['Private', 'Confidential'] } }] } : participant;
+  const event = await prisma.calendarEvent.findFirst({ where: { AND: [{ id: reminder.eventId, deletedAt: null }, scope] }, select: { id: true } });
+  return !!event;
+}
+
 function modelHasDeletedAt(modelName) {
   const { modelHasField } = require('../utils/modelFields');
   return modelHasField(modelName, 'deletedAt');
@@ -110,10 +133,17 @@ const handlers = {
       take: 200,
     });
 
-    let delivered = 0, failed = 0;
+    let delivered = 0, failed = 0, dismissed = 0;
 
     for (const reminder of due) {
       try {
+        // Not sent once its user can no longer see the event (eventStillVisible).
+        if (reminder.eventId && !(await eventStillVisible(reminder))) {
+          await prisma.reminder.update({ where: { id: reminder.id }, data: { status: 'Dismissed', dismissedAt: new Date() } });
+          dismissed++;
+          continue;
+        }
+
         // Fall back to whatever the reminder is about, so the notification
         // says something more useful than "Reminder".
         let message = reminder.message;
@@ -168,7 +198,7 @@ const handlers = {
       }
     }
 
-    return { due: due.length, delivered, failed };
+    return { due: due.length, delivered, failed, dismissed };
   },
 
   /**
