@@ -1,8 +1,9 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { crudModelFor } = require('../utils/crud');
 const router = Router();
 router.use(authenticate);
 
@@ -70,6 +71,17 @@ router.post('/route', requirePermission('cases', 'edit'), async (req, res, next)
   try {
     const prisma = req.app.locals.prisma;
     const { type, recordId, module, priority, skills } = req.body;
+    // All three are required columns, so a missing one was a 500. The record
+    // was never looked at: in a record module it must be one the caller can see.
+    if (![type, recordId, module].every(v => typeof v === 'string' && v)) {
+      return res.status(400).json({ error: 'type, recordId and module required' });
+    }
+    const model = crudModelFor(module);
+    if (model) {
+      if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+      const record = await prisma[model].findFirst({ where: await reachableWhere(req, module, model, { id: recordId }), select: { id: true } });
+      if (!record) return res.status(404).json({ error: 'Record not found' });
+    }
     const item = await prisma.omniWorkItem.create({ data: { type, recordId, module, priority: priority || 5, skills: skills || [] } });
     // Auto-route based on channel config, passing over agents whose presence
     // says they are not available: the check a second POST /route handler
@@ -105,7 +117,13 @@ router.post('/queue/:id/complete', requirePermission('cases', 'edit'), async (re
 router.post('/queue/:id/transfer', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     if (!(await assignedToCaller(req, res, 'omniWorkItem', 'assignedTo'))) return;
-    res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: req.body.toUserId, assignedAt: new Date() } }));
+    // toUserId was stored as sent: no one, a disabled account, or a customer's
+    // portal account could be handed the item.
+    const to = req.body.toUserId && await req.app.locals.prisma.user.findFirst({
+      where: { id: String(req.body.toUserId), active: true, isPortalUser: false }, select: { id: true },
+    });
+    if (!to) return res.status(400).json({ error: 'toUserId does not name an active staff user' });
+    res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: to.id, assignedAt: new Date() } }));
   } catch (err) { next(err); }
 });
 

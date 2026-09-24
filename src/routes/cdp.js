@@ -1,10 +1,35 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
-const { canReach, reachableWhere } = require('../middleware/access');
+const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
 const { currencyContext, sumInBase } = require('../utils/currency');
 const { columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
+
+// A profile is its contact's or its lead's. UnifiedProfile keeps their ids as
+// plain columns, with no relation to filter through.
+const PROFILE_SUBJECTS = [
+  { key: 'contactId', module: 'contacts', model: 'contact' },
+  { key: 'leadId', module: 'leads', model: 'lead' },
+];
+
+/**
+ * Of `profiles`, those the caller may see: an admin, all; anyone else, those
+ * whose contact or lead is a live record they can reach, in a module they
+ * may read. Contacts read alone opened every profile, whoever's it was.
+ */
+async function visibleProfiles(req, profiles) {
+  if (isAdmin(req.user)) return profiles;
+  const reached = new Set();
+  for (const { key, module, model } of PROFILE_SUBJECTS) {
+    const ids = [...new Set(profiles.map(p => p[key]).filter(Boolean))];
+    if (!ids.length || !permits(req, module, 'read')) continue;
+    const found = await req.app.locals.prisma[model].findMany({ where: await reachableWhere(req, module, model, { id: { in: ids } }), select: { id: true } });
+    for (const r of found) reached.add(`${key}:${r.id}`);
+  }
+  return profiles.filter(p => PROFILE_SUBJECTS.some(({ key }) => p[key] && reached.has(`${key}:${p[key]}`)));
+}
 
 // Unified Profiles
 // Profiles carry people's emails, phones and identifiers; these reads (and
@@ -16,23 +41,44 @@ router.get('/profiles', requirePermission('contacts', 'read'), async (req, res, 
     if (email) where.email = email;
     if (segment) where.segments = { has: segment };
     if (minScore) where.score = { gte: parseFloat(minScore) };
-    res.json({ data: await req.app.locals.prisma.unifiedProfile.findMany({ where, take: Math.min(parseInt(limit), 200), orderBy: { score: 'desc' } }) });
+    // Only visible profiles, read a batch at a time until the page is full.
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const data = [];
+    for (let skip = 0; data.length < take; skip += 500) {
+      const batch = await req.app.locals.prisma.unifiedProfile.findMany({ where, skip, take: 500, orderBy: [{ score: 'desc' }, { id: 'asc' }] });
+      data.push(...(await visibleProfiles(req, batch)));
+      if (batch.length < 500) break;
+    }
+    res.json({ data: data.slice(0, take) });
   } catch (err) { next(err); }
 });
 router.get('/profiles/:id', requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const profile = await req.app.locals.prisma.unifiedProfile.findUnique({ where: { id: req.params.id } });
-    if (!profile) return res.status(404).json({ error: 'Not found' });
+    if (!profile || !(await visibleProfiles(req, [profile])).length) return res.status(404).json({ error: 'Not found' });
     res.json(profile);
   } catch (err) { next(err); }
 });
 // Finds or creates a profile, so it takes the gate merge uses for profile writes.
+// It did so for any contact or lead id, a lead's with no leads permission, and
+// a match by email was anyone's profile. The contact and lead must be ones the
+// caller can see, and a match one of the profiles they may see.
 router.post('/profiles/resolve', requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { email, phone, contactId, leadId } = req.body;
-    let profile = await prisma.unifiedProfile.findFirst({ where: { OR: [email ? { email } : null, contactId ? { contactId } : null, leadId ? { leadId } : null].filter(Boolean) } });
+    const keys = [email ? { email } : null, contactId ? { contactId } : null, leadId ? { leadId } : null].filter(Boolean);
+    if (!keys.length) return res.status(400).json({ error: 'email, contactId or leadId required' });
+    if (leadId && !permits(req, 'leads', 'read')) return res.status(403).json({ error: 'Insufficient permissions for leads' });
+    const linkProblem = await linkRefusal(req, 'unifiedProfile', { contactId, leadId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+    let [profile] = await visibleProfiles(req, await prisma.unifiedProfile.findMany({ where: { OR: keys } }));
     if (!profile) {
+      // One with neither a contact nor a lead is an admin's alone to see, so
+      // anyone else would make one they could not open, and another each call.
+      if (!contactId && !leadId && !isAdmin(req.user)) {
+        return res.status(400).json({ error: 'No profile you can see matches; name its contactId or leadId to create one' });
+      }
       profile = await prisma.unifiedProfile.create({ data: { email, phone, contactId, leadId, identifiers: [{ source: 'crm', type: 'email', value: email }] } });
     }
     res.json(profile);
@@ -46,7 +92,9 @@ router.post('/profiles/:id/merge', requirePermission('contacts', 'edit'), async 
       prisma.unifiedProfile.findUnique({ where: { id: req.params.id } }),
       prisma.unifiedProfile.findUnique({ where: { id: sourceId } }),
     ]);
-    if (!target || !source) return res.status(404).json({ error: 'Profile not found' });
+    // Both must be profiles the caller may see: any profile's identifiers were
+    // folded into one they could read, and the profile deleted.
+    if (!target || !source || (await visibleProfiles(req, [target, source])).length < 2) return res.status(404).json({ error: 'Profile not found' });
     const merged = await prisma.unifiedProfile.update({
       where: { id: target.id },
       data: {
@@ -62,10 +110,18 @@ router.post('/profiles/:id/merge', requirePermission('contacts', 'edit'), async 
 });
 
 // Segments
-router.post('/segments/calculate', requirePermission('contacts', 'read'), async (req, res, next) => {
+// It writes the segment onto profiles, so contacts edit, not read; and a
+// missing name or criteria, or a criterion of the wrong type, was a 500.
+router.post('/segments/calculate', requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { name, criteria } = req.body;
+    if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name required' });
+    if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) return res.status(400).json({ error: 'criteria must be an object' });
+    if ((criteria.minScore != null && !Number.isFinite(criteria.minScore))
+        || (criteria.minTouchpoints != null && !Number.isInteger(criteria.minTouchpoints))) {
+      return res.status(400).json({ error: 'criteria.minScore must be a number and criteria.minTouchpoints a whole number' });
+    }
     const where = {};
     if (criteria.minScore) where.score = { gte: criteria.minScore };
     if (criteria.minTouchpoints) where.touchpoints = { gte: criteria.minTouchpoints };
@@ -94,7 +150,9 @@ router.post('/streams', requirePermission('admin', 'edit'), async (req, res, nex
 router.post('/streams/:id/ingest', requirePermission('contacts', 'edit'), async (req, res, next) => {
   try {
     const stream = await req.app.locals.prisma.dataStream.findUnique({ where: { id: req.params.id } });
-    if (!stream || !stream.active) return res.status(400).json({ error: 'Stream inactive' });
+    // A stream that does not exist was answered as inactive, 400.
+    if (!stream) return res.status(404).json({ error: 'Stream not found' });
+    if (!stream.active) return res.status(400).json({ error: 'Stream inactive' });
     const records = req.body.records || [];
     await req.app.locals.prisma.dataStream.update({ where: { id: stream.id }, data: { lastSyncAt: new Date(), recordCount: { increment: records.length } } });
     res.json({ ingested: records.length });

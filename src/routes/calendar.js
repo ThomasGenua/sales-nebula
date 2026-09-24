@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const crypto = require('crypto');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { editableFields, columnsFrom } = require('../utils/modelFields');
 const {
@@ -136,6 +137,21 @@ async function bookingsSeenBy(req, bookings) {
   }));
 }
 
+/**
+ * Reminders as the user may see them. A reminder brought its event's title,
+ * place and link along, and its message is the title unless the organizer
+ * wrote one (POST /events); both went on showing after the user was taken
+ * off the event. For an event outside visibleEventWhere, or deleted, a
+ * reminder now keeps only its own timing and status.
+ */
+async function remindersSeenBy(req, reminders) {
+  const ids = [...new Set(reminders.map(r => r.eventId).filter(Boolean))];
+  const seen = new Set(ids.length ? (await req.app.locals.prisma.calendarEvent.findMany({
+    where: { AND: [{ id: { in: ids }, deletedAt: null }, visibleEventWhere(req.user)] }, select: { id: true },
+  })).map(e => e.id) : []);
+  return reminders.map(r => (!r.eventId || seen.has(r.eventId) ? r : { ...r, event: null, message: null }));
+}
+
 // ── EVENTS ────────────────────────────────────────────────────────────
 
 // List / expand events in a date range
@@ -252,11 +268,25 @@ router.post('/events', authenticate, requirePermission('activities', 'edit'), au
     if (e <= s) return res.status(400).json({ error: 'endAt must be after startAt' });
     if (rrule && !parseRRule(rrule)) return res.status(400).json({ error: 'Invalid RRULE' });
 
+    // The account, contact, deal, case and lead an event is filed on were
+    // stored as sent, records the caller cannot see included.
+    const linkProblem = await linkRefusal(req, 'calendarEvent', { accountId, contactId, dealId, caseId, leadId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+
+    // Resources are booked as POST /resources/:id/book books one: live and
+    // active, and Pending when it needs approval. Every booking here was
+    // Confirmed, which skipped the approver.
+    if (resourceIds != null && !Array.isArray(resourceIds)) return res.status(400).json({ error: 'resourceIds must be an array' });
+    const rids = [...new Set((resourceIds || []).map(String))];
+    const resources = rids.length ? await prisma.calendarResource.findMany({ where: { id: { in: rids }, deletedAt: null } }) : [];
+    if (resources.length < rids.length) return res.status(404).json({ error: 'Resource not found' });
+    if (resources.some(r => !r.active)) return res.status(400).json({ error: 'Resource is inactive' });
+
     // Resource conflict check before committing
-    if (resourceIds?.length) {
+    if (rids.length) {
       const clash = await prisma.resourceBooking.findFirst({
         where: {
-          resourceId: { in: resourceIds }, status: { in: ['Pending', 'Confirmed'] },
+          resourceId: { in: rids }, status: { in: ['Pending', 'Confirmed'] },
           startAt: { lt: e }, endAt: { gt: s },
         },
         include: { resource: { select: { name: true } } },
@@ -300,9 +330,9 @@ router.post('/events', authenticate, requirePermission('activities', 'edit'), au
       }
     }
 
-    if (resourceIds?.length) {
+    if (resources.length) {
       await prisma.resourceBooking.createMany({
-        data: resourceIds.map(rid => ({ resourceId: rid, eventId: event.id, bookedById: req.user.id, startAt: s, endAt: e, status: 'Confirmed', purpose: title })),
+        data: resources.map(r => ({ resourceId: r.id, eventId: event.id, bookedById: req.user.id, startAt: s, endAt: e, status: r.requiresApproval ? 'Pending' : 'Confirmed', purpose: title })),
       });
     }
 
@@ -339,6 +369,10 @@ router.put('/events/:id', authenticate, requirePermission('activities', 'edit'),
       return res.status(400).json({ error: 'endAt must be after startAt' });
     }
     if (fields.rrule && !parseRRule(fields.rrule)) return res.status(400).json({ error: 'Invalid RRULE' });
+    // As on create: a new account, contact, deal, case or lead link must name
+    // a record the caller can see; these went through unchecked.
+    const linkProblem = await linkRefusal(req, 'calendarEvent', fields, master);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     // Single occurrence of a series: materialize an exception record
     if (scope === 'occurrence' && occurrenceIso && master.isRecurring) {
@@ -655,7 +689,8 @@ router.get('/reminders/due', authenticate, async (req, res, next) => {
       orderBy: { triggerAt: 'asc' },
       take: 50,
     });
-    res.json({ count: due.length, reminders: due });
+    // The event's details only while the user may still see it (remindersSeenBy).
+    res.json({ count: due.length, reminders: await remindersSeenBy(req, due) });
   } catch (err) { next(err); }
 });
 
@@ -668,7 +703,7 @@ router.get('/reminders/upcoming', authenticate, async (req, res, next) => {
       include: { event: { select: { id: true, title: true, startAt: true } } },
       orderBy: { triggerAt: 'asc' },
     });
-    res.json({ windowHours: hours, count: reminders.length, reminders });
+    res.json({ windowHours: hours, count: reminders.length, reminders: await remindersSeenBy(req, reminders) });
   } catch (err) { next(err); }
 });
 
@@ -684,10 +719,15 @@ router.post('/reminders', authenticate, async (req, res, next) => {
       const ev = await findEvent(prisma, eventId, visibleEventWhere(req.user));
       if (!ev) return res.status(404).json({ error: 'Event not found' });
       triggerAt = new Date(new Date(ev.startAt).getTime() - minutesBefore * 60000);
-    } else {
-      const act = await prisma.activity.findFirst({ where: { id: activityId } });
+    }
+    if (activityId) {
+      // Any activity id went, with no activities permission, and its trigger
+      // time gave the due date away. Checked with an event or without, since
+      // both are stored.
+      if (!permits(req, 'activities', 'read')) return res.status(403).json({ error: 'Insufficient permissions for activities' });
+      const act = await prisma.activity.findFirst({ where: await reachableWhere(req, 'activities', 'activity', { id: String(activityId) }) });
       if (!act) return res.status(404).json({ error: 'Activity not found' });
-      triggerAt = new Date(new Date(act.dueDate || act.date).getTime() - minutesBefore * 60000);
+      if (!eventId) triggerAt = new Date(new Date(act.dueDate || act.date).getTime() - minutesBefore * 60000);
     }
 
     const reminder = await prisma.reminder.create({
@@ -703,7 +743,7 @@ router.post('/reminders/:id/dismiss', authenticate, async (req, res, next) => {
     const rem = await prisma.reminder.findFirst({ where: { id: req.params.id, userId: req.user.id } });
     if (!rem) return res.status(404).json({ error: 'Reminder not found' });
     const updated = await prisma.reminder.update({ where: { id: rem.id }, data: { status: 'Dismissed', dismissedAt: new Date() } });
-    res.json(updated);
+    res.json((await remindersSeenBy(req, [updated]))[0]);
   } catch (err) { next(err); }
 });
 
@@ -717,7 +757,7 @@ router.post('/reminders/:id/snooze', authenticate, async (req, res, next) => {
       where: { id: rem.id },
       data: { status: 'Snoozed', snoozedUntil: new Date(Date.now() + minutes * 60000) },
     });
-    res.json(updated);
+    res.json((await remindersSeenBy(req, [updated]))[0]);
   } catch (err) { next(err); }
 });
 
@@ -837,6 +877,12 @@ router.post('/resources/:id/book', authenticate, auditMiddleware, async (req, re
     const resource = await prisma.calendarResource.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!resource) return res.status(404).json({ error: 'Resource not found' });
     if (!resource.active) return res.status(400).json({ error: 'Resource is inactive' });
+    // Any event id was taken, so a booking went on anyone's event. A booking
+    // shows with its event, and moves and is cancelled with it, so the event
+    // must be one the caller may change, not merely one they are invited to.
+    if (eventId && !(await findEvent(prisma, eventId, editableEventWhere(req.user), { select: { id: true } }))) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
 
     const clash = await prisma.resourceBooking.findFirst({
       where: { resourceId: resource.id, status: { in: ['Pending', 'Confirmed'] }, startAt: { lt: e }, endAt: { gt: s } },
@@ -898,7 +944,8 @@ router.put('/working-hours', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { schedule, userId } = req.body;
     if (!Array.isArray(schedule)) return res.status(400).json({ error: 'schedule array required' });
-    const target = userId && req.user.role === 'admin' ? userId : req.user.id;
+    // req.user.role is the Role record, never 'admin', so no admin could set anyone else's.
+    const target = userId && isAdmin(req.user) ? userId : req.user.id;
 
     const saved = [];
     for (const day of schedule) {

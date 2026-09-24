@@ -379,9 +379,16 @@ router.get('/areas', authenticate, async (req, res, next) => {
     if (req.query.type) where.type = req.query.type;
     if (req.query.active !== 'false') where.active = true;
 
+    // An area is a shape and its settings, no record's data, so it stays open
+    // to anyone signed in. Its count took in every module's markers, records
+    // the caller cannot open included; now it is of those GET /markers shows.
     const areas = await prisma.mapArea.findMany({ where, orderBy: [{ priority: 'asc' }, { name: 'asc' }] });
-    const counts = await prisma.mapMarker.groupBy({ by: ['areaId'], _count: true });
-    const byArea = new Map(counts.map(c => [c.areaId, c._count]));
+    const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({
+      where: { module: { in: readableModules(req) }, areaId: { in: areas.map(a => a.id) } },
+      select: { module: true, recordId: true, areaId: true }, take: 20000,
+    }));
+    const byArea = new Map();
+    for (const m of markers) byArea.set(m.areaId, (byArea.get(m.areaId) || 0) + 1);
 
     res.json(areas.map(a => ({ ...a, markerCount: byArea.get(a.id) || 0 })));
   } catch (err) { next(err); }
@@ -545,7 +552,8 @@ router.delete('/layers/:id', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const layer = await prisma.mapLayer.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!layer) return res.status(404).json({ error: 'Layer not found' });
-    if (layer.ownerId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Not your layer' });
+    // req.user.role is the Role record, never 'admin', so no admin could delete another's layer.
+    if (layer.ownerId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Not your layer' });
     await prisma.mapLayer.update({ where: { id: layer.id }, data: { deletedAt: new Date() } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
@@ -612,7 +620,9 @@ router.get('/analytics/coverage', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const areas = await prisma.mapArea.findMany({ where: { deletedAt: null, active: true } });
-    const markers = await prisma.mapMarker.findMany({ take: 20000 });
+    // The markers GET /markers would show the caller; this counted every
+    // module's for anyone signed in, records they cannot open included.
+    const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where: { module: { in: readableModules(req) } }, take: 20000 }));
 
     const byArea = areas.map(a => {
       const inside = markers.filter(m => m.areaId === a.id);
