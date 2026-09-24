@@ -1,8 +1,19 @@
 const { createCrudRouter } = require('../utils/crud');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { canReach } = require('../middleware/access');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
+
+/**
+ * `find(where)` over another module's rows matching `where`, narrowed to the
+ * live ones the caller may see; `none` without that module's read permission.
+ * The router checks the account alone, so its timeline, stats, relationships
+ * and health listed every contact, deal, case and invoice filed on it.
+ */
+async function readable(req, module, model, where, find, none = []) {
+  if (!permits(req, module, 'read')) return none;
+  return find(await reachableWhere(req, module, model, where));
+}
 
 const router = createCrudRouter('account', 'accounts', {
   include: {
@@ -24,34 +35,36 @@ const router = createCrudRouter('account', 'accounts', {
   }),
   customRoutes: (router) => {
     // GET /api/accounts/:id/timeline
+    // Each module's records only as far as the caller may see them (readable).
     router.get('/:id/timeline', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const id = req.params.id;
         const [contacts, deals, activities, cases, invoices, quotes] = await Promise.all([
-          prisma.contact.findMany({ where: { accountId: id }, select: { id: true, firstName: true, lastName: true, email: true, title: true } }),
-          prisma.deal.findMany({ where: { accountId: id }, orderBy: { updatedAt: 'desc' }, take: 20, select: { id: true, name: true, stage: true, value: true, closeDate: true } }),
-          prisma.activity.findMany({ where: { accountId: id }, orderBy: { date: 'desc' }, take: 20 }),
-          prisma.case.findMany({ where: { accountId: id }, orderBy: { createdAt: 'desc' }, take: 10 }),
-          prisma.invoice.findMany({ where: { accountId: id }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
-          prisma.quote.findMany({ where: { accountId: id }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
+          readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.findMany({ where, select: { id: true, firstName: true, lastName: true, email: true, title: true } })),
+          readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, orderBy: { updatedAt: 'desc' }, take: 20, select: { id: true, name: true, stage: true, value: true, closeDate: true } })),
+          readable(req, 'activities', 'activity', { accountId: id }, where => prisma.activity.findMany({ where, orderBy: { date: 'desc' }, take: 20 })),
+          readable(req, 'cases', 'case', { accountId: id }, where => prisma.case.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10 })),
+          readable(req, 'invoices', 'invoice', { accountId: id }, where => prisma.invoice.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } })),
+          readable(req, 'quotes', 'quote', { accountId: id }, where => prisma.quote.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } })),
         ]);
         res.json({ contacts, deals, activities, cases, invoices, quotes });
       } catch (err) { next(err); }
     });
 
     // GET /api/accounts/:id/stats
+    // Counted from the records the caller may see (readable), not every one.
     router.get('/:id/stats', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const id = req.params.id;
         const [contacts, deals, cases, invoices] = await Promise.all([
-          prisma.contact.count({ where: { accountId: id } }),
-          prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { stage: true, value: true, currency: true } }),
-          prisma.case.findMany({ where: { accountId: id }, select: { status: true } }),
+          readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.count({ where }), 0),
+          readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, select: { stage: true, value: true, currency: true } })),
+          readable(req, 'cases', 'case', { accountId: id }, where => prisma.case.findMany({ where, select: { status: true } })),
           // select and include are mutually exclusive in Prisma; asking for both
           // made this whole endpoint throw, so account stats never returned.
-          prisma.invoice.findMany({ where: { accountId: id }, include: { items: true } }),
+          readable(req, 'invoices', 'invoice', { accountId: id }, where => prisma.invoice.findMany({ where, include: { items: true } })),
         ]);
 
         const openDeals = deals.filter(d => d.stage !== 'Closed Won' && d.stage !== 'Closed Lost');
@@ -85,6 +98,10 @@ const router = createCrudRouter('account', 'accounts', {
 
         const { id, createdAt, updatedAt, ...data } = source;
         data.name = `${data.name} (Copy)`;
+        // The copy is the caller's, as a cloned deal is. It kept the source's
+        // owner and creator, so it landed in another rep's accounts.
+        data.ownerId = req.userId;
+        data.createdById = req.userId;
 
         const clone = await prisma.account.create({ data });
         res.status(201).json(clone);
@@ -94,37 +111,39 @@ const router = createCrudRouter('account', 'accounts', {
 });
 
 // Account relationship graph
+// Each module's records only as far as the caller may see them (readable).
 router.get('/:id/relationships', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const id = req.params.id;
     const [contacts, deals, cases, activities, invoices, quotes, contracts, subscriptions, assets, opportunities] = await Promise.all([
-      prisma.contact.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, firstName: true, lastName: true, title: true, email: true } }),
-      prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, name: true, value: true, stage: true, probability: true } }),
-      prisma.case.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, subject: true, status: true, priority: true, createdAt: true } }),
-      prisma.activity.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true, dueDate: true }, take: 20, orderBy: { createdAt: 'desc' } }),
-      prisma.invoice.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, invoiceNumber: true, totalAmount: true, status: true } }),
-      prisma.quote.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, name: true, totalAmount: true, status: true } }),
-      prisma.contract.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, name: true, status: true, value: true, endDate: true } }),
-      prisma.subscription.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, status: true, totalPrice: true, endDate: true } }),
-      prisma.asset.findMany({ where: { accountId: id, deletedAt: null }, select: { id: true, name: true, status: true } }).catch(() => []),
-      prisma.deal.findMany({ where: { accountId: id, deletedAt: null, stage: { not: 'Closed Lost' } }, select: { id: true, name: true, value: true } }),
+      readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.findMany({ where, select: { id: true, firstName: true, lastName: true, title: true, email: true } })),
+      readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, select: { id: true, name: true, value: true, stage: true, probability: true } })),
+      readable(req, 'cases', 'case', { accountId: id }, where => prisma.case.findMany({ where, select: { id: true, subject: true, status: true, priority: true, createdAt: true } })),
+      readable(req, 'activities', 'activity', { accountId: id }, where => prisma.activity.findMany({ where, select: { id: true, subject: true, type: true, status: true, dueDate: true }, take: 20, orderBy: { createdAt: 'desc' } })),
+      readable(req, 'invoices', 'invoice', { accountId: id }, where => prisma.invoice.findMany({ where, select: { id: true, invoiceNumber: true, totalAmount: true, status: true } })),
+      readable(req, 'quotes', 'quote', { accountId: id }, where => prisma.quote.findMany({ where, select: { id: true, name: true, totalAmount: true, status: true } })),
+      readable(req, 'contracts', 'contract', { accountId: id }, where => prisma.contract.findMany({ where, select: { id: true, name: true, status: true, value: true, endDate: true } })),
+      readable(req, 'subscriptions', 'subscription', { accountId: id }, where => prisma.subscription.findMany({ where, select: { id: true, status: true, totalPrice: true, endDate: true } })),
+      readable(req, 'assets', 'asset', { accountId: id }, where => prisma.asset.findMany({ where, select: { id: true, name: true, status: true } })).catch(() => []),
+      readable(req, 'deals', 'deal', { accountId: id, stage: { not: 'Closed Lost' } }, where => prisma.deal.findMany({ where, select: { id: true, name: true, value: true } })),
     ]);
     res.json({ contacts, deals, cases, activities, invoices, quotes, contracts, subscriptions, assets, openOpportunities: opportunities });
   } catch (err) { next(err); }
 });
 
 // Account health score
+// Scored from the records the caller may see (readable), not every one.
 router.get('/:id/health', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const id = req.params.id;
     const [account, contacts, deals, cases, activities] = await Promise.all([
       prisma.account.findUnique({ where: { id } }),
-      prisma.contact.count({ where: { accountId: id, deletedAt: null } }),
-      prisma.deal.findMany({ where: { accountId: id, deletedAt: null }, select: { stage: true, value: true, currency: true } }),
-      prisma.case.findMany({ where: { accountId: id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 90 * 86400000) } }, select: { priority: true, status: true } }),
-      prisma.activity.count({ where: { accountId: id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } } }),
+      readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.count({ where }), 0),
+      readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, select: { stage: true, value: true, currency: true } })),
+      readable(req, 'cases', 'case', { accountId: id, createdAt: { gte: new Date(Date.now() - 90 * 86400000) } }, where => prisma.case.findMany({ where, select: { priority: true, status: true } })),
+      readable(req, 'activities', 'activity', { accountId: id, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } }, where => prisma.activity.count({ where }), 0),
     ]);
     const ctx = await currencyContext(prisma);
     let score = 50;
@@ -183,15 +202,19 @@ router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), a
 });
 
 // Account hierarchy
+// Only accounts the caller can see, and a parent they cannot comes back null.
+// This listed any account's parent, children and siblings, with industry and
+// revenue, to anyone who could open one of them.
 router.get('/:id/hierarchy', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const account = await prisma.account.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, parentId: true } });
     if (!account) return res.status(404).json({ error: 'Not found' });
-    const children = await prisma.account.findMany({ where: { parentId: account.id, deletedAt: null }, select: { id: true, name: true, industry: true, annualRevenue: true } });
+    const visible = where => reachableWhere(req, 'accounts', 'account', where);
+    const children = await prisma.account.findMany({ where: await visible({ parentId: account.id }), select: { id: true, name: true, industry: true, annualRevenue: true } });
     let parent = null;
-    if (account.parentId) parent = await prisma.account.findUnique({ where: { id: account.parentId }, select: { id: true, name: true } });
-    const siblings = account.parentId ? await prisma.account.findMany({ where: { parentId: account.parentId, id: { not: account.id }, deletedAt: null }, select: { id: true, name: true } }) : [];
+    if (account.parentId) parent = await prisma.account.findFirst({ where: await visible({ id: account.parentId }), select: { id: true, name: true } });
+    const siblings = account.parentId ? await prisma.account.findMany({ where: await visible({ parentId: account.parentId, id: { not: account.id } }), select: { id: true, name: true } }) : [];
     res.json({ account, parent, children, siblings });
   } catch (err) { next(err); }
 });

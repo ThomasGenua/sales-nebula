@@ -1,8 +1,20 @@
 const { createCrudRouter } = require('../utils/crud');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, permits } = require('../middleware/auth');
 const { visibleWhere } = require('../middleware/rowSecurity');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { buildApprovalSteps, notifyApprovers, meetsEntryConditions } = require('../services/approvals');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
+
+/**
+ * `find(where)` over another module's rows matching `where`, narrowed to the
+ * live ones the caller may see; `none` without that module's read permission.
+ * The router checks the deal alone, so its timeline listed every activity,
+ * email, case, quote and invoice filed on it.
+ */
+async function readable(req, module, model, where, find, none = []) {
+  if (!permits(req, module, 'read')) return none;
+  return find(await reachableWhere(req, module, model, where));
+}
 
 module.exports = createCrudRouter('deal', 'deals', {
   include: {
@@ -108,16 +120,17 @@ module.exports = createCrudRouter('deal', 'deals', {
     });
 
     // GET /api/deals/:id/timeline
+    // Each module's records only as far as the caller may see them (readable).
     router.get('/:id/timeline', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const id = req.params.id;
         const [activities, emails, cases, quotes, invoices, stageHistory] = await Promise.all([
-          prisma.activity.findMany({ where: { dealId: id }, orderBy: { date: 'desc' }, take: 20 }),
-          prisma.email.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 20 }),
-          prisma.case.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 10 }),
-          prisma.quote.findMany({ where: { dealId: id }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
-          prisma.invoice.findMany({ where: { quote: { dealId: id } }, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } }),
+          readable(req, 'activities', 'activity', { dealId: id }, where => prisma.activity.findMany({ where, orderBy: { date: 'desc' }, take: 20 })),
+          readable(req, 'emails', 'email', { dealId: id }, where => prisma.email.findMany({ where, orderBy: { createdAt: 'desc' }, take: 20 })),
+          readable(req, 'cases', 'case', { dealId: id }, where => prisma.case.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10 })),
+          readable(req, 'quotes', 'quote', { dealId: id }, where => prisma.quote.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } })),
+          readable(req, 'invoices', 'invoice', { quote: { dealId: id } }, where => prisma.invoice.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10, include: { items: true } })),
           prisma.dealStageHistory.findMany({ where: { dealId: id }, orderBy: { createdAt: 'asc' } }),
         ]);
         res.json({ activities, emails, cases, quotes, invoices, stageHistory });
@@ -125,11 +138,12 @@ module.exports = createCrudRouter('deal', 'deals', {
     });
 
     // GET /api/deals/stats/velocity - Average time in each stage
+    // Over the deals the caller can see. This averaged every deal's history.
     router.get('/stats/velocity', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
         const history = await prisma.dealStageHistory.findMany({
-          where: { duration: { not: null } },
+          where: { duration: { not: null }, deal: { is: await visibleWhere(req, 'deals', 'deal') } },
           select: { fromStage: true, duration: true },
         });
 
@@ -170,6 +184,11 @@ module.exports = createCrudRouter('deal', 'deals', {
       try {
         const prisma = req.app.locals.prisma;
         const { productId, name, quantity = 1, price, discount = 0 } = req.body;
+        // Only a live product the caller can see. The id was stored as sent,
+        // so a deleted or hidden product went on the deal, its name and SKU
+        // coming back in the response.
+        const linkProblem = await linkRefusal(req, 'dealLineItem', { productId });
+        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
         const total = price * quantity * (1 - discount / 100);
         const count = await prisma.dealLineItem.count({ where: { dealId: req.params.id } });
         const item = await prisma.dealLineItem.create({

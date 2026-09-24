@@ -2,9 +2,16 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
-const { pickModelFields } = require('../utils/modelFields');
+const { pickModelFields, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
+
+/**
+ * The custom object in the path, if it exists and is not deleted. A record's
+ * customObjectId has no foreign key, so nothing else refuses records for an
+ * object that is not there.
+ */
+const liveObject = (prisma, id) => prisma.customObject.findFirst({ where: { id, deletedAt: null }, select: { id: true } });
 
 // Columns the server sets on a record, which its values may not carry.
 const SERVER_FIELDS = new Set(['id', 'customObjectId', 'objectId', 'data', 'ownerId', 'createdById', 'createdAt', 'updatedAt', 'deletedAt']);
@@ -60,8 +67,11 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
   } catch (err) { next(err); }
 });
 
+// The definition's own columns. The body went to Prisma whole, so it could
+// rewrite the id, creator and timestamps, or write into the object's fields
+// and records.
 router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const obj = await prisma.customObject.update({ where: { id: req.params.id }, data: req.body }); res.json(obj); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const data = columnsFrom('customObject', req.body); delete data.createdById; delete data.deletedAt; const obj = await prisma.customObject.update({ where: { id: req.params.id }, data }); res.json(obj); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
@@ -126,6 +136,7 @@ router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), au
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
     if (!values) return res.status(400).json({ error: 'data must be an object' });
+    if (!(await liveObject(prisma, req.params.id))) return res.status(404).json({ error: 'Not found' });
     const record = await prisma.customRecord.create({
       data: { customObjectId: req.params.id, data: values, createdById: req.user.id },
     });
@@ -138,13 +149,22 @@ router.put('/:id/records/:recordId', authenticate, requirePermission('admin', 'e
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
     if (!values) return res.status(400).json({ error: 'data must be an object' });
-    const record = await prisma.customRecord.update({ where: { id: req.params.recordId }, data: { data: values } });
+    // Only a live record of the object in the path. The record id alone
+    // reached any object's records, whatever object the URL named.
+    const found = await prisma.customRecord.findFirst({ where: { id: req.params.recordId, customObjectId: req.params.id, deletedAt: null }, select: { id: true } });
+    if (!found) return res.status(404).json({ error: 'Not found' });
+    const record = await prisma.customRecord.update({ where: { id: found.id }, data: { data: values } });
     res.json(record);
   } catch (err) { next(err); }
 });
 
+// Only a live record of the object in the path, as for the update above.
 router.delete('/:id/records/:recordId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { await req.app.locals.prisma.customRecord.update({ where: { id: req.params.recordId }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
+  try {
+    const { count } = await req.app.locals.prisma.customRecord.updateMany({ where: { id: req.params.recordId, customObjectId: req.params.id, deletedAt: null }, data: { deletedAt: new Date() } });
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 // Schema export
@@ -160,13 +180,16 @@ router.get('/:id/schema', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Search records of a custom object
+// In CustomRecord, where list, create, edit and delete keep them. This read
+// CustomObjectRecord, which only the import wrote, so it never found a
+// record made any other way.
 router.get('/:id/records/search', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { q, limit = 25 } = req.query;
     if (!q) return res.status(400).json({ error: 'q required' });
-    const records = await prisma.customObjectRecord.findMany({
-      where: { objectId: req.params.id, data: { string_contains: q } },
+    const records = await prisma.customRecord.findMany({
+      where: { customObjectId: req.params.id, deletedAt: null, data: { string_contains: q } },
       take: +limit, orderBy: { createdAt: 'desc' },
     });
     res.json({ query: q, results: records, count: records.length });
@@ -201,17 +224,21 @@ router.post('/:id/records/validate', authenticate, async (req, res, next) => {
 });
 
 // Bulk import records
+// Into CustomRecord, as create does. This wrote CustomObjectRecord, so an
+// imported record never showed in the list and could not be edited or
+// deleted.
 router.post('/:id/records/import', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { records } = req.body;
     if (!records?.length) return res.status(400).json({ error: 'records required' });
+    if (!(await liveObject(prisma, req.params.id))) return res.status(404).json({ error: 'Not found' });
     let created = 0, errors = 0;
     for (const rec of records.slice(0, 500)) {
       try {
         const values = recordValues(rec);
         if (!values) { errors++; continue; }
-        await prisma.customObjectRecord.create({ data: { objectId: req.params.id, data: values, createdById: req.user.id } });
+        await prisma.customRecord.create({ data: { customObjectId: req.params.id, data: values, createdById: req.user.id } });
         created++;
       } catch (e) { errors++; }
     }
