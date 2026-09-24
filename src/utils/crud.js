@@ -3,7 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
-const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
+const { rowSecurity, applyAccessFilter, applyAutoAssignRules, autoAssignToUserGroups } = require('../middleware/rowSecurity');
 const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const {
   pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
@@ -14,6 +14,22 @@ const { createNumbered } = require('./numbering');
 const {
   checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
 } = require('../services/recordRules');
+
+/**
+ * File a record into security groups: the groups whose rules it matches, and
+ * on create the auto-assigning groups of its owner. Both were configurable
+ * and never ran, so a rule set to put new deals in a group left them open.
+ * As with workflows, a failure here does not fail the write.
+ */
+async function assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate }) {
+  try {
+    await applyAutoAssignRules(prisma, moduleName, record, { onCreate });
+    const owner = record.ownerId || record.assignedId || record.createdById;
+    if (onCreate && owner) await autoAssignToUserGroups(prisma, owner, moduleName, record.id);
+  } catch (err) {
+    require('../services/logger').logger.warn({ err, module: moduleName, recordId: record.id }, 'Security group assignment failed');
+  }
+}
 
 // The model behind each CRUD module, for code outside its router that must
 // check a record by module name (the WebSocket's record rooms).
@@ -233,6 +249,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       await hydrateIncludes(prisma, record, manualIncludes);
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
+      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: true });
 
       // Emit real-time event
       if (req.app.locals.emit?.recordCreated) {
@@ -319,6 +336,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         include,
       });
       await hydrateIncludes(prisma, record, manualIncludes);
+      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: false });
 
       // Field-level audit, of the values written: the form sends the whole
       // record back as text, so diffing the body logged every number as changed.
