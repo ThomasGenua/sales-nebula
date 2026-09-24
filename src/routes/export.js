@@ -49,7 +49,9 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     if (format === 'csv') {
       if (!data.length) { res.setHeader('Content-Type', 'text/csv'); return res.send(''); }
       const headers = Object.keys(data[0]);
-      const escape = (v) => { const s = v === null || v === undefined ? '' : String(v); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
+      // Dates as ISO, JSON columns as JSON: String() wrote "[object Object]".
+      const text = v => (v instanceof Date ? v.toISOString() : typeof v === 'object' ? JSON.stringify(v) : String(v));
+      const escape = (v) => { const s = v === null || v === undefined ? '' : text(v); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
       const csvRows = [headers.join(','), ...data.map(row => headers.map(h => escape(row[h])).join(','))];
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${module}_export_${new Date().toISOString().split('T')[0]}.csv"`);
@@ -126,7 +128,9 @@ router.post('/schedule', authenticate, requirePermission('admin', 'full'), async
 // Export template (predefined field sets)
 router.get('/templates', authenticate, async (req, res, next) => {
   const templates = [
-    { id: 'contacts-full', module: 'contacts', name: 'All Contact Fields', fields: ['firstName','lastName','email','phone','title','department','mailingCity','mailingState','leadSource','status','createdAt'] },
+    // A contact's city and state are city and state; mailingCity and
+    // mailingState are not columns, so an export dropped them.
+    { id: 'contacts-full', module: 'contacts', name: 'All Contact Fields', fields: ['firstName','lastName','email','phone','title','department','city','state','leadSource','status','createdAt'] },
     { id: 'deals-pipeline', module: 'deals', name: 'Pipeline Report', fields: ['name','stage','value','probability','closeDate','source','ownerId','createdAt'] },
     { id: 'leads-scoring', module: 'leads', name: 'Lead Scoring Export', fields: ['firstName','lastName','company','email','score','status','source','createdAt'] },
     { id: 'cases-support', module: 'cases', name: 'Support Cases', fields: ['caseNumber','subject','status','priority','origin','createdAt','closedAt'] },
@@ -141,8 +145,11 @@ statusRoutes(router, { module: 'export', model: 'scheduledExport' });
 router.get('/progress/:jobId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const job = await prisma.exportJob.findUnique({ where: { id: req.params.jobId } }).catch(() => null);
-    res.json(job || { jobId: req.params.jobId, status: 'completed', progress: 100 });
+    // The caller's own job (anyone's, for administrators). Any id, a job that
+    // never existed included, answered "completed, 100%".
+    const job = await prisma.exportJob.findFirst({ where: { id: req.params.jobId, ...(isAdmin(req.user) ? {} : { userId: req.userId }) } });
+    if (!job) return res.status(404).json({ error: 'Export job not found' });
+    res.json(job);
   } catch (err) { next(err); }
 });
 

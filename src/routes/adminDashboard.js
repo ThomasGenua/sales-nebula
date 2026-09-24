@@ -1,13 +1,25 @@
+const fs = require('fs');
 const { Router } = require('express');
+const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { modelHasField } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'read'));
+
+/** Routes the app answers, one per method and path, counted from its router. */
+function countRoutes(stack = []) {
+  return stack.reduce((n, layer) => n + (layer.route
+    ? Object.keys(layer.route.methods).filter(m => m !== '_all').length
+    : countRoutes(layer.handle?.stack)), 0);
+}
 
 router.get('/system', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Live records where a model soft-deletes; deleted ones were counted too.
+    const live = model => prisma[model].count(modelHasField(model, 'deletedAt') ? { where: { deletedAt: null } } : undefined);
 
     // Model counts (all key tables)
     const [
@@ -17,35 +29,35 @@ router.get('/system', async (req, res, next) => {
       subscriptions, workOrders, customObjects, aiAgents, flowDefinitions,
       appListings, surveys, territories, assets, feedItems, portalConfigs,
     ] = await Promise.all([
-      prisma.user.count(),
-      prisma.contact.count(),
-      prisma.lead.count(),
-      prisma.deal.count(),
-      prisma.account.count(),
-      prisma.case.count(),
-      prisma.activity.count(),
-      prisma.campaign.count(),
-      prisma.product.count(),
-      prisma.quote.count(),
-      prisma.invoice.count(),
-      prisma.contract.count(),
-      prisma.order.count(),
-      prisma.entitlement.count(),
-      prisma.workflow.count(),
-      prisma.report.count(),
-      prisma.emailTemplate.count(),
-      prisma.knowledgeArticle.count(),
-      prisma.subscription.count().catch(() => 0),
-      prisma.workOrder.count().catch(() => 0),
-      prisma.customObject.count().catch(() => 0),
-      prisma.aiAgent.count().catch(() => 0),
-      prisma.flowDefinition.count().catch(() => 0),
-      prisma.appListing.count().catch(() => 0),
-      prisma.survey.count().catch(() => 0),
-      prisma.territory.count().catch(() => 0),
-      prisma.asset.count().catch(() => 0),
-      prisma.feedItem.count().catch(() => 0),
-      prisma.portalConfig.count().catch(() => 0),
+      live('user'),
+      live('contact'),
+      live('lead'),
+      live('deal'),
+      live('account'),
+      live('case'),
+      live('activity'),
+      live('campaign'),
+      live('product'),
+      live('quote'),
+      live('invoice'),
+      live('contract'),
+      live('order'),
+      live('entitlement'),
+      live('workflow'),
+      live('report'),
+      live('emailTemplate'),
+      live('knowledgeArticle'),
+      live('subscription').catch(() => 0),
+      live('workOrder').catch(() => 0),
+      live('customObject').catch(() => 0),
+      live('aiAgent').catch(() => 0),
+      live('flowDefinition').catch(() => 0),
+      live('appListing').catch(() => 0),
+      live('survey').catch(() => 0),
+      live('territory').catch(() => 0),
+      live('asset').catch(() => 0),
+      live('feedItem').catch(() => 0),
+      live('portalConfig').catch(() => 0),
     ]);
 
     // Security stats
@@ -84,13 +96,18 @@ router.get('/system', async (req, res, next) => {
     const totalRecords = users + contacts + leads + deals + accounts + cases + activities +
       campaigns + products + quotes + invoices + contracts + orders + subscriptions + workOrders;
 
+    // Counted, not typed in: these were fixed numbers (171 models, 574
+    // endpoints, 253 indexes, 21426 lines) the admin page showed as the
+    // platform's own. Indexes are the database's; null where it cannot say.
+    const indexes = await prisma.$queryRaw`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = current_schema()`
+      .then(rows => rows[0]?.n ?? null).catch(() => null);
+
     res.json({
       platform: {
-        models: 171,
-        endpoints: 574,
-        indexes: 253,
-        routeFiles: 85,
-        totalCodeLines: 21426,
+        models: Prisma.dmmf.datamodel.models.length,
+        endpoints: countRoutes(req.app._router?.stack),
+        indexes,
+        routeFiles: fs.readdirSync(__dirname).filter(f => f.endsWith('.js')).length,
       },
       records: {
         users, contacts, leads, deals, accounts, cases, activities,

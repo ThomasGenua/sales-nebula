@@ -55,13 +55,17 @@ router.get('/metrics', authenticate, requirePermission('admin', 'read'), async (
       prisma.loginHistory.findMany({ where: { loginTime: { gte: oneDayAgo }, status: 'Success' }, distinct: ['userId'] }).then(r => r.length),
       prisma.loginHistory.count({ where: { loginTime: { gte: oneDayAgo }, status: 'Success' } }),
       prisma.loginHistory.count({ where: { loginTime: { gte: oneDayAgo }, status: 'Failed' } }),
-      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, eventType: 'API_CALL' } }).catch(() => 0),
-      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, eventType: 'ERROR' } }).catch(() => 0),
+      // EventLog's API events are eventType 'API', and it has no ERROR type: a
+      // server error is what the status code says, as in /metrics/performance.
+      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, eventType: 'API' } }).catch(() => 0),
+      prisma.eventLog.count({ where: { timestamp: { gte: oneHourAgo }, statusCode: { gte: 500 } } }).catch(() => 0),
     ]);
+    // Over all attempts: with no successful login, failures read as a 0% rate.
+    const attempts = loginsToday + failedLogins;
     res.json({
       system: { uptime: process.uptime(), memoryUsage: process.memoryUsage(), nodeVersion: process.version },
       users: { total: totalUsers, activeToday },
-      auth: { loginsToday, failedLogins, failureRate: loginsToday ? ((failedLogins / (loginsToday + failedLogins)) * 100).toFixed(1) : 0 },
+      auth: { loginsToday, failedLogins, failureRate: attempts ? ((failedLogins / attempts) * 100).toFixed(1) : 0 },
       api: { callsLastHour: apiCalls, errorsLastHour: errorCount },
     });
   } catch (err) { next(err); }

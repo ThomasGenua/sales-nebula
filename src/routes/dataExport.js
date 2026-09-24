@@ -77,13 +77,16 @@ router.post('/', async (req, res, next) => {
         // CSV
         if (records.length === 0) { content = ''; }
         else {
+          // Every column by default. Keeping only the first record's non-object
+          // values dropped every date (a Date is an object) and any column the
+          // first record left empty (null is too), for the whole file.
           const requested = Array.isArray(fields) ? fields.filter(f => modelHasField(modelName, f)) : [];
-          const cols = requested.length ? requested : Object.keys(records[0]).filter(k => typeof records[0][k] !== 'object');
+          const cols = requested.length ? requested : Object.keys(records[0]);
           const header = cols.join(',');
           const rows = records.map(r => cols.map(c => {
             const val = r[c];
             if (val === null || val === undefined) return '';
-            const str = String(val);
+            const str = val instanceof Date ? val.toISOString() : typeof val === 'object' ? JSON.stringify(val) : String(val);
             return str.includes(',') || str.includes('"') || str.includes('\n') ? `"${str.replace(/"/g, '""')}"` : str;
           }).join(','));
           content = [header, ...rows].join('\n');
