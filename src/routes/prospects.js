@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { editableFields, scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
@@ -192,6 +193,11 @@ router.post('/', authenticate, requirePermission('leads', 'edit'), auditMiddlewa
       }
     }
 
+    // The caller owns it, unless an admin, or the manager of the user named,
+    // files it under someone else: any ownerId was taken as sent.
+    const named = req.body.ownerId ? String(req.body.ownerId) : null;
+    const ownerId = named && (isAdmin(req.user) || (await subordinateUserIds(prisma, req.user)).includes(named)) ? named : req.user.id;
+
     const payload = {
       firstName, lastName, email: cleanEmail, accountName, title,
       phoneWork, phoneMobile, source, industry, city, state, country, description,
@@ -199,7 +205,7 @@ router.post('/', authenticate, requirePermission('leads', 'edit'), auditMiddlewa
       employeeCount: employeeCount != null ? +employeeCount : null,
       annualRevenue: annualRevenue != null ? +annualRevenue : null,
       fullName: [firstName, lastName].filter(Boolean).join(' '),
-      ownerId: req.body.ownerId || req.user.id,
+      ownerId,
     };
     payload.score = scoreProspect(payload);
 
@@ -255,6 +261,12 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
     if (!Array.isArray(prospects) || !prospects.length) return res.status(400).json({ error: 'prospects array required' });
     if (prospects.length > 5000) return res.status(400).json({ error: 'Import limit is 5000 rows per request' });
 
+    // A list takes campaigns edit, as adding to one does, and must exist:
+    // listId wrote to any list, deleted ones too, with leads edit alone.
+    if (listId && !permits(req, 'campaigns', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for campaigns' });
+    const list = listId ? await prisma.prospectList.findFirst({ where: { id: String(listId), deletedAt: null }, select: { id: true } }) : null;
+    if (listId && !list) return res.status(404).json({ error: 'List not found' });
+
     const imported = [], skipped = [], invalid = [];
     // A skipped duplicate names its prospect only when the caller can see
     // one with that address, as POST / does.
@@ -289,14 +301,14 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
       try {
         const created = await prisma.prospect.create({ data: payload });
         imported.push({ id: created.id, email: created.email });
-        if (listId) {
-          await prisma.prospectListEntry.create({ data: { listId, prospectId: created.id, addedBy: req.user.id } }).catch(() => {});
+        if (list) {
+          await prisma.prospectListEntry.create({ data: { listId: list.id, prospectId: created.id, addedBy: req.user.id } }).catch(() => {});
         }
       } catch (e) { invalid.push({ row: raw, reason: String(e.message).slice(0, 100) }); }
     }
 
-    if (listId) {
-      await prisma.prospectList.update({ where: { id: listId }, data: { memberCount: { increment: imported.length } } }).catch(() => {});
+    if (list) {
+      await prisma.prospectList.update({ where: { id: list.id }, data: { memberCount: { increment: imported.length } } }).catch(() => {});
     }
 
     await req.audit({ action: 'create', module: 'prospects', recordId: 'import', details: `${imported.length} prospects imported` });
@@ -421,7 +433,32 @@ router.get('/duplicates/find', authenticate, requirePermission('leads', 'read'),
 
 // ── TARGET LISTS ──────────────────────────────────────────────────────
 
-router.get('/lists/all', authenticate, async (req, res, next) => {
+/**
+ * Why the caller may not put these records on a list, or null: each must be
+ * a prospect, contact or lead they can see. Any ids were added, and a list's
+ * members read back as prospect records. ProspectListEntry's prospect is not
+ * a record module linkRefusal knows, so prospects are checked here.
+ */
+async function entryRefusal(req, { prospectId, contactId, leadId }) {
+  const ids = prospectId.map(String);
+  const found = ids.length && permits(req, 'leads', 'read')
+    ? await req.app.locals.prisma.prospect.findMany({ where: await visibleProspects(req, { id: { in: ids } }), select: { id: true } })
+    : [];
+  const visible = new Set(found.map(p => p.id));
+  if (!ids.every(id => visible.has(id))) return 'prospectId does not name a prospect you can see';
+  const seen = new Map();
+  for (const [key, values] of [['contactId', contactId], ['leadId', leadId]]) {
+    for (const value of values) {
+      const problem = await linkRefusal(req, 'prospectListEntry', { [key]: value }, null, seen);
+      if (problem) return problem;
+    }
+  }
+  return null;
+}
+
+// Lists and their members take campaigns read, and leads read, whose
+// permission prospects answer to: both answered anyone signed in.
+router.get('/lists/all', authenticate, requirePermission('campaigns', 'read'), requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const lists = await prisma.prospectList.findMany({
@@ -450,7 +487,7 @@ router.post('/lists', authenticate, requirePermission('campaigns', 'edit'), audi
   } catch (err) { next(err); }
 });
 
-router.get('/lists/:id/members', authenticate, async (req, res, next) => {
+router.get('/lists/:id/members', authenticate, requirePermission('campaigns', 'read'), requirePermission('leads', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 100 } = req.query;
@@ -471,21 +508,28 @@ router.get('/lists/:id/members', authenticate, async (req, res, next) => {
       : [];
     const byId = new Map(prospects.map(p => [p.id, p]));
 
-    res.json({ total, page: +page, members: entries.map(e => ({ entryId: e.id, addedAt: e.createdAt, prospect: byId.get(e.prospectId) || null })) });
+    // An entry's date is addedAt; it has no createdAt.
+    res.json({ total, page: +page, members: entries.map(e => ({ entryId: e.id, addedAt: e.addedAt, prospect: byId.get(e.prospectId) || null })) });
   } catch (err) { next(err); }
 });
 
 router.post('/lists/:id/members', authenticate, requirePermission('campaigns', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { prospectIds, contactIds, leadIds } = req.body;
+    const prospectIds = req.body.prospectIds || [];
+    const contactIds = req.body.contactIds || [];
+    const leadIds = req.body.leadIds || [];
+    if (![prospectIds, contactIds, leadIds].every(Array.isArray)) return res.status(400).json({ error: 'prospectIds, contactIds and leadIds must be arrays' });
     const list = await prisma.prospectList.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!list) return res.status(404).json({ error: 'List not found' });
     if (list.isDynamic) return res.status(400).json({ error: 'This is a dynamic list; edit its filter instead of adding members' });
+    // Only records the caller can see, checked before any is added.
+    const refusal = await entryRefusal(req, { prospectId: prospectIds, contactId: contactIds, leadId: leadIds });
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
 
     let added = 0;
     for (const [ids, field] of [[prospectIds, 'prospectId'], [contactIds, 'contactId'], [leadIds, 'leadId']]) {
-      for (const id of ids || []) {
+      for (const id of ids) {
         await prisma.prospectListEntry.create({ data: { listId: list.id, [field]: id, addedBy: req.user.id } })
           .then(() => added++).catch(() => {});
       }
@@ -500,7 +544,10 @@ router.post('/lists/:id/members', authenticate, requirePermission('campaigns', '
 router.delete('/lists/:id/members/:entryId', authenticate, requirePermission('campaigns', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.prospectListEntry.delete({ where: { id: req.params.entryId } });
+    // An entry on the list the path names: this deleted any entry id, from
+    // whatever list it was on, and recounted the wrong one.
+    const { count } = await prisma.prospectListEntry.deleteMany({ where: { id: req.params.entryId, listId: req.params.id } });
+    if (!count) return res.status(404).json({ error: 'Entry not found' });
     const total = await prisma.prospectListEntry.count({ where: { listId: req.params.id } });
     await prisma.prospectList.update({ where: { id: req.params.id }, data: { memberCount: total } }).catch(() => {});
     res.json({ removed: true, total });
@@ -508,7 +555,9 @@ router.delete('/lists/:id/members/:entryId', authenticate, requirePermission('ca
 });
 
 // Populate a list from a prospect filter
-router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 'edit'), auditMiddleware, async (req, res, next) => {
+// With the prospects the caller can see, which takes leads read: the filter
+// matched every prospect, beyond row security.
+router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 'edit'), requirePermission('leads', 'read'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const list = await prisma.prospectList.findFirst({ where: { id: req.params.id, deletedAt: null } });
@@ -524,7 +573,7 @@ router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 
     if (filter.excludeOptOut !== false) where.emailOptOut = false;
     if (filter.requireEmail !== false) where.email = { not: null };
 
-    const prospects = await prisma.prospect.findMany({ where, select: { id: true, email: true }, take: Math.min(parseInt(req.body.limit, 10) || 5000, 20000) });
+    const prospects = await prisma.prospect.findMany({ where: await visibleProspects(req, where), select: { id: true, email: true }, take: Math.min(parseInt(req.body.limit, 10) || 5000, 20000) });
 
     let added = 0, suppressed = 0;
     for (const p of prospects) {
@@ -541,11 +590,18 @@ router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 
   } catch (err) { next(err); }
 });
 
+// Campaigns full, as deleting a campaign takes, rather than the list's owner:
+// lists have no row security, and any campaigns editor may already empty or
+// refill anyone's list, so ownership here would guard little and leave no
+// one but an admin to clear a departed user's lists. The list must be live;
+// a deleted one was deleted again, its deletedAt rewritten.
 router.delete('/lists/:id', authenticate, requirePermission('campaigns', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.prospectListEntry.deleteMany({ where: { listId: req.params.id } });
-    await prisma.prospectList.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    const list = await prisma.prospectList.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true } });
+    if (!list) return res.status(404).json({ error: 'List not found' });
+    await prisma.prospectListEntry.deleteMany({ where: { listId: list.id } });
+    await prisma.prospectList.update({ where: { id: list.id }, data: { deletedAt: new Date() } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });

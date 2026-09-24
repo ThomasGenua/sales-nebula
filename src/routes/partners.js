@@ -71,6 +71,9 @@ router.post('/:id/register-deal', authenticate, requirePermission('partners', 'e
         name: `[Partner] ${dealName}`, value: value || 0, currency: await resolveDealCurrency(prisma, currency), stage: 'Qualification',
         partnerId: req.params.id, source: 'Partner Referral',
         ...(accountId && { accountId }), description: notes || '',
+        // Owned by whoever registered it: with no owner, a Private deals
+        // default hid it from them. (Deal has no createdById.)
+        ownerId: req.user.id,
       },
     });
     await req.audit({ action: 'create', module: 'deals', recordId: deal.id, details: 'Partner deal registration' });

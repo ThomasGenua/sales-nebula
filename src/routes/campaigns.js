@@ -1,7 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
 const { requirePermission, authenticate, permits } = require('../middleware/auth');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
 
@@ -20,6 +20,13 @@ async function memberRefusal(req, key, ids) {
   const visible = new Set(found.map(r => r.id));
   return ids.every(id => visible.has(String(id))) ? null : `${key} does not name a ${model} you can see`;
 }
+
+// The people a member or recipient names, for visibleLinks. The lists gave
+// any campaign reader the names and emails of contacts and leads they could
+// not open; one the caller may not read (the module's read permission and
+// row reach) is now left as its id. The row stays, so totals and paging
+// still agree with the campaign's stats.
+const PEOPLE = { contact: true, lead: true };
 
 const router = createCrudRouter('campaign', 'campaigns', {
   include: { recipients: { include: { contact: { select: { id: true, firstName: true, lastName: true } }, lead: { select: { id: true, firstName: true, lastName: true } } } }, targetLists: true },
@@ -102,6 +109,7 @@ const router = createCrudRouter('campaign', 'campaigns', {
     });
 
     // GET /api/campaigns/:id/recipients
+    // Each person only as far as the caller may read them (PEOPLE).
     router.get('/:id/recipients', requirePermission('campaigns', 'read'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
@@ -112,7 +120,7 @@ const router = createCrudRouter('campaign', 'campaigns', {
             lead: { select: { id: true, firstName: true, lastName: true, email: true } },
           },
         });
-        res.json({ data: recipients });
+        res.json({ data: await visibleLinks(req, 'campaignRecipient', recipients, PEOPLE) });
       } catch (err) { next(err); }
     });
 
@@ -131,6 +139,7 @@ const router = createCrudRouter('campaign', 'campaigns', {
 });
 
 // Campaign members
+// Each person only as far as the caller may read them (PEOPLE).
 router.get('/:id/members', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -139,7 +148,7 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
       queryWithIncludes(prisma, 'campaignMember', 'findMany', { where: { campaignId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } }, skip: (+page - 1) * +limit, take: +limit }),
       prisma.campaignMember.count({ where: { campaignId: req.params.id } }),
     ]);
-    res.json({ data: members, total, page: +page });
+    res.json({ data: await visibleLinks(req, 'campaignMember', members, PEOPLE), total, page: +page });
   } catch (err) { next(err); }
 });
 
@@ -174,9 +183,16 @@ router.get('/:id/roi', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const campaign = await prisma.campaign.findUnique({ where: { id: req.params.id } });
     if (!campaign) return res.status(404).json({ error: 'Not found' });
-    const members = await queryWithIncludes(prisma, 'campaignMember', 'findMany', { where: { campaignId: req.params.id }, include: { contact: { include: { deals: { where: { stage: 'Closed Won', deletedAt: null }, select: { value: true, currency: true } } } } } });
+    const members = await prisma.campaignMember.findMany({ where: { campaignId: req.params.id }, select: { contactId: true, status: true } });
+    // The won deals of member contacts that the caller can see: this summed
+    // every such deal, other reps' included. (Its nested include never loaded
+    // the deals, so it answered 0.)
+    const contactIds = [...new Set(members.map(m => m.contactId).filter(Boolean))];
+    const won = contactIds.length && permits(req, 'deals', 'read')
+      ? await prisma.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { contactId: { in: contactIds }, stage: 'Closed Won' }), select: { value: true, currency: true } })
+      : [];
     const ctx = await currencyContext(prisma);
-    const totalWonRevenue = members.reduce((s, m) => s + sumInBase(m.contact?.deals || [], ctx), 0);
+    const totalWonRevenue = sumInBase(won, ctx);
     const cost = campaign.budget || campaign.actualCost || 0;
     const roi = cost > 0 ? Math.round(((totalWonRevenue - cost) / cost) * 100) : 0;
     const responses = members.filter(m => m.status === 'Responded').length;

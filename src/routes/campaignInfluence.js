@@ -6,12 +6,35 @@ const { queryWithIncludes } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
 
+/** The ids, of those given, of records the caller may read: the module's read permission and row reach. */
+async function readableIds(req, module, model, ids) {
+  const wanted = [...new Set(ids.filter(Boolean).map(String))];
+  if (!wanted.length || !permits(req, module, 'read')) return new Set();
+  const rows = await req.app.locals.prisma[model].findMany({ where: await reachableWhere(req, module, model, { id: { in: wanted } }), select: { id: true } });
+  return new Set(rows.map(r => r.id));
+}
+
+/**
+ * The influences on deals and campaigns the caller may read, as notes.js
+ * does for notes. An influence's revenue gives away its deal's value, and
+ * the reports name the campaign; both went to anyone signed in.
+ */
+async function readableInfluences(req, influences) {
+  const deals = await readableIds(req, 'deals', 'deal', influences.map(i => i.dealId));
+  const campaigns = await readableIds(req, 'campaigns', 'campaign', influences.map(i => i.campaignId));
+  return influences.filter(i => deals.has(i.dealId) && campaigns.has(i.campaignId));
+}
+
 // GET /campaign-influence/deal/:dealId
-router.get('/deal/:dealId', async (req, res, next) => {
+// On a deal the caller can see: any deal id listed its influences, and with
+// them the deal's value, to anyone signed in.
+router.get('/deal/:dealId', requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const deal = await prisma.deal.findFirst({ where: await reachableWhere(req, 'deals', 'deal', { id: String(req.params.dealId) }), select: { id: true } });
+    if (!deal) return res.status(404).json({ error: 'Deal not found' });
     const influences = await prisma.campaignInfluence.findMany({
-      where: { dealId: req.params.dealId },
+      where: { dealId: deal.id },
       orderBy: { influence: 'desc' },
     });
     res.json({ data: influences });
@@ -19,13 +42,17 @@ router.get('/deal/:dealId', async (req, res, next) => {
 });
 
 // GET /campaign-influence/campaign/:campaignId
-router.get('/campaign/:campaignId', async (req, res, next) => {
+// On a campaign the caller can see, and only its influences on deals they
+// can see: any campaign id listed every deal it touched, with its revenue.
+router.get('/campaign/:campaignId', requirePermission('campaigns', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const influences = await prisma.campaignInfluence.findMany({
-      where: { campaignId: req.params.campaignId },
+    const campaign = await prisma.campaign.findFirst({ where: await reachableWhere(req, 'campaigns', 'campaign', { id: String(req.params.campaignId) }), select: { id: true } });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const influences = await readableInfluences(req, await prisma.campaignInfluence.findMany({
+      where: { campaignId: campaign.id },
       orderBy: { revenue: 'desc' },
-    });
+    }));
     const totalRevenue = influences.reduce((s, i) => s + i.revenue, 0);
     const totalDeals = new Set(influences.map(i => i.dealId)).size;
     res.json({ data: influences, summary: { totalRevenue, totalDeals, avgInfluence: influences.length > 0 ? Math.round(influences.reduce((s, i) => s + i.influence, 0) / influences.length) : 0 } });
@@ -60,11 +87,13 @@ router.post('/', requirePermission('campaigns', 'edit'), async (req, res, next) 
 });
 
 // POST /campaign-influence/calculate/:dealId - Auto-calculate attribution
-router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), async (req, res, next) => {
+// On a deal the caller can see: any deal id was taken, and the reply's
+// revenue gave away its value.
+router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { model = 'Linear' } = req.body;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.dealId } });
+    const deal = await prisma.deal.findFirst({ where: await reachableWhere(req, 'deals', 'deal', { id: String(req.params.dealId) }) });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
 
     const existing = await prisma.campaignInfluence.findMany({ where: { dealId: req.params.dealId } });
@@ -104,21 +133,25 @@ router.post('/calculate/:dealId', requirePermission('campaigns', 'edit'), async 
 module.exports = router;
 
 // Multi-touch attribution report
-router.get('/attribution', authenticate, async (req, res, next) => {
+// Campaigns and deals read, and only the deals and campaigns the caller can
+// see: it summed every deal's value, by campaign name, for anyone signed in.
+router.get('/attribution', authenticate, requirePermission('campaigns', 'read'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { model = 'linear', period = '90' } = req.query;
     const since = new Date(Date.now() - (+period) * 86400000);
-    const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', {
+    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', {
       where: { createdAt: { gte: since } },
       include: { campaign: { select: { name: true, type: true } }, deal: { select: { value: true, stage: true } } },
-    }).catch(() => []);
+    }).catch(() => []));
     const byCampaign = {};
     influences.forEach(inf => {
       const key = inf.campaignId;
       if (!byCampaign[key]) byCampaign[key] = { campaignId: key, name: inf.campaign?.name, type: inf.campaign?.type, touches: 0, revenue: 0, deals: 0 };
       byCampaign[key].touches++;
-      if (inf.deal?.stage === 'Closed Won') { byCampaign[key].revenue += (inf.deal.value || 0) * (inf.influencePercentage || 1); byCampaign[key].deals++; }
+      // The share is `influence`, a percentage; `influencePercentage` is no
+      // column, so each touch was credited with the whole deal.
+      if (inf.deal?.stage === 'Closed Won') { byCampaign[key].revenue += (inf.deal.value || 0) * inf.influence / 100; byCampaign[key].deals++; }
     });
     const report = Object.values(byCampaign).sort((a, b) => b.revenue - a.revenue);
     res.json({ model, period: +period, campaigns: report });
@@ -126,14 +159,19 @@ router.get('/attribution', authenticate, async (req, res, next) => {
 });
 
 // ROI by campaign
-router.get('/roi', authenticate, async (req, res, next) => {
+// The campaigns the caller can see, credited only with deals they can see:
+// every campaign's cost, and every deal's value, went to anyone signed in.
+// A second /roi, registered after this one, never answered and is gone. It
+// read the share as a percentage, which `influence` is, and that is kept.
+router.get('/roi', authenticate, requirePermission('campaigns', 'read'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budget: true, actualCost: true } });
+    const campaigns = await prisma.campaign.findMany({ where: await reachableWhere(req, 'campaigns', 'campaign'), select: { id: true, name: true, budget: true, actualCost: true } });
+    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: { in: campaigns.map(c => c.id) } }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []));
     const result = [];
     for (const c of campaigns) {
-      const influenced = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } }).catch(() => []);
-      const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + ((i.deal?.value || 0) * (i.influencePercentage || 1)), 0);
+      const influenced = influences.filter(i => i.campaignId === c.id);
+      const revenue = influenced.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + ((i.deal?.value || 0) * i.influence / 100), 0);
       const cost = c.actualCost || c.budget || 0;
       result.push({ campaignId: c.id, name: c.name, cost, attributedRevenue: revenue, roi: cost ? Math.round((revenue - cost) / cost * 100) : 0, deals: influenced.length });
     }
@@ -143,10 +181,11 @@ router.get('/roi', authenticate, async (req, res, next) => {
 });
 
 // Attribution model comparison
-router.get('/attribution-models', authenticate, async (req, res, next) => {
+// On the deals and campaigns the caller can see, as /attribution.
+router.get('/attribution-models', authenticate, requirePermission('campaigns', 'read'), requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } });
+    const influences = await readableInfluences(req, await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { include: { campaign: { select: { name: true } }, deal: { select: { name: true, value: true, stage: true } } } }));
     const wonInfluences = influences.filter(i => i.deal?.stage === 'Closed Won');
     // First-touch attribution
     const firstTouch = {};
@@ -161,7 +200,8 @@ router.get('/attribution-models', authenticate, async (req, res, next) => {
       dealGroups[key].push(i);
     });
     Object.values(dealGroups).forEach(group => {
-      group.sort((a, b) => new Date(a.influenceDate || a.createdAt) - new Date(b.influenceDate || b.createdAt));
+      // A touch's date is touchDate; there is no influenceDate.
+      group.sort((a, b) => new Date(a.touchDate || a.createdAt) - new Date(b.touchDate || b.createdAt));
       const dealValue = group[0].deal?.value || 0;
       if (group.length > 0) {
         const first = group[0].campaign?.name || 'Unknown';
@@ -173,22 +213,5 @@ router.get('/attribution-models', authenticate, async (req, res, next) => {
       }
     });
     res.json({ models: { firstTouch, lastTouch, linear }, totalInfluencedRevenue: wonInfluences.reduce((s, i) => s + (i.deal?.value || 0), 0), totalInfluences: influences.length, wonInfluences: wonInfluences.length });
-  } catch (err) { next(err); }
-});
-
-// Campaign ROI
-router.get('/roi', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const campaigns = await prisma.campaign.findMany({ where: { deletedAt: null }, select: { id: true, name: true, budget: true, actualCost: true, expectedRevenue: true } });
-    const results = [];
-    for (const c of campaigns) {
-      const influences = await queryWithIncludes(prisma, 'campaignInfluence', 'findMany', { where: { campaignId: c.id }, include: { deal: { select: { value: true, stage: true } } } });
-      const wonRevenue = influences.filter(i => i.deal?.stage === 'Closed Won').reduce((s, i) => s + (i.influencePercentage || 100) / 100 * (i.deal?.value || 0), 0);
-      const cost = c.actualCost || c.budget || 0;
-      results.push({ campaignId: c.id, name: c.name, cost, wonRevenue: Math.round(wonRevenue), roi: cost > 0 ? ((wonRevenue - cost) / cost * 100).toFixed(1) + '%' : 'N/A', touchpoints: influences.length });
-    }
-    results.sort((a, b) => b.wonRevenue - a.wonRevenue);
-    res.json(results);
   } catch (err) { next(err); }
 });
