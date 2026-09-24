@@ -179,12 +179,14 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
       }
 
       if (linkedCase) {
+        // A reply reopens a closed case as Open: 'Reopened' was a status no
+        // case screen offers and the open-case counts skipped.
         await prisma.case.update({
           where: { id: linkedCase.id },
           data: {
             emailCount: { increment: 1 }, lastEmailAt: new Date(),
             lastEmailMessageId: raw.messageId || null,
-            ...(linkedCase.status === 'Closed' && { status: 'Reopened' }),
+            ...(linkedCase.status === 'Closed' && { status: 'Open' }),
           },
         }).catch(() => {});
         await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdCaseId: linkedCase.id, status: 'Linked' } }).catch(() => {});
