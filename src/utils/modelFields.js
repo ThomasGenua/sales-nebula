@@ -188,6 +188,9 @@ function modelHasField(modelName, field) {
  * is passed through so Prisma still reports it.
  */
 function coerce(field, value) {
+  // Prisma refuses a bare null for a Json column, and every edit form sends
+  // an empty one back as null, so saving any record with one failed (500).
+  if (value === null && field.type === 'Json') return field.isRequired ? undefined : Prisma.DbNull;
   if (typeof value !== 'string' || field.type === 'String' || field.type === 'Json') return value;
   if (!value.trim()) return field.isRequired ? undefined : null;
   if (field.type === 'DateTime') {

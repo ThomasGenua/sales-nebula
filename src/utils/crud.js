@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
@@ -328,6 +329,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       }
 
       const { data: updateData } = pickModelFields(modelName, data);
+      // An empty Json column sent back empty is no change; leave it unwritten.
+      for (const [key, value] of Object.entries(updateData)) {
+        if (value === Prisma.DbNull && oldRecord[key] === null) delete updateData[key];
+      }
       const linkProblem = await linkRefusal(req, modelName, updateData, oldRecord);
       if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
       const record = await prisma[modelName].update({
