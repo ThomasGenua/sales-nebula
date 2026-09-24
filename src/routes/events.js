@@ -31,14 +31,23 @@ router.post('/publish', requirePermission('admin', 'edit'), async (req, res, nex
     });
 
     const dispatched = [];
+    let webhooksSent = false;
     for (const sub of matching) {
       if (sub.type === 'websocket') {
         req.app.locals.emit?.(channel, { event, payload });
         dispatched.push({ type: 'websocket', channel });
       } else if (sub.type === 'webhook') {
-        // Async webhook delivery
-        const { fireWebhookEvent } = require('../services/webhooks');
-        fireWebhookEvent(channel, { event: event.id, channel, payload, module, recordId }, req.app.locals.prisma).catch(() => {});
+        // Async webhook delivery. The signature is (prisma, event, payload);
+        // called as (channel, payload, prisma), it threw inside and sent nothing.
+        // Delivered once per publish, however many subscriptions match (each
+        // match sent every webhook the event again), and as platform.<channel>:
+        // the caller names the channel, and unprefixed it could pass for a
+        // system event (deals.created), signed with each webhook's secret.
+        if (!webhooksSent) {
+          const { fireWebhookEvent } = require('../services/webhooks');
+          fireWebhookEvent(prisma, `platform.${channel}`, { event: event.id, channel, payload, module, recordId }).catch(() => {});
+          webhooksSent = true;
+        }
         dispatched.push({ type: 'webhook', endpoint: sub.endpoint });
       }
     }
@@ -48,7 +57,9 @@ router.post('/publish', requirePermission('admin', 'edit'), async (req, res, nex
 });
 
 // ─── EVENT HISTORY ───
-router.get('/history', requirePermission('admin', 'read'), async (req, res, next) => {
+// Payloads can carry record data from any module, so reading them takes
+// admin: full. admin: read, which the Sales Rep role holds, read them all.
+router.get('/history', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const { channel, module, limit = 50, before } = req.query;
     const where = {};
@@ -128,6 +139,17 @@ async function attendeeRefusal(req, key, module, modelName, ids) {
   return seen === wanted.length ? null : `${key} names a ${modelName} you cannot see`;
 }
 
+/** The contacts or leads among `ids` the caller can see, id -> name and email. */
+async function visiblePeople(req, module, modelName, ids) {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  if (!wanted.length || !permits(req, module, 'read')) return new Map();
+  const rows = await req.app.locals.prisma[modelName].findMany({
+    where: await reachableWhere(req, module, modelName, { id: { in: wanted } }),
+    select: { id: true, firstName: true, lastName: true, email: true },
+  });
+  return new Map(rows.map(r => [r.id, r]));
+}
+
 // Event attendees management
 router.post('/:id/attendees', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
@@ -146,12 +168,23 @@ router.post('/:id/attendees', authenticate, requirePermission('activities', 'edi
   } catch (err) { next(err); }
 });
 
+// A contact's or lead's name and email only with that module's read permission
+// and a live record the caller can see. Otherwise the attendee row comes back
+// without the person's details: contact or lead null, and the row's own name
+// and email emptied. Anyone who could see the event read every attendee's.
 router.get('/:id/attendees', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     if (!(await findEvent(req, res, req.params.id))) return;
-    const attendees = await queryWithIncludes(prisma, 'eventAttendee', 'findMany', { where: { eventId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } } });
-    res.json(attendees);
+    const attendees = await prisma.eventAttendee.findMany({ where: { eventId: req.params.id } });
+    const contacts = await visiblePeople(req, 'contacts', 'contact', attendees.map(a => a.contactId));
+    const leads = await visiblePeople(req, 'leads', 'lead', attendees.map(a => a.leadId));
+    res.json(attendees.map(a => {
+      const contact = contacts.get(a.contactId) || null;
+      const lead = leads.get(a.leadId) || null;
+      const hidden = (a.contactId && !contact) || (a.leadId && !lead);
+      return { ...a, ...(hidden && { name: null, email: null }), contact, lead };
+    }));
   } catch (err) { next(err); }
 });
 

@@ -1,7 +1,9 @@
 const { Router } = require('express');
 const crypto = require('crypto');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { encrypt, decrypt } = require('../utils/secretBox');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { columnsFrom } = require('../utils/modelFields');
@@ -281,6 +283,12 @@ router.post('/messages/:id/reply', authenticate, requirePermission('cases', 'edi
 
     const message = await prisma.inboundEmailMessage.findUnique({ where: { id: req.params.id } });
     if (!message) return res.status(404).json({ error: 'Message not found' });
+    // The reply is logged on the message's case, so that must be a live case
+    // the caller may change. Any case was commented on, with cases: edit alone.
+    if (message.createdCaseId && !(await prisma.case.findFirst({
+      where: await reachableWhere(req, 'cases', 'case', { id: message.createdCaseId }, 'Edit'),
+      select: { id: true },
+    }))) return res.status(404).json({ error: 'Case not found' });
 
     const account = await prisma.inboundEmailAccount.findFirst({ where: { id: message.accountId, deletedAt: null } });
     if (!account) return res.status(404).json({ error: 'Account not found' });
@@ -344,11 +352,30 @@ router.get('/messages', authenticate, requirePermission('cases', 'read'), async 
   } catch (err) { next(err); }
 });
 
+/**
+ * Who owns what a conversion creates: the caller, or the active user they
+ * name when they are an admin or that user reports to them. Null when they
+ * may not name that user.
+ */
+async function conversionOwner(req) {
+  const named = req.body.ownerId ? String(req.body.ownerId) : req.user.id;
+  if (named === req.user.id) return named;
+  const prisma = req.app.locals.prisma;
+  if (!isAdmin(req.user) && !(await subordinateUserIds(prisma, req.user)).includes(named)) return null;
+  return (await prisma.user.findFirst({ where: { id: named, active: true, isPortalUser: false }, select: { id: true } })) ? named : null;
+}
+
+// A lead takes leads: edit, as a case takes cases: edit; cases: edit alone
+// created leads. And ownerId was taken as sent, so anyone could hand either
+// to anyone (see conversionOwner).
 router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { target } = req.body;
     if (!['case', 'lead'].includes(target)) return res.status(400).json({ error: 'target must be case or lead' });
+    if (target === 'lead' && !permits(req, 'leads', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for leads' });
+    const ownerId = await conversionOwner(req);
+    if (!ownerId) return res.status(400).json({ error: 'ownerId must be you or an active user who reports to you' });
 
     const message = await prisma.inboundEmailMessage.findUnique({ where: { id: req.params.id } });
     if (!message) return res.status(404).json({ error: 'Message not found' });
@@ -361,7 +388,7 @@ router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'e
           subject: (message.subject || 'Email enquiry').slice(0, 250),
           description: (message.textBody || '').slice(0, 8000),
           status: 'New', priority: req.body.priority || 'Medium', origin: 'Email',
-          ownerId: req.body.ownerId || req.user.id,
+          ownerId,
           contactId: contact?.id || null, accountId: contact?.accountId || null,
           contactEmail: message.fromEmail,
         },
@@ -378,7 +405,7 @@ router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'e
         email: message.fromEmail, source: 'Email', status: 'New',
         company: (message.fromEmail || '').split('@')[1] || 'Unknown',
         description: (message.textBody || '').slice(0, 4000),
-        ownerId: req.body.ownerId || req.user.id,
+        ownerId,
       },
     });
     await prisma.inboundEmailMessage.update({ where: { id: message.id }, data: { createdLeadId: lead.id, status: 'Converted' } });

@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
 const { crudModelFor } = require('../utils/crud');
 
 const router = Router();
@@ -115,12 +116,22 @@ router.post('/records', async (req, res, next) => {
 });
 
 // List who a record is shared with
+// Only for a record the caller can see, with the module's read permission:
+// this listed the shares on any record, and who they went to.
 router.get('/records/:module/:recordId', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, recordId } = req.params;
+    const modelName = crudModelFor(module);
+    if (!modelName) return res.status(400).json({ error: `Sharing is not available for ${module}` });
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    const record = await prisma[modelName].findFirst({
+      where: await reachableWhere(req, module, modelName, { id: String(recordId) }),
+      select: { id: true },
+    });
+    if (!record) return res.status(404).json({ error: 'Not found' });
     const shares = await prisma.recordShare.findMany({
-      where: { module, recordId },
+      where: { module, recordId: record.id },
     });
 
     // Hydrate user info
@@ -141,10 +152,24 @@ router.get('/records/:module/:recordId', async (req, res, next) => {
 });
 
 // Remove record share
+// By whoever shared it, an admin, or someone who may change the record: the
+// module's edit permission and Edit on the record. Anyone signed in could
+// delete any share.
 router.delete('/records/:id', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await prisma.recordShare.delete({ where: { id: req.params.id } });
+    const share = await prisma.recordShare.findUnique({ where: { id: req.params.id } });
+    if (!share) return res.status(404).json({ error: 'Not found' });
+    if (share.sharedById !== req.userId && !isAdmin(req.user)) {
+      const modelName = crudModelFor(share.module);
+      if (modelName && !permits(req, share.module, 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${share.module}` });
+      const record = modelName && await prisma[modelName].findFirst({
+        where: await reachableWhere(req, share.module, modelName, { id: share.recordId }, 'Edit'),
+        select: { id: true },
+      });
+      if (!record) return res.status(404).json({ error: 'Not found' });
+    }
+    await prisma.recordShare.delete({ where: { id: share.id } });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
