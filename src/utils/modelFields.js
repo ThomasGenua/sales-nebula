@@ -20,7 +20,9 @@ function pickModelFields(modelName, data = {}) {
   const model = Prisma.dmmf.datamodel.models.find(
     m => m.name.toLowerCase() === String(modelName).toLowerCase()
   );
-  if (!model) return { data, ignored: [] };
+  // A name that is not a model keeps nothing: handing the data back whole
+  // would let a misspelt model name pass a request body straight to a write.
+  if (!model) return { data: {}, ignored: Object.keys(data || {}) };
 
   const byName = new Map(model.fields.map(f => [f.name, f]));
   const kept = {};
