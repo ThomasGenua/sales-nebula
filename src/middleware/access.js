@@ -69,24 +69,21 @@ async function reachableWhere(req, module, modelName, where = {}, minLevel = 'Re
  * account) must name a live record, in a module the caller may read, that
  * row security lets them see. Keys were stored as sent, so a record could be
  * filed on anyone's deal, and the hidden record's name read back through the
- * link. Keys to tables outside the record modules (users, territories) are
- * left to the database. On an update, pass the record as it is: a key that
- * keeps its value is not a new link. A bulk write passes one `seen` Map for
- * all its rows, so each linked record is looked up once.
+ * link. A key is a relation the schema declares, or a plain `<name>Id`
+ * column naming a record module's model (an asset's accountId declares no
+ * relation). Keys to tables outside the record modules (users, territories)
+ * are left to the database. On an update, pass the record as it is: a key
+ * that keeps its value is not a new link. A bulk write passes one `seen` Map
+ * for all its rows, so each linked record is looked up once.
  */
 async function linkRefusal(req, modelName, data, current = null, seen = new Map()) {
-  // Required here, not above: the CRUD router requires this file.
-  const { crudModuleFor } = require('../utils/crud');
   const model = Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === String(modelName).toLowerCase());
   if (!model || !data) return null;
-  for (const relation of model.fields) {
-    if (relation.kind !== 'object' || relation.relationFromFields?.length !== 1) continue;
-    const key = relation.relationFromFields[0];
+  for (const [key, target] of linkKeys(model)) {
     const value = data[key];
     if (value === undefined || value === null || value === '') continue;
     if (current && current[key] === value) continue;
-    const target = relation.type.charAt(0).toLowerCase() + relation.type.slice(1);
-    const module = crudModuleFor(target);
+    const module = moduleOf(target);
     if (!module) continue;
     const cacheKey = `${target}:${value}`;
     if (!seen.has(cacheKey)) {
@@ -98,6 +95,32 @@ async function linkRefusal(req, modelName, data, current = null, seen = new Map(
     if (!seen.get(cacheKey)) return `${key} does not name a ${module.replace(/s$/, '')} you can see`;
   }
   return null;
+}
+
+// Record modules with routers of their own, outside the CRUD router.
+const OWN_ROUTER_MODULES = { quote: 'quotes', invoice: 'invoices' };
+
+/** The module whose records a model holds, or null. */
+function moduleOf(target) {
+  // Required here, not above: the CRUD router requires this file.
+  const { crudModuleFor } = require('../utils/crud');
+  return crudModuleFor(target) || OWN_ROUTER_MODULES[target] || null;
+}
+
+/** A model's link keys, key -> the linked model's delegate name. */
+function linkKeys(model) {
+  const keys = new Map();
+  for (const field of model.fields) {
+    if (field.kind === 'object' && field.relationFromFields?.length === 1) {
+      keys.set(field.relationFromFields[0], field.type.charAt(0).toLowerCase() + field.type.slice(1));
+    }
+  }
+  for (const field of model.fields) {
+    if (field.kind !== 'scalar' || keys.has(field.name) || !/^[a-z][A-Za-z]*Id$/.test(field.name)) continue;
+    const target = field.name.slice(0, -2);
+    if (moduleOf(target)) keys.set(field.name, target);
+  }
+  return keys;
 }
 
 module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere, linkRefusal };
