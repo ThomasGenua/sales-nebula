@@ -120,6 +120,8 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
       include,
     });
     await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id });
+    // As a CRUD create fires it; invoices have their own router, so invoice.created never fired.
+    await fireWebhookEvent(prisma, 'invoices.created', { id: invoice.id, module: 'invoices', number: invoice.number });
     res.status(201).json(invoice);
   } catch (err) { next(err); }
 });

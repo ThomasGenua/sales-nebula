@@ -123,6 +123,8 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
       include,
     });
     await req.audit({ action: 'create', module: 'quotes', recordId: quote.id, details: `Created ${quote.number}` });
+    // As a CRUD create fires it; quotes have their own router, so quote.created never fired.
+    await fireWebhookEvent(prisma, 'quotes.created', { id: quote.id, module: 'quotes', number: quote.number });
     res.status(201).json(quote);
   } catch (err) { next(err); }
 });
