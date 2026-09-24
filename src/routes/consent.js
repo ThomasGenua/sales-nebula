@@ -11,10 +11,10 @@
  */
 
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { SAFE_METHODS, moduleAccess, canReach } = require('../middleware/access');
-const { buildAccessFilter } = require('../middleware/rowSecurity');
+const { SAFE_METHODS, moduleAccess, canReach, reachableWhere } = require('../middleware/access');
+const { buildAccessFilter, isAdmin } = require('../middleware/rowSecurity');
 
 const router = Router();
 
@@ -34,6 +34,82 @@ router.param('contactId', async (req, res, next, contactId) => {
 async function editableContact(req, res, contactId) {
   if (await canReach(req, 'contacts', 'contact', contactId, 'Edit')) return true;
   res.status(404).json({ error: 'Contact not found' });
+  return false;
+}
+
+// The records a consent row can name, and the modules they answer to.
+const SUBJECTS = [
+  { key: 'contactId', module: 'contacts', model: 'contact', label: 'Contact' },
+  { key: 'leadId', module: 'leads', model: 'lead', label: 'Lead' },
+  { key: 'personAccountId', module: 'personAccounts', model: 'personAccount', label: 'Person account' },
+];
+
+/**
+ * Which of `emails` are on a live contact, lead or person account the caller
+ * can reach at `minLevel`, in a module they hold at that level.
+ */
+async function reachableAddresses(req, emails, minLevel = 'Read') {
+  const found = new Set();
+  if (!emails.length) return found;
+  for (const { module, model } of SUBJECTS) {
+    if (!permits(req, module, minLevel === 'Read' ? 'read' : 'edit')) continue;
+    const rows = await req.app.locals.prisma[model].findMany({
+      where: await reachableWhere(req, module, model, { email: { in: emails } }, minLevel),
+      select: { email: true },
+    });
+    rows.forEach(r => found.add(r.email));
+  }
+  return found;
+}
+
+/**
+ * `where` conditions for the consent rows the caller may see. Each record a
+ * row names must be one they can reach, in a module they may read. A row
+ * naming only an address is shown to an admin, or when that address is on a
+ * contact, lead or person account the caller can reach: an address alone is
+ * no record row security can judge, and one on nobody's record is nobody's
+ * to show. Only the contact was checked, so rows naming a lead, a person
+ * account or just an email went to anyone with contacts read.
+ */
+async function visibleConsent(req) {
+  const prisma = req.app.locals.prisma;
+  const conditions = [];
+  for (const { key, module, model } of SUBJECTS) {
+    if (!permits(req, module, 'read')) { conditions.push({ [key]: null }); continue; }
+    // ConsentRecord has no relations, so the records it names are looked up first.
+    const filter = await buildAccessFilter(prisma, req.user, module, { modelName: model });
+    if (!filter) continue;
+    const visible = await prisma[model].findMany({ where: filter, select: { id: true } });
+    conditions.push({ OR: [{ [key]: null }, { [key]: { in: visible.map(r => r.id) } }] });
+  }
+  if (isAdmin(req.user)) return conditions;
+  const addressed = await prisma.consentRecord.findMany({
+    where: { contactId: null, leadId: null, personAccountId: null, deletedAt: null, email: { not: null } },
+    select: { email: true },
+    distinct: ['email'],
+  });
+  const known = await reachableAddresses(req, addressed.map(r => r.email));
+  conditions.push({ OR: [{ contactId: { not: null } }, { leadId: { not: null } }, { personAccountId: { not: null } }, { email: { in: [...known] } }] });
+  return conditions;
+}
+
+/**
+ * For a consent row about to be recorded: the caller must be able to change
+ * every record it names (403 without the module, 404 for a record they cannot
+ * reach), and a row naming only an address needs that address on a contact,
+ * lead or person account they can change, unless they are an admin. Only the
+ * contact was checked, so consent went on anyone's lead or person account,
+ * or any address.
+ */
+async function editableSubject(req, res, subject) {
+  for (const { key, module, model, label } of SUBJECTS) {
+    if (!subject[key]) continue;
+    if (!permits(req, module, 'edit')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
+    if (!(await canReach(req, module, model, subject[key], 'Edit'))) { res.status(404).json({ error: `${label} not found` }); return false; }
+  }
+  if (subject.contactId || subject.leadId || subject.personAccountId || isAdmin(req.user)) return true;
+  if ((await reachableAddresses(req, [String(subject.email)], 'Edit')).size) return true;
+  res.status(404).json({ error: 'No contact, lead or person account you can reach has that email' });
   return false;
 }
 
@@ -75,14 +151,10 @@ router.get('/', authenticate, async (req, res, next) => {
     if (leadId) where.leadId = leadId;
     if (type) where.consentType = type;
 
-    // A row-restricted caller sees rows only for the contacts they can reach.
-    // ConsentRecord has no relation to Contact, so those are looked up first;
-    // rows with no contact (a lead or an email alone) are not scoped here.
-    const filter = await buildAccessFilter(prisma, req.user, 'contacts', { modelName: 'contact' });
-    if (filter) {
-      const visible = await prisma.contact.findMany({ where: filter, select: { id: true } });
-      where.OR = [{ contactId: null }, { contactId: { in: visible.map(c => c.id) } }];
-    }
+    // Only rows whose contact, lead, person account or lone address the
+    // caller can reach (visibleConsent).
+    const scope = await visibleConsent(req);
+    if (scope.length) where.AND = scope;
 
     const [rows, total] = await Promise.all([
       prisma.consentRecord.findMany({
@@ -117,7 +189,7 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const subject = subjectFrom(req.body);
     if (!subject) return res.status(400).json({ error: 'One of contactId, leadId, personAccountId or email is required' });
     if (!type) return res.status(400).json({ error: 'type is required' });
-    if (subject.contactId && !(await editableContact(req, res, subject.contactId))) return;
+    if (!(await editableSubject(req, res, subject))) return;
 
     const record = await prisma.consentRecord.create({
       data: {
@@ -285,10 +357,20 @@ router.post('/bulk', authenticate, requirePermission('contacts', 'edit'), auditM
       return res.status(400).json({ error: 'contactIds and type required' });
     }
 
+    // Every contact must be a live one the caller may change, or nothing is
+    // written: any contact's consent could be rewritten by id.
+    const ids = contactIds.slice(0, 500).map(String);
+    const reachable = await prisma.contact.findMany({
+      where: await reachableWhere(req, 'contacts', 'contact', { id: { in: ids } }, 'Edit'),
+      select: { id: true },
+    });
+    const found = new Set(reachable.map(c => c.id));
+    const notFound = [...new Set(ids.filter(id => !found.has(id)))];
+    if (notFound.length) return res.status(404).json({ error: 'Contact not found', notFound });
+
     // There is no unique key on (contactId, consentType), so consent is
     // appended rather than upserted — which is also the correct audit shape:
     // a withdrawal should not overwrite the grant it followed.
-    const ids = contactIds.slice(0, 500);
     const created = await prisma.$transaction(ids.map(contactId => prisma.consentRecord.create({
       data: {
         contactId, consentType, status: statusFor(granted), source: 'bulk_update',
