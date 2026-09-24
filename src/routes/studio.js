@@ -1,7 +1,9 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { evaluate } = require('../services/recordRules');
 
 const router = Router();
 
@@ -79,42 +81,39 @@ function coerceValue(field, raw) {
   return { value: str, column };
 }
 
-/** Evaluate one validation rule condition against a record. */
-function evaluateCondition(condition, record) {
-  const actual = record?.[condition.field];
-  const expected = condition.value;
-  switch (condition.operator) {
-    case 'equals': return String(actual) === String(expected);
-    case 'notEquals': return String(actual) !== String(expected);
-    case 'contains': return String(actual || '').toLowerCase().includes(String(expected).toLowerCase());
-    case 'notContains': return !String(actual || '').toLowerCase().includes(String(expected).toLowerCase());
-    case 'startsWith': return String(actual || '').toLowerCase().startsWith(String(expected).toLowerCase());
-    case 'greaterThan': return Number(actual) > Number(expected);
-    case 'lessThan': return Number(actual) < Number(expected);
-    case 'greaterOrEqual': return Number(actual) >= Number(expected);
-    case 'lessOrEqual': return Number(actual) <= Number(expected);
-    case 'isEmpty': return actual === null || actual === undefined || actual === '';
-    case 'isNotEmpty': return actual !== null && actual !== undefined && actual !== '';
-    case 'in': return Array.isArray(expected) && expected.map(String).includes(String(actual));
-    case 'notIn': return Array.isArray(expected) && !expected.map(String).includes(String(actual));
-    case 'changed': return true; // resolved by the caller comparing snapshots
-    default: return false;
-  }
+/*
+ * Validation rules are enforced on every save by services/recordRules, and
+ * are evaluated and tested here with that same engine. Studio had its own,
+ * so it accepted rules the engine cannot read (greaterOrEqual, notContains,
+ * notIn, OR conjunctions) that never fired on a save, and misread rules in
+ * the engine's terms (lte, and/or trees). Its names are now translated when
+ * a rule is saved; "changed", which nothing can evaluate, is refused.
+ */
+const RULE_OPERATORS = ['equals', 'notEquals', 'contains', 'notContains', 'startsWith', 'greaterThan', 'lessThan', 'greaterOrEqual', 'lessOrEqual', 'isEmpty', 'isNotEmpty', 'in', 'notIn'];
+const ENGINE_OPERATOR = { greaterOrEqual: 'gte', lessOrEqual: 'lte' };
+
+/** A Studio condition list as the engine reads it, conjunctions folded left to right. */
+function conditionTree(list) {
+  const clause = ({ field, operator, value }) => {
+    if (operator === 'notContains') return { not: { field, operator: 'contains', value } };
+    if (operator === 'notIn') return { not: { field, operator: 'in', value } };
+    return { field, operator: ENGINE_OPERATOR[operator] || operator, value };
+  };
+  return list.slice(1).reduce(
+    (tree, c) => ({ [String(c.conjunction || 'AND').toUpperCase() === 'OR' ? 'or' : 'and']: [tree, clause(c)] }),
+    clause(list[0]),
+  );
 }
 
-/** Run a rule's condition set, honouring AND/OR conjunctions. */
-function evaluateRule(rule, record) {
-  const raw = rule.conditions ?? rule.condition;
-  const conditions = Array.isArray(raw) ? raw : raw ? [raw] : [];
-  if (!conditions.length) return false;
-
-  let result = evaluateCondition(conditions[0], record);
-  for (let i = 1; i < conditions.length; i++) {
-    const c = conditions[i];
-    const value = evaluateCondition(c, record);
-    result = (c.conjunction || 'AND').toUpperCase() === 'OR' ? result || value : result && value;
+/** A rule's conditions, checked and ready to store; or the reason they cannot be. */
+function ruleCondition(conds) {
+  const list = Array.isArray(conds) ? conds : conds ? [conds] : [];
+  if (!list.length) return { error: 'At least one condition is required' };
+  for (const c of list) {
+    if (!c?.field) return { error: 'Each condition needs a field' };
+    if (!RULE_OPERATORS.includes(c.operator)) return { error: `Invalid operator "${c.operator}". Valid: ${RULE_OPERATORS.join(', ')}` };
   }
-  return result;
+  return { condition: conditionTree(list) };
 }
 
 // ── CUSTOM FIELDS ─────────────────────────────────────────────────────
@@ -192,7 +191,8 @@ router.put('/fields/:id', authenticate, requirePermission('admin', 'edit'), audi
     const existing = await prisma.customFieldDef.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!existing) return res.status(404).json({ error: 'Field not found' });
 
-    const { module, name, picklist, storage, ...data } = columnsFrom('customFieldDef', req.body);
+    // deletedAt let admin: edit delete a field, which DELETE keeps to admin: full.
+    const { module, name, picklist, storage, deletedAt, createdById, ...data } = columnsFrom('customFieldDef', req.body);
 
     // Changing type after data exists would strand values in the wrong column
     if (data.fieldType && data.fieldType !== existing.fieldType) {
@@ -475,18 +475,11 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), auditMid
     if (!name || !module) return res.status(400).json({ error: 'name and module required' });
     if (!errorMessage) return res.status(400).json({ error: 'errorMessage required' });
 
-    const conds = conditions || condition;
-    const list = Array.isArray(conds) ? conds : conds ? [conds] : [];
-    if (!list.length) return res.status(400).json({ error: 'At least one condition is required' });
-
-    const validOps = ['equals', 'notEquals', 'contains', 'notContains', 'startsWith', 'greaterThan', 'lessThan', 'greaterOrEqual', 'lessOrEqual', 'isEmpty', 'isNotEmpty', 'in', 'notIn', 'changed'];
-    for (const c of list) {
-      if (!c.field) return res.status(400).json({ error: 'Each condition needs a field' });
-      if (!validOps.includes(c.operator)) return res.status(400).json({ error: `Invalid operator "${c.operator}". Valid: ${validOps.join(', ')}` });
-    }
+    const { error, condition: stored } = ruleCondition(conditions || condition);
+    if (error) return res.status(400).json({ error });
 
     const rule = await prisma.validationRule.create({
-      data: { name, module, condition: list, errorMessage, errorField, description, active: active !== false },
+      data: { name, module, condition: stored, errorMessage, errorField, description, active: active !== false },
     });
     await req.audit({ action: 'create', module: 'studio', recordId: rule.id, details: `Validation rule created: ${name}` });
     res.status(201).json(rule);
@@ -496,7 +489,15 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), auditMid
 router.put('/rules/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.validationRule.update({ where: { id: req.params.id }, data: columnsFrom('validationRule', req.body) });
+    const data = columnsFrom('validationRule', req.body);
+    // A Studio condition list, as create takes it; it was not a column, so
+    // it was dropped without a word.
+    if (req.body.conditions !== undefined) {
+      const { error, condition } = ruleCondition(req.body.conditions);
+      if (error) return res.status(400).json({ error });
+      data.condition = condition;
+    }
+    const rule = await prisma.validationRule.update({ where: { id: req.params.id }, data });
     res.json(rule);
   } catch (err) { next(err); }
 });
@@ -519,7 +520,7 @@ router.post('/rules/:module/evaluate', authenticate, async (req, res, next) => {
     const rules = await prisma.validationRule.findMany({ where: { module: req.params.module, active: true } });
     const violations = [];
     for (const rule of rules) {
-      if (evaluateRule(rule, record)) {
+      if (evaluate(rule.condition, record)) {
         violations.push({ ruleId: rule.id, ruleName: rule.name, field: rule.errorField, message: rule.errorMessage });
       }
     }
@@ -537,9 +538,12 @@ router.post('/rules/:id/test', authenticate, requirePermission('admin', 'read'),
     const modelMap = { contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account', cases: 'case', quotes: 'quote', invoices: 'invoice', products: 'product', projects: 'project' };
     const model = modelMap[rule.module];
     if (!model) return res.status(400).json({ error: `Cannot test rules for module ${rule.module}` });
+    // Only records the caller may read. admin: read, which every Sales Rep
+    // has, returned names from anyone's records in the module.
+    if (!permits(req, rule.module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${rule.module}` });
 
-    const sample = await prisma[model].findMany({ where: { deletedAt: null }, take: 500 });
-    const wouldFail = sample.filter(r => evaluateRule(rule, r));
+    const sample = await prisma[model].findMany({ where: await reachableWhere(req, rule.module, model), take: 500 });
+    const wouldFail = sample.filter(r => evaluate(rule.condition, r));
     res.json({
       ruleId: rule.id, ruleName: rule.name,
       sampleSize: sample.length, wouldFail: wouldFail.length,

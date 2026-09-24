@@ -120,6 +120,11 @@ router.put('/processes/:id', requirePermission('workflows', 'edit'), async (req,
 router.delete('/processes/:id', requirePermission('workflows', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Requests keep a required link to their process, so deleting one that
+    // had been used failed with a 500. They are the approval record, so the
+    // process stays; switching it off stops new requests.
+    const requests = await prisma.approvalRequest.count({ where: { processId: req.params.id } });
+    if (requests) return res.status(409).json({ error: `This process has ${requests} approval request(s). Deactivate it instead.` });
     await prisma.approvalProcess.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }

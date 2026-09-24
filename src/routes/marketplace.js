@@ -17,9 +17,10 @@
  */
 
 const { Router } = require('express');
+const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { queryWithIncludes, looksLikeId } = require('../utils/modelFields');
+const { queryWithIncludes, looksLikeId, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -132,6 +133,35 @@ router.post('/', requirePermission('admin', 'edit'), auditMiddleware, async (req
     });
     await req.audit({ action: 'create', module: 'marketplace', recordId: app.id, details: `Listed: ${app.name}` });
     res.status(201).json(app);
+  } catch (err) { next(err); }
+});
+
+// Admins keep the catalog: the Marketplace page offered edit and delete, and
+// neither route existed. A listing's details are the ones create takes; its
+// rating and install count stay the reviews' and installs' to set.
+const LISTING_FIELDS = ['name', 'description', 'author', 'category', 'pricing', 'version', 'features', 'status'];
+
+router.put('/:id', requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const app = await prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true } });
+    if (!app) return res.status(404).json({ error: 'Not found' });
+    const data = Object.fromEntries(Object.entries(columnsFrom('appListing', req.body)).filter(([key]) => LISTING_FIELDS.includes(key)));
+    if (('name' in data && !data.name) || ('author' in data && !data.author)) return res.status(400).json({ error: 'name and author required' });
+    if (data.features === null) data.features = Prisma.DbNull;
+    const updated = await prisma.appListing.update({ where: { id: app.id }, data });
+    await req.audit({ action: 'update', module: 'marketplace', recordId: app.id, details: `Updated listing: ${updated.name}` });
+    res.json(updated);
+  } catch (err) { next(err); }
+});
+
+// Delisted, not erased: installs and reviews still point at the listing.
+router.delete('/:id', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const { count } = await req.app.locals.prisma.appListing.updateMany({ where: { id: req.params.id, deletedAt: null }, data: { deletedAt: new Date() } });
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    await req.audit({ action: 'delete', module: 'marketplace', recordId: req.params.id, details: 'Listing removed' });
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

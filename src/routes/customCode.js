@@ -22,8 +22,10 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
     const prisma = req.app.locals.prisma;
     const { name, language, code, triggerModule, triggerEvent, description } = req.body;
     if (!name || !code) return res.status(400).json({ error: 'name and code required' });
+    // Version 1 to start from: PUT increments it, and an increment of a null
+    // column stays null, so no script ever had a version.
     const script = await prisma.customCode.create({
-      data: { name, language: language || 'javascript', code, module: triggerModule, triggerEvent, description, active: false, createdById: req.user.id },
+      data: { name, language: language || 'javascript', code, module: triggerModule, triggerEvent, description, active: false, version: 1, createdById: req.user.id },
     });
     res.status(201).json(script);
   } catch (err) { next(err); }
@@ -123,13 +125,15 @@ router.post('/:id/schedule', authenticate, requirePermission('admin', 'full'), a
 });
 
 // Dependencies
-router.get('/:id/dependencies', authenticate, async (req, res, next) => {
+// Read from the script's `code`; `source` is not a column, so this always
+// reported none. What it reads is the code, so it takes admin: read like /:id.
+router.get('/:id/dependencies', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const code = await prisma.customCode.findUnique({ where: { id: req.params.id } });
     if (!code) return res.status(404).json({ error: 'Not found' });
-    const deps = (code.source || '').match(/require\(['"]([^'"]+)['"]\)/g) || [];
-    res.json({ id: code.id, dependencies: deps.map(d => d.replace(/require\(['"]|['"]\)/g, '')), sourceLength: (code.source || '').length });
+    const deps = (code.code || '').match(/require\(['"]([^'"]+)['"]\)/g) || [];
+    res.json({ id: code.id, dependencies: deps.map(d => d.replace(/require\(['"]|['"]\)/g, '')), sourceLength: (code.code || '').length });
   } catch (err) { next(err); }
 });
 
