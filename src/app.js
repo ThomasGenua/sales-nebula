@@ -105,7 +105,18 @@ function createApp(rawPrisma) {
   }));
 
   // ─── BODY PARSING (with size limits) ───
-  app.use(express.json({ limit: '1mb' })); // Default 1MB
+  // One parser per request, chosen by path: 1MB by default, more where a
+  // route needs it. The larger parsers used to sit on their mounts, after
+  // this one, which had already answered 413 past 1MB, so they never applied.
+  const jsonDefault = express.json({ limit: '1mb' });
+  const jsonLarger = [
+    ['/api/documents', express.json({ limit: '10mb' })], // document uploads
+    ['/api/ai', express.json({ limit: '2mb' })], // AI context (not /api/ai-agents)
+  ];
+  app.use((req, res, next) => {
+    const larger = jsonLarger.find(([prefix]) => req.path === prefix || req.path.startsWith(`${prefix}/`));
+    return (larger ? larger[1] : jsonDefault)(req, res, next);
+  });
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   // ─── HTTP PARAMETER POLLUTION PROTECTION ───
@@ -236,9 +247,7 @@ function createApp(rawPrisma) {
   app.use('/api/activities', require('./routes/activities'));
   app.use('/api/emails', require('./routes/emails'));
   app.use('/api/cases', require('./routes/cases'));
-  app.use('/api/documents',
-    express.json({ limit: '10mb' }), // Larger limit for document uploads
-    require('./routes/documents'));
+  app.use('/api/documents', require('./routes/documents'));
   app.use('/api/campaigns', require('./routes/campaigns'));
   app.use('/api/products', require('./routes/products'));
   app.use('/api/quotes', require('./routes/quotes'));
@@ -246,9 +255,7 @@ function createApp(rawPrisma) {
   app.use('/api/workflows', require('./routes/workflows'));
   app.use('/api/users', require('./routes/users'));
   app.use('/api/admin', require('./routes/admin'));
-  app.use('/api/ai',
-    express.json({ limit: '2mb' }), // Larger for AI context
-    require('./routes/ai'));
+  app.use('/api/ai', require('./routes/ai'));
   app.use('/api/forecasts', require('./routes/forecasts'));
   app.use('/api/cpq', require('./routes/cpq'));
   app.use('/api/approvals', require('./routes/approvals'));
