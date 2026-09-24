@@ -27,7 +27,7 @@ export default function ResetPasswordPage({ go }) {
       const data = await res.json();
       if (!res.ok) {
         setState("ready");
-        setMessage(data.error || "Could not reset password.");
+        setMessage(data.details?.join(". ") || data.error || "Could not reset password.");
         return;
       }
       setState("done");

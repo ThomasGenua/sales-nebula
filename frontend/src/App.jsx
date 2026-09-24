@@ -72,7 +72,7 @@ const AuthContext = createContext();
  * to, bookmarked, or closed with the browser's back button, and a refresh
  * dropped you back on the dashboard.
  */
-const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {} });
+const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {}, navigate: () => {} });
 
 /** "/app/contacts/abc123" -> { module: "contacts", recordId: "abc123" } */
 function parseAppPath(pathname) {
@@ -137,17 +137,19 @@ function AuthProvider({ children }) {
     const method = String(init.method || "GET").toUpperCase();
     // The session cookies ride along on their own; a request that changes
     // anything also echoes the CSRF token, which a forged one cannot.
+    // A file upload (FormData) goes as it is, with the browser's multipart type.
+    const isForm = typeof FormData !== "undefined" && opts.body instanceof FormData;
     const call = () => {
       const csrf = UNSAFE_METHODS.has(method) ? csrfToken() : null;
       return fetch(`${API}${path}`, {
         ...init,
         credentials: "same-origin",
         headers: {
-          "Content-Type": "application/json",
+          ...(!isForm && { "Content-Type": "application/json" }),
           ...(csrf && { "X-CSRF-Token": csrf }),
           ...opts.headers,
         },
-        ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
+        ...(opts.body && typeof opts.body === "object" && !rawBody && !isForm && { body: JSON.stringify(opts.body) }),
       });
     };
 
@@ -168,7 +170,13 @@ function AuthProvider({ children }) {
       if (!skipRefresh) clearSession();
       throw new Error(e.error || "Unauthorized");
     }
-    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+    // A refusal's reasons (the password rules a new password misses) come in
+    // `details`; the message alone said only that something was not met.
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      const reasons = Array.isArray(e.details) && e.details.length && e.details.every(d => typeof d === "string") ? `: ${e.details.join(". ")}` : "";
+      throw new Error((e.error || res.statusText) + reasons);
+    }
     return res.json();
   }, [demoMode, renewSession, clearSession]);
 
@@ -1055,7 +1063,7 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
     </div>
   );
 }
-function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs }) {
+function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true }) {
   const { apiFetch } = useAuth();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1106,7 +1114,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         setLoadError(err?.message || "Check your connection and try again.");
       })
       .finally(() => { if (!signal?.aborted) setLoading(false); });
-  }, [page, debouncedSearch, endpoint, apiFetch, sortField, sortDir, filterValues]);
+  }, [page, debouncedSearch, endpoint, apiFetch, sortField, sortDir, filterValues, reloadKey]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1212,9 +1220,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             <Button variant="danger" size="md" icon={Trash2} onClick={bulkDelete} ariaLabel={`Delete ${selected.length} selected`}><span className="hidden sm:inline">Delete ({selected.length})</span>
             </Button>
           )}
-          <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
+          {headerActions}
+          {canCreate && <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
             <span className="hidden sm:inline">New</span>
-          </Button>
+          </Button>}
         </div>
       </div>
 
@@ -1466,12 +1475,12 @@ function CampaignsPage() {
 function EmailsPage() {
   return <ModulePage title="Emails" icon={Mail} endpoint="/emails"
     columns={[
-      { key: "subject", label: "Subject" }, { key: "to", label: "To" },
-      { key: "status", label: "Status", render: v => <Badge color={v==='Sent'?'success':v==='Opened'?'info':v==='Bounced'?'danger':'neutral'}>{v||'Draft'}</Badge> },
+      { key: "subject", label: "Subject" }, { key: "to", label: "To", render: (v, row) => v || row?.toEmail || "-" },
+      { key: "status", label: "Status", render: v => { const s = (v || 'draft').toLowerCase(); return <Badge color={s==='sent'?'success':s==='queued'?'info':s==='failed'?'danger':'neutral'}>{s}</Badge>; } },
       { key: "sentAt", label: "Sent", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Opened","Bounced","Failed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Queued","Sent","Failed"] },
     ]}
     detailFields={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To" }, { key: "from", label: "From" },
@@ -1483,7 +1492,7 @@ function EmailsPage() {
   />;
 }
 function KnowledgePage() {
-  return <ModulePage title="Knowledge" icon={BookOpen} endpoint="/knowledge"
+  return <ModulePage title="Knowledge" icon={BookOpen} endpoint="/knowledge" nameField="title"
     columns={[
       { key: "title", label: "Title" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Published'?'success':v==='Archived'?'neutral':'warning'}>{v||'Draft'}</Badge> },
@@ -1591,7 +1600,7 @@ function EntitlementsPage() {
   />;
 }
 function CustomObjectsPage() {
-  return <ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects"
+  return <ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects" nameField="label"
     columns={[
       { key: "label", label: "Label" }, { key: "apiName", label: "API Name" },
       { key: "description", label: "Description" },
@@ -1662,7 +1671,7 @@ function MarketplacePage() {
       { key: "rating", label: "Rating" }, { key: "installCount", label: "Installs" },
       { key: "description", label: "Description" }, { key: "version", label: "Version" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "author", label: "Author", required: true },{ key: "category", label: "Category", type: "select", options: ["Utility","Analytics","Integration","Sales","Service"] },{ key: "pricing", label: "Pricing", type: "select", options: ["Free","Paid","Freemium"] },{ key: "description", label: "Description" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "author", label: "Author", required: true },{ key: "category", label: "Category", type: "select", options: ["Utility","Analytics","Integration","Sales","Service","Marketing"] },{ key: "pricing", label: "Pricing", type: "select", options: ["Free","Paid","Freemium"] },{ key: "description", label: "Description" }]}
   />;
 }
 
@@ -1707,13 +1716,14 @@ function WorkflowsPage() {
   return <ModulePage title="Workflows" icon={GitBranch} endpoint="/workflows"
     columns={[
       { key: "name", label: "Workflow" }, { key: "module", label: "Module" },
-      { key: "triggerType", label: "Trigger" },
+      { key: "trigger", label: "Trigger" },
       { key: "active", label: "Active", render: v => <Badge color={v ? "success" : "neutral"}>{v ? "Active" : "Inactive"}</Badge> },
-      { key: "executionCount", label: "Runs", render: v => <span className="font-mono">{v || 0}</span> },
+      { key: "runCount", label: "Runs", render: v => <span className="font-mono">{v || 0}</span> },
     ]}
     formFields={[
-      { key: "name", label: "Name", required: true }, { key: "module", label: "Module", required: true },
-      { key: "triggerType", label: "Trigger", type: "select", options: ["create","update","delete","createOrUpdate","scheduled"] },
+      { key: "name", label: "Name", required: true },
+      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","activities","cases","campaigns","products","contracts","orders"] },
+      { key: "trigger", label: "Trigger", type: "select", options: ["create","update","statusChange","scheduled"] },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
 }
@@ -1736,7 +1746,7 @@ function DashboardPage() {
   // Prepare chart data
   const pipelineChartData = pipeline.slice(0, 8).map(st => ({ label: (st.stage || st._id || "").substring(0, 8), value: st.value || 0 }));
   const donutData = [
-    { label: "Won", value: rev.wonThisMonth?.count || counts.wonDeals || 0 },
+    { label: "Won", value: counts.wonDeals || 0 },
     { label: "Open", value: counts.openDeals || pipe.dealCount || 0 },
     { label: "Lost", value: counts.lostDeals || 0 },
   ].filter(d => d.value > 0);
@@ -1755,7 +1765,7 @@ function DashboardPage() {
         { label: "Pipeline", value: money(pipe.totalValue, s.currency, { notation: "compact" }), sub: `${pipe.dealCount || 0} deals` },
         { label: "Won MTD", value: money(rev.wonThisMonth?.value, s.currency, { notation: "compact" }) },
         { label: "Open Leads", value: counts.leads || 0 },
-        { label: "Win Rate", value: `${s.winRate || pipe.winRate || 0}%` },
+        { label: "Win Rate", value: `${s.rates?.winRate ?? s.winRate ?? pipe.winRate ?? 0}%` },
         { label: "Cases", value: counts.openCases || 0 },
       ]} />
 
@@ -1826,15 +1836,21 @@ function DashboardPage() {
   );
 }
 
+/** Search result modules that have a record page to open. */
+const SEARCH_OPENABLE = new Set(["contacts", "leads", "deals", "accounts", "cases", "products", "quotes", "invoices", "campaigns", "emails", "knowledge", "contracts", "orders"]);
+
 function GlobalSearchPage() {
   const { apiFetch } = useAuth();
+  const { navigate } = useContext(RouteContext);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const search = async () => {
     if (!query.trim()) return;
     setLoading(true);
-    try { const d = await apiFetch(`/search?q=${encodeURIComponent(query)}`); setResults(d); } catch (e) { setResults({ error: e.message }); }
+    // The matches are under `results` (by module); the page read the top-level
+    // keys, so every search showed nothing.
+    try { const d = await apiFetch(`/search?q=${encodeURIComponent(query)}`); setResults(d.results || {}); } catch (e) { setResults({ error: e.message }); }
     finally { setLoading(false); }
   };
   const moduleIcons = { contacts: Users, leads: UserPlus, deals: Target, accounts: Building2, cases: Shield, products: Package };
@@ -1862,12 +1878,17 @@ function GlobalSearchPage() {
               <span className="text-xs text-[#4A5168]">({items.length})</span>
             </div>
             <div className="space-y-1.5">
-              {items.slice(0, 5).map(item => (
-                <div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-lg p-3 hover:border-[#203060] transition-colors">
-                  <div className="text-sm text-[#F0EDE5]">{item.name || item.firstName || item.subject || item.title || "Untitled"}</div>
-                  <div className="text-xs text-[#4A5168] mt-0.5">{item.email || item.status || item.stage || ""}</div>
-                </div>
-              ))}
+              {items.slice(0, 5).map(item => {
+                const title = item.name || [item.firstName, item.lastName].filter(Boolean).join(" ") || item.subject || item.title || "Untitled";
+                const opens = SEARCH_OPENABLE.has(mod);
+                return (
+                  <div key={item.id} {...(opens ? clickable(() => navigate(mod, item.id), `Open ${title}`) : {})}
+                    className={`bg-[#0B1228] border border-[#182550] rounded-lg p-3 hover:border-[#203060] transition-colors ${opens ? "cursor-pointer" : ""}`}>
+                    <div className="text-sm text-[#F0EDE5]">{title}</div>
+                    <div className="text-xs text-[#4A5168] mt-0.5">{item.email || item.status || item.stage || ""}</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
@@ -2086,13 +2107,7 @@ function SettingsPage() {
             <Button size="md" onClick={changePassword} disabled={saving || demoMode}>Update Password</Button>
             {demoMode && <p className="text-xs mt-2" style={dim}>Password changes are unavailable in demo mode.</p>}
           </div>
-          <div className={panel} style={panelStyle}>
-            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Two-Factor Authentication</h3>
-            <p className="text-xs mb-4" style={muted}>Add an extra layer of security to your account.</p>
-            <Button variant="secondary" size="md" icon={Shield} onClick={() => setToast({ message: "2FA setup is available after you create a live account.", type: "success" })}>
-              Enable 2FA
-            </Button>
-          </div>
+          <TwoFactorPanel className={panel} style={panelStyle} setToast={setToast} />
           <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
@@ -2117,6 +2132,100 @@ function SettingsPage() {
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+/**
+ * Sign-in codes from an authenticator app. The Enable 2FA button here only
+ * ever showed a toast, so nobody could turn two-factor sign-in on. Adding or
+ * removing a device takes the current password, as the API requires.
+ */
+function TwoFactorPanel({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [devices, setDevices] = useState(null);
+  const [password, setPassword] = useState("");
+  const [setup, setSetup] = useState(null);   // { deviceId, secret, otpAuthUrl } until the first code checks out
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    if (demoMode) { setDevices([]); return; }
+    apiFetch("/security/mfa/devices").then(d => setDevices(d.data || [])).catch(() => setDevices([]));
+  }, [apiFetch, demoMode]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (action) => {
+    setBusy(true);
+    try { await action(); } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const start = () => run(async () => {
+    setSetup(await apiFetch("/security/mfa/enroll", { method: "POST", body: { type: "totp", currentPassword: password } }));
+    setCode("");
+  });
+  const confirm = () => run(async () => {
+    await apiFetch("/security/mfa/verify", { method: "POST", body: { deviceId: setup.deviceId, code } });
+    setSetup(null); setCode(""); setPassword(""); load();
+    setToast({ message: "Two-factor sign-in is on. You will be asked for a code when you sign in.", type: "success" });
+  });
+  const remove = (device) => run(async () => {
+    if (!password) throw new Error("Enter your current password to remove a device");
+    await apiFetch(`/security/mfa/devices/${encodeURIComponent(device.id)}`, { method: "DELETE", body: { currentPassword: password } });
+    if (setup?.deviceId === device.id) setSetup(null);
+    setPassword(""); load();
+    setToast({ message: "Device removed", type: "success" });
+  });
+
+  const verified = (devices || []).filter(d => d.verified);
+  const secretGroups = setup?.secret ? setup.secret.match(/.{1,4}/g).join(" ") : "";
+
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--sn-body)" }}>Two-Factor Authentication</h3>
+      <p className="text-xs mb-4" style={{ color: "var(--sn-slate)" }}>
+        {verified.length ? "On: signing in asks for a code from your authenticator app." : "Add a code from an authenticator app to every sign-in."}
+      </p>
+      {demoMode ? (
+        <p className="text-xs" style={{ color: "var(--sn-dim)" }}>Two-factor sign-in is unavailable in demo mode.</p>
+      ) : devices === null ? <Spinner label="Loading devices" /> : (
+        <div className="space-y-3">
+          {devices.length > 0 && (
+            <ul className="space-y-2">
+              {devices.map(device => (
+                <li key={device.id} className="flex items-center justify-between gap-3 py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+                  <div className="min-w-0">
+                    <div className="text-sm" style={{ color: "var(--sn-cream)" }}>Authenticator app</div>
+                    <div className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                      {device.verified ? `Added ${new Date(device.createdAt).toLocaleDateString(...fmt())}` : "Setup not finished"}
+                    </div>
+                  </div>
+                  <Button variant="danger" size="sm" onClick={() => remove(device)} disabled={busy}>Remove</Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {setup ? (
+            <div className="space-y-3">
+              <p className="text-xs" style={{ color: "var(--sn-slate)" }}>
+                In your authenticator app, add an account with this key{setup.otpAuthUrl ? <> or <a href={setup.otpAuthUrl} className="underline" style={{ color: "var(--sn-amber)" }}>open it in the app</a></> : null}, then enter the six-digit code it shows.
+              </p>
+              <div className="font-mono text-sm px-3 py-2 rounded-lg break-all" style={{ background: "var(--sn-raised)", color: "var(--sn-cream)" }}>{secretGroups}</div>
+              <Input label="Code from the app" value={code} onChange={v => setCode(v.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" />
+              <div className="flex gap-2">
+                <Button size="md" onClick={confirm} disabled={busy || code.length !== 6}>Turn on</Button>
+                <Button variant="secondary" size="md" onClick={() => remove({ id: setup.deviceId })} disabled={busy}>Cancel</Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <Input label="Current password" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
+              <Button variant="secondary" size="md" icon={Shield} onClick={start} disabled={busy || !password}>
+                {verified.length ? "Add another device" : "Enable 2FA"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2197,9 +2306,9 @@ function AdminDashboardPage() {
       <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-6 gap-2 sm:gap-3 mb-4 sm:mb-6">
         <Pill label="Uptime" value={`${upHrs}h`} color="green" />
         <Pill label="Memory" value={`${memMB}MB`} color={memMB > 500 ? "red" : "blue"} />
-        <Pill label="Models" value={p.models || 173} color="purple" />
-        <Pill label="Endpoints" value={p.endpoints || 575} color="amber" />
-        <Pill label="Indexes" value={p.indexes || 253} color="blue" />
+        <Pill label="Models" value={p.models ?? "-"} color="purple" />
+        <Pill label="Endpoints" value={p.endpoints ?? "-"} color="amber" />
+        <Pill label="Indexes" value={p.indexes ?? "-"} color="blue" />
         <Pill label="Node" value={(health.nodeVersion || "?").replace("v","").split(".")[0]} color="cyan" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4 mb-4">
@@ -2564,7 +2673,7 @@ function ReportsPage() {
   const [toast, setToast] = useState(null); const [selectedReport, setSelectedReport] = useState(null); const [reportData, setReportData] = useState(null);
   const load = useCallback(() => { setLoading(true); apiFetch('/reports').then(d => setReports(d.data || d || [])).catch(() => setReports([])).finally(() => setLoading(false)); }, [apiFetch]);
   useEffect(() => { load(); }, [load]);
-  const runReport = async (r) => { setSelectedReport(r); try { const d = await apiFetch(`/reports/${r.id}/run`, { method: 'POST', body: {} }); setReportData(d); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
+  const runReport = async (r) => { setSelectedReport(r); try { const d = await apiFetch(`/reports/${r.id}/execute`, { method: 'POST', body: {} }); setReportData(d); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
   const save = async () => { try { await apiFetch('/reports', { method: 'POST', body: form }); setModalOpen(false); setForm({}); load(); setToast({ message: 'Report created', type: 'success' }); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
   return (
     <div>
@@ -2572,14 +2681,14 @@ function ReportsPage() {
       {loading ? <Spinner /> : reports.length === 0 ? <EmptyState icon={BarChart3} title="No reports yet" action="Create Report" onAction={() => setModalOpen(true)} /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{reports.map(r => (
           <div key={r.id} {...clickable(() => runReport(r), `Run report ${r.name}`)} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.98] touch-manipulation">
-            <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.type === 'Summary' ? 'info' : 'primary'}>{r.type || 'Tabular'}</Badge></div>
+            <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.reportType === 'summary' ? 'info' : 'primary'}>{r.reportType || 'tabular'}</Badge></div>
             <div className="text-xs text-[#4A5168]">{r.module || 'All'}</div></div>))}</div>)}
       {selectedReport && reportData && (<Modal open={!!selectedReport} onClose={() => { setSelectedReport(null); setReportData(null); }} title={selectedReport.name} wide>
-        <div className="text-xs text-[#4A5168] mb-3">{reportData.totalRecords || 0} records</div>
-        {reportData.rows?.length > 0 ? (<div className="overflow-x-auto -mx-4 sm:mx-0"><table className="w-full min-w-[400px] text-xs"><thead><tr className="border-b border-[#182550]">{Object.keys(reportData.rows[0]).slice(0,6).map(k=><th key={k} className="py-2 px-2 text-left text-[#4A5168] uppercase">{k}</th>)}</tr></thead><tbody>{reportData.rows.slice(0,20).map((row,i)=><tr key={i} className="border-b border-[#182550]/40">{Object.values(row).slice(0,6).map((v,j)=><td key={j} className="py-2 px-2 text-[#C8C2B4]">{String(v??'-').substring(0,30)}</td>)}</tr>)}</tbody></table></div>) : <div className="text-sm text-[#4A5168] text-center py-6">No data</div>}
+        <div className="text-xs text-[#4A5168] mb-3">{reportData.totalCount ?? 0} records</div>
+        {(reportData.rows || reportData.chartData)?.length > 0 ? (<div className="overflow-x-auto -mx-4 sm:mx-0"><table className="w-full min-w-[400px] text-xs"><thead><tr className="border-b border-[#182550]">{Object.keys((reportData.rows || reportData.chartData)[0]).slice(0,6).map(k=><th key={k} className="py-2 px-2 text-left text-[#4A5168] uppercase">{k}</th>)}</tr></thead><tbody>{(reportData.rows || reportData.chartData).slice(0,20).map((row,i)=><tr key={i} className="border-b border-[#182550]/40">{Object.values(row).slice(0,6).map((v,j)=><td key={j} className="py-2 px-2 text-[#C8C2B4]">{String(v??'-').substring(0,30)}</td>)}</tr>)}</tbody></table></div>) : <div className="text-sm text-[#4A5168] text-center py-6">No data</div>}
       </Modal>)}
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="New Report">
-        <div className="space-y-3 mb-4"><Input label="Report Name" value={form.name} onChange={v => setForm(p => ({...p, name: v}))} required /><Select label="Module" value={form.module} onChange={v => setForm(p => ({...p, module: v}))} options={['contacts','leads','deals','accounts','cases','activities','products','campaigns']} placeholder="Select module" /><Select label="Type" value={form.type} onChange={v => setForm(p => ({...p, type: v}))} options={['Tabular','Summary','Matrix']} /></div>
+        <div className="space-y-3 mb-4"><Input label="Report Name" value={form.name} onChange={v => setForm(p => ({...p, name: v}))} required /><Select label="Module" value={form.module} onChange={v => setForm(p => ({...p, module: v}))} options={['contacts','leads','deals','accounts','cases','activities','products','quotes','invoices']} placeholder="Select module" /><Select label="Type" value={form.reportType} onChange={v => setForm(p => ({...p, reportType: v}))} options={[{ value: 'tabular', label: 'Tabular' }, { value: 'summary', label: 'Summary' }, { value: 'matrix', label: 'Matrix' }]} /></div>
         <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]"><Button variant="secondary" onClick={() => setModalOpen(false)}>Cancel</Button><Button onClick={save}>Create</Button></div>
       </Modal>
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
@@ -2591,19 +2700,19 @@ function ReportsPage() {
 function SurveysPage() {
   return <ModulePage title="Surveys" icon={MessageSquare} endpoint="/surveys"
     columns={[
-      { key: "title", label: "Title" },
-      { key: "status", label: "Status", render: v => <Badge color={v==='Published'?'success':v==='Closed'?'neutral':'warning'}>{v||'Draft'}</Badge> },
+      { key: "name", label: "Name" },
+      { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Closed'?'neutral':'warning'}>{v||'Draft'}</Badge> },
       { key: "responseCount", label: "Responses", render: v => <span className="font-mono">{v||0}</span> },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Published","Closed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Closed"] },
     ]}
     detailFields={[
-      { key: "title", label: "Title" }, { key: "status", label: "Status" },
+      { key: "name", label: "Name" }, { key: "status", label: "Status" },
       { key: "description", label: "Description" }, { key: "responseCount", label: "Responses" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "title", label: "Title", required: true },{ key: "description", label: "Description", type: "textarea" },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Closed"] }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "description", label: "Description", type: "textarea" },{ key: "status", label: "Status", type: "select", options: ["Draft","Active","Closed"] }]}
   />;
 }
 // ── Territories ──
@@ -2625,19 +2734,68 @@ function TerritoriesPage() {
   />;
 }
 // ── Documents ──
+const DOCUMENT_CATEGORIES = ["Contract", "Proposal", "Invoice", "Report", "Other"];
+
+/**
+ * Documents are files. The page made document records with no file behind
+ * them and had no way to download one; it now uploads files (the New button
+ * is Upload) and each row links to its download.
+ */
 function DocumentsPage() {
-  return <ModulePage title="Documents" icon={FolderOpen} endpoint="/documents"
-    columns={[
-      { key: "name", label: "Name" }, { key: "category", label: "Category" },
-      { key: "mimeType", label: "Type", render: v => v ? v.split("/").pop() : "-" },
-      { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
-      { key: "downloadCount", label: "Downloads", render: v => <span className="font-mono">{v||0}</span> },
-    ]}
-    filterDefs={[
-      { key: "category", label: "Category", type: "select", options: ["Contract","Proposal","Invoice","Report","Other"] },
-    ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "category", label: "Category", type: "select", options: ["Contract","Proposal","Invoice","Report","Other"] },{ key: "description", label: "Description" }]}
-  />;
+  const { apiFetch } = useAuth();
+  const [reloadKey, setReloadKey] = useState(0);
+  const [category, setCategory] = useState("Other");
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);
+  const input = useRef(null);
+  const upload = async (files) => {
+    if (!files.length) return;
+    setBusy(true);
+    try {
+      for (const file of files) {
+        const body = new FormData();
+        body.append("file", file);
+        body.append("category", category);
+        await apiFetch("/documents/upload", { method: "POST", body });
+      }
+      setToast({ message: files.length > 1 ? `${files.length} files uploaded` : "File uploaded", type: "success" });
+      setReloadKey(k => k + 1);
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const download = (v, row) => row?.filePath || row?.fileName
+    ? <a href={`${API}/documents/${row.id}/download`} onClick={e => e.stopPropagation()} className="underline text-[#F5A623]">Download</a>
+    : "-";
+  return (
+    <>
+      <ModulePage title="Documents" icon={FolderOpen} endpoint="/documents" reloadKey={reloadKey} canCreate={false}
+        headerActions={<>
+          <Select value={category} onChange={setCategory} options={DOCUMENT_CATEGORIES} className="hidden sm:block w-32" />
+          <Button icon={Upload} size="md" onClick={() => input.current?.click()} disabled={busy} ariaLabel="Upload files">
+            <span className="hidden sm:inline">{busy ? "Uploading..." : "Upload"}</span>
+          </Button>
+          <input ref={input} type="file" multiple className="hidden" onChange={e => { upload([...e.target.files]); e.target.value = ""; }} />
+        </>}
+        columns={[
+          { key: "name", label: "Name" }, { key: "category", label: "Category" },
+          { key: "mimeType", label: "Type", render: v => v ? v.split("/").pop() : "-" },
+          { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
+          { key: "downloadCount", label: "Downloads", render: v => <span className="font-mono">{v||0}</span> },
+          { key: "id", label: "File", render: download },
+        ]}
+        filterDefs={[
+          { key: "category", label: "Category", type: "select", options: DOCUMENT_CATEGORIES },
+        ]}
+        detailFields={[
+          { key: "name", label: "Name" }, { key: "category", label: "Category" },
+          { key: "fileName", label: "File name" }, { key: "description", label: "Description" },
+          { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
+          { key: "id", label: "File", render: download },
+        ]}
+        formFields={[{ key: "name", label: "Name", required: true },{ key: "category", label: "Category", type: "select", options: DOCUMENT_CATEGORIES },{ key: "description", label: "Description" }]}
+      />
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </>
+  );
 }
 // ── Tags ──
 function TagsPage() {
@@ -2645,13 +2803,9 @@ function TagsPage() {
     columns={[
       { key: "name", label: "Tag" },
       { key: "color", label: "Color", render: v => <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded-full" style={{background:v||'#60A5FA'}} />{v||'-'}</span> },
-      { key: "module", label: "Module" },
       { key: "usageCount", label: "Used", render: v => <span className="font-mono">{v||0}</span> },
     ]}
-    filterDefs={[
-      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","all"] },
-    ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "color", label: "Color", type: "select", options: ["blue","green","red","yellow","purple","cyan","orange"] },{ key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","all"] }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "color", label: "Color", type: "select", options: ["blue","green","red","yellow","purple","cyan","orange"] }]}
   />;
 }
 // ── Webhooks ──
@@ -2668,10 +2822,10 @@ function WebhooksPage() {
     detailFields={[
       { key: "name", label: "Name" }, { key: "url", label: "URL" },
       { key: "secret", label: "Secret", render: () => "********" },
-      { key: "active", label: "Active" }, { key: "events", label: "Events" },
+      { key: "active", label: "Active" }, { key: "events", label: "Events", render: v => Array.isArray(v) ? v.join(", ") : (v || "-") },
       { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString(...fmt()) : "Never" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "url", label: "URL", required: true },{ key: "secret", label: "Secret" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "url", label: "URL", required: true },{ key: "events", label: "Events (comma-separated, * for all)", required: true }]}
   />;
 }
 // ── Partners ──
@@ -2718,17 +2872,24 @@ function AssetsPage() {
 }
 // ── Notes ──
 function NotesPage() {
+  // A note is a body filed on a record (module and id). It has no title, and
+  // the form could not say which record, so every create was refused.
   return <ModulePage title="Notes" icon={FileText} endpoint="/notes"
     columns={[
-      { key: "title", label: "Title" }, { key: "parentModule", label: "Module" },
+      { key: "body", label: "Note", render: v => (v || "").split("\n")[0].slice(0, 80) || "-" },
+      { key: "module", label: "Module" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     detailFields={[
-      { key: "title", label: "Title" }, { key: "body", label: "Content" },
-      { key: "parentModule", label: "Module" },
+      { key: "body", label: "Content" }, { key: "module", label: "Module" },
+      { key: "recordId", label: "Record" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "title", label: "Title", required: true },{ key: "body", label: "Content", type: "textarea" }]}
+    formFields={[
+      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","cases"] },
+      { key: "recordId", label: "Record ID", required: true },
+      { key: "body", label: "Content", type: "textarea" },
+    ]}
   />;
 }
 // ── Sequences ──
@@ -2741,7 +2902,7 @@ function SequencesPage() {
       { key: "enrolledCount", label: "Enrolled", render: v => <span className="font-mono">{v||0}</span> },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused","Completed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused","Archived"] },
     ]}
     detailFields={[
       { key: "name", label: "Name" }, { key: "status", label: "Status" },
@@ -2762,7 +2923,7 @@ const approvalTitle = (a) => {
 };
 
 function ApprovalsPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, user } = useAuth();
   const [pending, setPending] = useState([]); const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null); const [tab, setTab] = useState('pending');
   const [busy, setBusy] = useState(null);
@@ -2784,7 +2945,7 @@ function ApprovalsPage() {
     setBusy(id);
     try {
       await apiFetch(`/approvals/requests/${id}/${action}`, { method: 'POST', body: {} });
-      setToast({ message: action === 'approve' ? 'Approved' : 'Rejected', type: 'success' });
+      setToast({ message: ({ approve: 'Approved', reject: 'Rejected', recall: 'Recalled' })[action], type: 'success' });
       load();
     } catch (e) { setToast({ message: e.message, type: 'error' }); }
     finally { setBusy(null); }
@@ -2809,7 +2970,7 @@ function ApprovalsPage() {
               <div className="flex items-center gap-2">
                 {tab === 'pending'
                   ? <><Button variant="primary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>
-                  : <Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge>}
+                  : <>{a.status === 'Pending' && a.submittedById === user?.id && <Button variant="secondary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'recall')}>Recall</Button>}<Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge></>}
               </div>
             </div>
           </div>
@@ -2829,7 +2990,7 @@ function AnalyticsPage() {
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Analytics</h1>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4 mb-6">
         <StatCard label="Conversion Rate" value={`${d.conversionRate||0}%`} icon={TrendingUp} color="success" />
-        <StatCard label="Avg Deal Size" value={`$${((d.avgDealSize||0)/1000).toFixed(0)}K`} icon={DollarSign} color="primary" />
+        <StatCard label="Avg Deal Size" value={money(d.avgDealSize || 0, d.currency || "USD", { notation: "compact" })} icon={DollarSign} color="primary" />
         <StatCard label="Sales Cycle" value={`${d.avgSalesCycle||0}d`} icon={Clock} color="cyan" />
         <StatCard label="Activities/Day" value={d.activitiesPerDay||0} icon={Activity} color="purple" />
       </div>
@@ -2882,14 +3043,14 @@ function ChatterPage() {
 // ── Recycle Bin ──
 function RecycleBinPage() {
   const { apiFetch } = useAuth();
-  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState('contact'); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
+  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState(''); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
   useEffect(()=>{apiFetch('/recycle-bin/stats').then(setStats).catch(()=>{});},[apiFetch]);
   useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?module=${module}&limit=50`).then(d=>setItems(d.data||d||[])).catch(()=>setItems([])).finally(()=>setLoading(false));},[module,apiFetch]);
   const restore = async(id)=>{try{await apiFetch(`/recycle-bin/${id}/restore`,{method:'POST',body:{module}});setToast({message:'Restored',type:'success'});setItems(p=>p.filter(i=>i.id!==id));}catch(e){setToast({message:e.message,type:'error'});}};
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Recycle Bin</h1>
-      {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}s</div></button>))}</div>}
+      {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}</div></button>))}</div>}
       {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title="Empty" subtitle="Deleted items appear here for 30 days" />:(
         <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div><Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button></div>))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
@@ -2898,16 +3059,144 @@ function RecycleBinPage() {
 }
 
 // ── Import ──
+/**
+ * Rows of a CSV file as objects keyed by its header row. Quoted fields may
+ * hold commas, doubled quotes and line breaks (RFC 4180).
+ */
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  const src = String(text).replace(/^﻿/, "");
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"' && src[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && src[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      if (row.some(v => v !== "")) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field);
+  if (row.some(v => v !== "")) rows.push(row);
+  const [header = [], ...body] = rows;
+  return { header: header.map(h => h.trim()), rows: body.map(r => Object.fromEntries(header.map((h, i) => [h.trim(), (r[i] ?? "").trim()]))) };
+}
+
+const IMPORT_BATCH = 500;   // rows per request, well inside the API's 1MB body limit
+
+/**
+ * Import records from a CSV file. This page was a mock: the drop zone had no
+ * file input and Start Import did nothing. Columns are matched to the
+ * module's fields by name ("First Name" or first_name for firstName), the
+ * file is checked first, then imported a batch at a time.
+ */
 function ImportPage() {
+  const { apiFetch } = useAuth();
   const [module, setModule] = useState('contacts');
+  const [meta, setMeta] = useState(null);
+  const [file, setFile] = useState(null);          // { name, header, rows }
+  const [check, setCheck] = useState(null);        // validation totals
+  const [result, setResult] = useState(null);      // import totals
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);
+  const input = useRef(null);
+
+  useEffect(() => { apiFetch('/import/metadata').then(setMeta).catch(() => setMeta(null)); }, [apiFetch]);
+  const fields = meta?.metadata?.[module]?.availableFields || [];
+  const required = meta?.metadata?.[module]?.requiredFields || [];
+
+  // Header -> field, by name ignoring case, spaces and punctuation.
+  const squash = v => String(v).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const mapping = useMemo(() => {
+    const byName = new Map(fields.map(f => [squash(f), f]));
+    return Object.fromEntries((file?.header || []).map(h => [h, byName.get(squash(h)) || null]));
+  }, [file, fields]);
+  const records = useMemo(() => (file?.rows || []).map(r =>
+    Object.fromEntries(Object.entries(r).filter(([h, v]) => mapping[h] && v !== "").map(([h, v]) => [mapping[h], v]))), [file, mapping]);
+  const unmatched = Object.entries(mapping).filter(([, f]) => !f).map(([h]) => h);
+  const missing = required.filter(f => !Object.values(mapping).includes(f));
+
+  const choose = async (picked) => {
+    if (!picked) return;
+    setCheck(null); setResult(null);
+    try {
+      const parsed = parseCsv(await picked.text());
+      if (!parsed.rows.length) throw new Error("The file has a header row but no records");
+      if (parsed.rows.length > 10000) throw new Error("At most 10,000 records per import");
+      setFile({ name: picked.name, ...parsed });
+    } catch (e) { setFile(null); setToast({ message: e.message || "Could not read that file", type: "error" }); }
+  };
+
+  const inBatches = async (path, body, add) => {
+    let total = null;
+    for (let i = 0; i < records.length; i += IMPORT_BATCH) {
+      const d = await apiFetch(path, { method: "POST", body: { module, records: records.slice(i, i + IMPORT_BATCH), ...body } });
+      total = add(total, d, i);
+    }
+    return total;
+  };
+  const validate = async () => {
+    setBusy(true); setResult(null);
+    try {
+      setCheck(await inBatches("/import/validate", {}, (t, d, offset) => ({
+        errorCount: (t?.errorCount || 0) + (d.errorCount || 0),
+        warningCount: (t?.warningCount || 0) + (d.warningCount || 0),
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
+      })));
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const run = async () => {
+    setBusy(true);
+    try {
+      setResult(await inBatches("/import/execute", { skipDuplicates: true }, (t, d, offset) => ({
+        created: (t?.created || 0) + (d.created || 0),
+        updated: (t?.updated || 0) + (d.updated || 0),
+        skipped: (t?.skipped || 0) + (d.skipped || 0),
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
+      })));
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Import Data</h1>
-      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 max-w-lg">
-        <Select label="Module" value={module} onChange={setModule} options={['contacts','leads','deals','accounts','cases','products']} />
-        <div className="mt-4 p-6 border-2 border-dashed border-[#182550] rounded-xl text-center"><Upload size={24} className="mx-auto text-[#4A5168] mb-2" /><div className="text-sm text-[#7E8598]">Drag & drop a CSV file</div><div className="text-xs text-[#4A5168] mt-1">or click to browse</div></div>
-        <Button fullWidth className="mt-4">Start Import</Button>
+      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 max-w-lg space-y-4">
+        <Select label="Module" value={module} onChange={v => { setModule(v); setCheck(null); setResult(null); }} options={meta?.modules || ['contacts','leads','accounts','products']} />
+        {required.length > 0 && <p className="text-xs text-[#7E8598]">Required columns: {required.join(", ")}. Other columns: {fields.filter(f => !required.includes(f)).join(", ")}.</p>}
+        <div {...clickable(() => input.current?.click(), "Choose a CSV file")}
+          onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); choose(e.dataTransfer.files?.[0]); }}
+          className="p-6 border-2 border-dashed border-[#182550] rounded-xl text-center cursor-pointer hover:border-[#203060]">
+          <Upload size={24} className="mx-auto text-[#4A5168] mb-2" />
+          <div className="text-sm text-[#7E8598]">{file ? `${file.name}: ${file.rows.length} records` : "Drag & drop a CSV file"}</div>
+          <div className="text-xs text-[#4A5168] mt-1">{file ? "Click to choose another" : "or click to browse"}</div>
+          <input ref={input} type="file" accept=".csv,text/csv" className="hidden" onChange={e => { choose(e.target.files?.[0]); e.target.value = ""; }} />
+        </div>
+        {file && unmatched.length > 0 && <p className="text-xs text-[#FBBF24]">Not imported (no matching field): {unmatched.join(", ")}</p>}
+        {file && missing.length > 0 && <p className="text-xs text-[#F87171]">Missing required column{missing.length > 1 ? "s" : ""}: {missing.join(", ")}</p>}
+        {check && (
+          <div className="text-xs space-y-1">
+            <div className={check.errorCount ? "text-[#F87171]" : "text-[#34D399]"}>{check.errorCount ? `${check.errorCount} problem${check.errorCount > 1 ? "s" : ""} found` : "No problems found"}{check.warningCount ? `, ${check.warningCount} warning${check.warningCount > 1 ? "s" : ""}` : ""}</div>
+            {check.errors.map((e, i) => <div key={i} className="text-[#7E8598]">Row {e.row}: {e.message} ({e.field})</div>)}
+          </div>
+        )}
+        {result && (
+          <div className="text-xs space-y-1">
+            <div className="text-[#34D399]">{result.created} created, {result.updated} updated, {result.skipped} skipped</div>
+            {result.errors.map((e, i) => <div key={i} className="text-[#7E8598]">Row {e.row}: {e.error}</div>)}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Button variant="secondary" fullWidth onClick={validate} disabled={!file || busy || missing.length > 0}>Check file</Button>
+          <Button fullWidth onClick={run} disabled={!file || busy || missing.length > 0 || !check || check.errorCount > 0}>Start Import</Button>
+        </div>
       </div>
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
     </div>
   );
 }
@@ -3314,7 +3603,7 @@ function ProjectsPage() {
           <StatCard label="Active" value={portfolio.activeProjects || 0} icon={ListTree} color="primary" />
           <StatCard label="At Risk" value={portfolio.atRisk || 0} icon={AlertTriangle} color={portfolio.atRisk > 0 ? "danger" : "success"} />
           <StatCard label="Avg Completion" value={`${portfolio.avgCompletion || 0}%`} icon={TrendingUp} color="cyan" />
-          <StatCard label="Budget" value={`$${((portfolio.totalBudget||0)/1000).toFixed(0)}K`} icon={DollarSign} color="purple" />
+          <StatCard label="Budget" value={money(portfolio.totalBudget || 0, portfolio.currency || "USD", { notation: "compact" })} icon={DollarSign} color="purple" />
         </div>
       )}
 
@@ -3625,8 +3914,8 @@ function TeamList({ projectId }) {
       {team.map(r => (
         <div key={r.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm text-[#F0EDE5]">{r.role}</div>
-            <div className="text-xs text-[#4A5168]">{r.openTasks} open tasks | {r.hoursLogged}h logged</div>
+            <div className="text-sm text-[#F0EDE5]">{r.user ? `${r.user.firstName} ${r.user.lastName}` : r.role}</div>
+            <div className="text-xs text-[#4A5168]">{r.user && r.role ? `${r.role} | ` : ""}{r.openTasks} open tasks | {r.hoursLogged}h logged</div>
           </div>
           <Badge color={r.allocationPct > 100 ? 'danger' : 'info'}>{r.allocationPct}%</Badge>
         </div>
@@ -5512,6 +5801,7 @@ function AppShell({ go }) {
     recordId: route.recordId,
     openRecord: (id) => navigate(route.module, id),
     closeRecord: () => navigate(route.module, null),
+    navigate,
   }), [route, navigate]);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);

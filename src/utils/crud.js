@@ -372,6 +372,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       try {
         const { fireWebhookEvent } = require('../services/webhooks');
         await fireWebhookEvent(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
+        // Offered as deal.stage_changed and never fired.
+        if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
+          await fireWebhookEvent(prisma, `${moduleName}.stage_changed`, { id: record.id, module: moduleName, from: oldRecord.stage, to: record.stage });
+        }
       } catch (e) { /* Webhook is best-effort */ }
 
       // As for create: linked records as the caller may see them, in the response only.
