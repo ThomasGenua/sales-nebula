@@ -130,15 +130,20 @@ router.post('/upsert', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Bulk delete: only rows the caller may change, and only with full access.
+// Bulk delete: only rows the caller may delete (full access, Full on the row),
+// and a soft delete where the model has one, as every other delete is. Rows
+// were removed outright, and one with dependent records failed the batch.
 router.post('/delete', async (req, res, next) => {
   try {
     const { module, ids } = req.body || {};
     const model = target(req, res, module, 'full');
     if (!model) return;
     if (!Array.isArray(ids) || ids.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
-    const where = await reachable(req, module, model, { id: { in: ids.map(String) } }, 'Edit');
-    const deleted = await req.app.locals.prisma[model].deleteMany({ where });
+    const where = await reachable(req, module, model, { id: { in: ids.map(String) } }, 'Full');
+    const prisma = req.app.locals.prisma;
+    const deleted = modelHasField(model, 'deletedAt')
+      ? await prisma[model].updateMany({ where, data: { deletedAt: new Date() } })
+      : await prisma[model].deleteMany({ where });
     res.json({ operation: 'delete', module, deleted: deleted.count, total: ids.length });
   } catch (err) { next(err); }
 });

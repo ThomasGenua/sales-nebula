@@ -42,8 +42,9 @@ router.get('/installed', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// App settings live on the installation.
-router.get('/installed/:appId/settings', async (req, res, next) => {
+// App settings live on the installation. They configure the org's apps, so
+// reading them takes admin read, as changing them takes admin full.
+router.get('/installed/:appId/settings', requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const install = await req.app.locals.prisma.installedApp.findFirst({ where: { appId: req.params.appId } });
     if (!install) return res.status(404).json({ error: 'App is not installed' });

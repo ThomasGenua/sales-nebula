@@ -58,12 +58,16 @@ router.put('/bundles/:id', requirePermission('products', 'edit'), async (req, re
   try {
     const prisma = req.app.locals.prisma;
     const { items } = req.body;
-    if (items) await prisma.productBundleItem.deleteMany({ where: { bundleId: req.params.id } });
-    const bundle = await prisma.productBundle.update({
-      where: { id: req.params.id },
-      data: { ...columnsFrom('productBundle', req.body), ...(items && { items: { create: rowsOf('productBundleItem', 'bundleId', items) } }) },
-      include: { items: { include: { product: true } } },
-    });
+    // The old items go only if the update lands: removed first and on their
+    // own, a failed update left the bundle empty.
+    const bundle = (await prisma.$transaction([
+      ...(items ? [prisma.productBundleItem.deleteMany({ where: { bundleId: req.params.id } })] : []),
+      prisma.productBundle.update({
+        where: { id: req.params.id },
+        data: { ...columnsFrom('productBundle', req.body), ...(items && { items: { create: rowsOf('productBundleItem', 'bundleId', items) } }) },
+        include: { items: { include: { product: true } } },
+      }),
+    ])).pop();
     res.json(bundle);
   } catch (err) { next(err); }
 });
@@ -135,12 +139,15 @@ router.put('/pricebooks/:id', requirePermission('products', 'edit'), async (req,
   try {
     const prisma = req.app.locals.prisma;
     const { entries } = req.body;
-    if (entries) await prisma.pricebookEntry.deleteMany({ where: { pricebookId: req.params.id } });
-    const pricebook = await prisma.pricebook.update({
-      where: { id: req.params.id },
-      data: { ...columnsFrom('pricebook', req.body), ...(entries && { entries: { create: rowsOf('pricebookEntry', 'pricebookId', entries) } }) },
-      include: { entries: { include: { product: true } } },
-    });
+    // As for bundles: the old entries go only if the update lands.
+    const pricebook = (await prisma.$transaction([
+      ...(entries ? [prisma.pricebookEntry.deleteMany({ where: { pricebookId: req.params.id } })] : []),
+      prisma.pricebook.update({
+        where: { id: req.params.id },
+        data: { ...columnsFrom('pricebook', req.body), ...(entries && { entries: { create: rowsOf('pricebookEntry', 'pricebookId', entries) } }) },
+        include: { entries: { include: { product: true } } },
+      }),
+    ])).pop();
     res.json(pricebook);
   } catch (err) { next(err); }
 });

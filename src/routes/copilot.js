@@ -5,6 +5,7 @@ const { crudModelFor } = require('../utils/crud');
 const { complete, isConfigured, AiError } = require('../services/claude');
 // The tighter limit meant for model calls was defined and attached to nothing.
 const { limiters } = require('../middleware/rateLimit');
+const { VALID_STAGES } = require('../utils/integrity');
 
 const router = Router();
 
@@ -129,7 +130,8 @@ router.post('/actions', authenticate, async (req, res, next) => {
     if (!action) return res.status(400).json({ error: 'action required' });
     const actions = {
       'create_task': async () => {
-        const task = await prisma.activity.create({ data: { type: 'Task', subject: params.subject || 'New Task', status: 'Open', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null } });
+        // Status left to its default (Scheduled); 'Open' was a status no activity screen or count knows.
+        const task = await prisma.activity.create({ data: { type: 'Task', subject: params.subject || 'New Task', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null } });
         return { message: 'Task created', task };
       },
       'log_call': async () => {
@@ -138,7 +140,19 @@ router.post('/actions', authenticate, async (req, res, next) => {
       },
       'update_deal_stage': async () => {
         if (!params.dealId || !params.stage) return { error: 'dealId and stage required' };
-        const deal = await prisma.deal.update({ where: { id: params.dealId }, data: { stage: params.stage } });
+        // A stage the pipeline has, recorded in the deal's stage history and
+        // announced as an edit is: this wrote any text as the stage, unrecorded.
+        if (!VALID_STAGES.includes(params.stage)) return { error: `Invalid stage. Must be one of: ${VALID_STAGES.join(', ')}` };
+        const before = await prisma.deal.findFirst({ where: { id: String(params.dealId), deletedAt: null }, select: { stage: true } });
+        if (!before) return { error: 'Deal not found' };
+        const deal = await prisma.deal.update({ where: { id: String(params.dealId) }, data: { stage: params.stage } });
+        if (before.stage !== deal.stage) {
+          const last = await prisma.dealStageHistory.findFirst({ where: { dealId: deal.id }, orderBy: { createdAt: 'desc' } });
+          await prisma.dealStageHistory.create({
+            data: { dealId: deal.id, fromStage: before.stage, toStage: deal.stage, changedById: req.userId, duration: last ? Math.round((Date.now() - last.createdAt.getTime()) / 86400000) : null },
+          });
+          req.app.locals.emit?.dealStageChanged?.(deal, before.stage, deal.stage);
+        }
         return { message: `Deal moved to ${params.stage}`, deal };
       },
     };
