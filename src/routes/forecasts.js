@@ -5,6 +5,7 @@ const { reachableWhere } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { pickModelFields } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -327,6 +328,7 @@ router.post('/:id/submit', requirePermission('deals', 'edit'), forecastAccess(),
     const prisma = req.app.locals.prisma;
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data: { status: 'Submitted' }, include: await includeFor(req) });
     await req.audit({ action: 'update', module: 'forecasts', recordId: forecast.id, details: 'Forecast submitted' });
+    await fireWebhookEvent(prisma, 'forecast.submitted', { id: forecast.id, period: forecast.period });
     res.json(forecast);
   } catch (err) { next(err); }
 });
@@ -337,6 +339,7 @@ router.post('/:id/approve', requirePermission('deals', 'edit'), forecastAccess({
     const prisma = req.app.locals.prisma;
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data: { status: 'Approved' }, include: await includeFor(req) });
     await req.audit({ action: 'update', module: 'forecasts', recordId: forecast.id, details: 'Forecast approved' });
+    await fireWebhookEvent(prisma, 'forecast.approved', { id: forecast.id, period: forecast.period });
     res.json(forecast);
   } catch (err) { next(err); }
 });

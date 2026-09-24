@@ -2,6 +2,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 /**
  * Whose activities a list shows: the caller's own, or another user's for an
@@ -171,6 +172,7 @@ module.exports = createCrudRouter('activity', 'activities', {
         }
 
         await req.audit({ action: 'update', module: 'activities', recordId: activity.id, details: `Completed activity: ${activity.subject}` });
+        await fireWebhookEvent(prisma, 'activity.completed', { id: activity.id, type: activity.type });
         res.json(activity);
       } catch (err) { next(err); }
     });

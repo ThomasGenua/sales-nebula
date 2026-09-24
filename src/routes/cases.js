@@ -2,6 +2,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { CASE_NUMBER } = require('../utils/numbering');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 // A case is done once Resolved or Closed. closedAt is when it got there; it
 // was never written, so the metrics' closures and CSAT and an entitlement's
@@ -101,6 +102,7 @@ const router = createCrudRouter('case', 'cases', {
         }).catch(() => {});
 
         await req.audit({ action: 'update', module: 'cases', recordId: cs.id, details: `Escalated case ${cs.caseNumber}` });
+        await fireWebhookEvent(prisma, 'case.escalated', { id: cs.id, caseNumber: cs.caseNumber });
         res.json(updated);
       } catch (err) { next(err); }
     });
@@ -120,6 +122,7 @@ const router = createCrudRouter('case', 'cases', {
           data: { caseId: updated.id, fromStatus: prior?.status || null, toStatus: 'Resolved', changedById: req.userId },
         }).catch(() => {});
         await req.audit({ action: 'update', module: 'cases', recordId: updated.id, details: `Resolved case ${updated.caseNumber}` });
+        await fireWebhookEvent(prisma, 'case.resolved', { id: updated.id, caseNumber: updated.caseNumber });
         res.json(updated);
       } catch (err) { next(err); }
     });

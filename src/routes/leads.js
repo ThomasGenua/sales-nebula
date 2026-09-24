@@ -5,6 +5,7 @@ const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields } = require('../utils/modelFields');
 const { resolveDealCurrency } = require('../utils/currency');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 const router = createCrudRouter('lead', 'leads', {
   include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, customValues: { include: { customField: true } } },
@@ -95,6 +96,8 @@ const router = createCrudRouter('lead', 'leads', {
         });
 
         await req.audit({ action: 'update', module: 'leads', recordId: lead.id, details: `Converted lead to contact ${result.contact.id}` });
+        // The webhook events list offers lead.converted; nothing fired it.
+        await fireWebhookEvent(prisma, 'lead.converted', { id: lead.id, contactId: result.contact.id, accountId: accountId || null, dealId: result.deal?.id || null });
         res.json(result);
       } catch (err) { next(err); }
     });
@@ -171,6 +174,7 @@ const router = createCrudRouter('lead', 'leads', {
         score = Math.max(0, Math.min(100, score));
 
         const updated = await prisma.lead.update({ where: { id: lead.id }, data: { score } });
+        await fireWebhookEvent(prisma, 'lead.scored', { id: updated.id, score: updated.score });
         res.json({ ...updated, rulesApplied: rules.length });
       } catch (err) { next(err); }
     });

@@ -193,7 +193,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (validate) {
         const { valid, errors } = validate(data);
-        if (!valid) return res.status(400).json({ error: 'Validation failed', errors });
+        // The message names the fields: the pages show only `error`, which
+        // said "Validation failed" and not what to fix.
+        if (!valid) {
+          const detail = Object.entries(errors || {}).map(([field, problem]) => `${field}: ${String(problem).toLowerCase()}`).join('; ');
+          return res.status(400).json({ error: detail ? `Validation failed (${detail})` : 'Validation failed', errors });
+        }
       }
 
       if (beforeCreate) data = await beforeCreate(data, req);

@@ -4,7 +4,9 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
+const { currencyContext } = require('../utils/currency');
 const { createNumbered, QUOTE_NUMBER, INVOICE_NUMBER } = require('../utils/numbering');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -166,6 +168,7 @@ router.post('/:id/accept', requirePermission('quotes', 'edit'), async (req, res,
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Accepted' }, include });
     await req.audit({ action: 'update', module: 'quotes', recordId: quote.id, details: 'Quote accepted' });
+    await fireWebhookEvent(prisma, 'quote.accepted', { id: quote.id, number: quote.number, total: quote.total });
     res.json(quote);
   } catch (err) { next(err); }
 });
@@ -239,7 +242,10 @@ router.get('/:id/pdf', requirePermission('quotes', 'read'), async (req, res, nex
     });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
+    // In the organisation's currency; a line with no product is named by its
+    // description (a quote item has no name, so it printed "Item").
     const html = generateDocumentHtml('QUOTE', {
+      currency: (await currencyContext(prisma)).base,
       number: quote.number,
       date: quote.createdAt,
       validUntil: quote.validUntil,
@@ -249,7 +255,7 @@ router.get('/:id/pdf', requirePermission('quotes', 'read'), async (req, res, nex
       account: quote.account,
       contact: quote.contact,
       items: quote.items.map(i => ({
-        name: i.product?.name || i.name || 'Item',
+        name: i.product?.name || i.description || 'Item',
         sku: i.product?.sku || '',
         quantity: i.quantity,
         unitPrice: i.unitPrice || i.price,

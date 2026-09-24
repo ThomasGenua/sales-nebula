@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { SLA_PAUSED_STATUSES } = require('../utils/integrity');
 const {
   DEFAULT_SCHEDULE, DEFAULT_SLA_TARGETS,
   isWithinBusinessHours, businessMinutesBetween, businessHoursBetween,
@@ -31,7 +32,7 @@ async function loadProfile(prisma, businessHoursId) {
 
 /** Derive the paused windows for a case from its status history. */
 async function pausesForCase(prisma, caseId) {
-  const PAUSED_STATUSES = ['Pending Customer', 'Waiting on Customer', 'On Hold', 'Awaiting Info'];
+  const PAUSED_STATUSES = SLA_PAUSED_STATUSES;
   try {
     const history = await prisma.caseStatusHistory.findMany({ where: { caseId }, orderBy: { createdAt: 'asc' } });
     const pauses = [];

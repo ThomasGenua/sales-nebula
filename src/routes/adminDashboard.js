@@ -148,8 +148,9 @@ router.get('/system', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Recent activity feed for admins
-router.get('/activity', async (req, res, next) => {
+// Recent activity feed for admins. Who signed in and what everyone changed:
+// admin read is every Sales Rep's, so this takes users read as well.
+router.get('/activity', requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const since = new Date(Date.now() - 7 * 86400000);

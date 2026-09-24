@@ -453,7 +453,8 @@ const handlers = {
       const overdueCase = await prisma.case.findMany({
         where: {
           priority: policy.priority,
-          status: { notIn: ['Resolved', 'Closed', 'Rejected', 'Escalated'] },
+          // Not while it waits on the customer, which pauses the SLA board's clock too.
+          status: { notIn: ['Resolved', 'Closed', 'Rejected', 'Escalated', ...require('../utils/integrity').SLA_PAUSED_STATUSES] },
           createdAt: { lt: threshold },
           deletedAt: null,
         },
@@ -474,6 +475,7 @@ const handlers = {
           await prisma.caseStatusHistory.create({
             data: { caseId: cs.id, fromStatus: cs.status, toStatus: 'Escalated', note: 'Escalated by SLA policy' },
           }).catch(() => {});
+          await require('../services/webhooks').fireWebhookEvent(prisma, 'case.escalated', { id: cs.id, caseNumber: cs.caseNumber, by: 'sla' });
           escalated++;
         }
         if (cs.slaBreached) continue;

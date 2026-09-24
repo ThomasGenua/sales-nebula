@@ -4,7 +4,9 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
+const { currencyContext } = require('../utils/currency');
 const { createNumbered, INVOICE_NUMBER } = require('../utils/numbering');
+const { fireWebhookEvent } = require('../services/webhooks');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -165,6 +167,7 @@ router.post('/:id/pay', requirePermission('invoices', 'edit'), async (req, res, 
       include,
     });
     await req.audit({ action: 'update', module: 'invoices', recordId: invoice.id, details: 'Invoice paid' });
+    await fireWebhookEvent(prisma, 'invoice.paid', { id: invoice.id, number: invoice.number, total: invoice.total });
     res.json(invoice);
   } catch (err) { next(err); }
 });
@@ -227,7 +230,9 @@ router.get('/:id/pdf', requirePermission('invoices', 'read'), async (req, res, n
     });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
+    // In the organisation's currency, which the document assumed was dollars.
     const html = generateDocumentHtml('INVOICE', {
+      currency: (await currencyContext(prisma)).base,
       number: invoice.number,
       date: invoice.date,
       dueDate: invoice.dueDate,
