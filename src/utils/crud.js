@@ -4,7 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
-const { moduleAccess, recordAccess, reachableWhere, linkRefusal } = require('../middleware/access');
+const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const {
   pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
   scalarWhere, scalarOrderBy,
@@ -129,6 +129,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       ]);
 
       await hydrateIncludes(prisma, records, manualIncludes);
+      await visibleLinks(req, modelName, records, requestedInclude);
       res.json({
         data: records,
         meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) },
@@ -151,6 +152,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         return res.status(404).json({ error: 'Not found' });
       }
       await hydrateIncludes(prisma, record, manualIncludes);
+      await visibleLinks(req, modelName, record, requestedInclude);
       res.json(record);
     } catch (err) { next(err); }
   });
@@ -246,8 +248,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       if (ignored.length) warnings.push(`Ignored unknown field(s): ${ignored.join(', ')}`);
       if (duplicates.length) warnings.push(`Possible duplicate of ${duplicates.length} existing record(s).`);
 
+      // Linked records as far as the caller may see them (visibleLinks), in
+      // the response only: hooks and workflows above had the record whole.
+      const body = { ...record };
+      await visibleLinks(req, modelName, body, requestedInclude);
       res.status(201).json({
-        ...record,
+        ...body,
         ...(warnings.length ? { warnings } : {}),
         ...(duplicates.length ? { duplicates } : {}),
         ...(assignment ? { assignedBy: assignment.rule } : {}),
@@ -333,7 +339,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         await fireWebhookEvent(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
       } catch (e) { /* Webhook is best-effort */ }
 
-      res.json(record);
+      // As for create: linked records as the caller may see them, in the response only.
+      const body = { ...record };
+      await visibleLinks(req, modelName, body, requestedInclude);
+      res.json(body);
     } catch (err) { next(err); }
   });
 
