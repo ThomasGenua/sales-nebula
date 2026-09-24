@@ -71,6 +71,19 @@ function editableFields(modelName, data) {
   return picked;
 }
 
+/**
+ * A request body as the model's own columns, less its id and timestamps, for
+ * routes that passed the body to a write whole. A relation key in it was a
+ * nested write into another table (an email's `deal: { update: … }` rewrote
+ * a deal the caller could not open), and `id` renamed the row.
+ */
+function columnsFrom(modelName, body) {
+  const source = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const { data } = pickModelFields(modelName, source);
+  for (const key of ['id', 'createdAt', 'updatedAt']) delete data[key];
+  return data;
+}
+
 /** Why an automated update may not set `field` to `value` on a model, or null. */
 function plainFieldProblem(modelName, field, value) {
   const model = findModel(modelName);
@@ -290,6 +303,6 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
 }
 
 module.exports = {
-  pickModelFields, lineItemFields, plainFieldProblem, editableFields, scalarWhere, scalarSelect,
+  pickModelFields, lineItemFields, plainFieldProblem, editableFields, columnsFrom, scalarWhere, scalarSelect,
   modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
 };
