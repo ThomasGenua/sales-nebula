@@ -287,10 +287,15 @@ function Button({ children, variant = "primary", size = "md", onClick, disabled,
 }
 
 function Input({ label, value, onChange, type = "text", placeholder, required, className = "", ...props }) {
+  // A saved date comes back as a full ISO timestamp, which a date input shows
+  // as blank, so editing a record hid its dates; and 0 is a value, not blank.
+  const shown = typeof value === "string" && type === "date" ? value.slice(0, 10)
+    : typeof value === "string" && type === "datetime-local" ? value.slice(0, 16)
+    : value ?? "";
   return (
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium mb-1.5" style={{ color: "var(--sn-slate)" }}>{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
-      <input type={type} value={value || ""} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      <input type={type} value={shown} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         aria-label={label ? undefined : placeholder}
         {...props}
         className="w-full px-3 py-2.5 rounded-lg text-sm focus:outline-none focus:ring-1 transition-colors min-h-[44px]"
@@ -1091,7 +1096,9 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
     if (sortField) qs += `&sortBy=${sortField}&sortDir=${sortDir}`;
     Object.entries(filterValues).forEach(([k, v]) => { if (v) qs += `&${k}=${encodeURIComponent(v)}`; });
     apiFetch(`${endpoint}${qs}`, { signal })
-      .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.total ?? d.length ?? 0); })
+      // The CRUD routes put the count in meta.total, which this never read: every
+      // list showed no count and no pages, so nothing past the first 50 was reachable.
+      .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.meta?.total ?? d.pagination?.total ?? d.total ?? (Array.isArray(d) ? d.length : 0)); })
       .catch(err => {
         if (err?.name === "AbortError") return;   // superseded by a newer request
         setItems([]);

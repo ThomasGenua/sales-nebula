@@ -110,6 +110,17 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // went into the where clause, relations included, which reached the
       // columns of related records.
       const wanted = Object.fromEntries(Object.entries(filters).filter(([, value]) => value && value !== 'All'));
+      // The filter panel sends a date range as <column>From / <column>To,
+      // which are not columns, so the range was dropped and the list came back
+      // unfiltered. They bound the column instead; a To date takes in its day.
+      for (const key of Object.keys(wanted)) {
+        const [, column, end] = /^(.+)(From|To)$/.exec(key) || [];
+        if (!column || modelHasField(modelName, key) || typeof wanted[key] !== 'string') continue;
+        const bound = end === 'To' && /^\d{4}-\d{2}-\d{2}$/.test(wanted[key]) ? `${wanted[key]}T23:59:59.999Z` : wanted[key];
+        const range = wanted[column] && typeof wanted[column] === 'object' ? wanted[column] : {};
+        wanted[column] = { ...range, [end === 'From' ? 'gte' : 'lte']: bound };
+        delete wanted[key];
+      }
       where = { ...where, ...scalarWhere(modelName, wanted) };
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
@@ -309,8 +320,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       });
       await hydrateIncludes(prisma, record, manualIncludes);
 
-      // Field-level audit
-      const changes = diffFields(oldRecord, data);
+      // Field-level audit, of the values written: the form sends the whole
+      // record back as text, so diffing the body logged every number as changed.
+      const changes = diffFields(oldRecord, updateData);
       if (changes.length > 0) {
         await req.audit({
           action: 'update', module: moduleName, recordId: record.id,
