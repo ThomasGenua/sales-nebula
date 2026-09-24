@@ -52,10 +52,13 @@ router.get('/profiles', requirePermission('contacts', 'read'), async (req, res, 
     res.json({ data: data.slice(0, take) });
   } catch (err) { next(err); }
 });
+// An id no profile has goes on to the contact view below, which shares this
+// path and so was never reached.
 router.get('/profiles/:id', requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const profile = await req.app.locals.prisma.unifiedProfile.findUnique({ where: { id: req.params.id } });
-    if (!profile || !(await visibleProfiles(req, [profile])).length) return res.status(404).json({ error: 'Not found' });
+    if (!profile) return next('route');
+    if (!(await visibleProfiles(req, [profile])).length) return res.status(404).json({ error: 'Not found' });
     res.json(profile);
   } catch (err) { next(err); }
 });
@@ -162,23 +165,32 @@ router.post('/streams/:id/ingest', requirePermission('contacts', 'edit'), async 
 module.exports = router;
 
 // Customer profile
-// GET /profiles/:id above answers first, so this is not reached; guarded as a
-// contact read all the same, in case the order changes.
+// Reached when GET /profiles/:id above finds no profile with the id. A live
+// contact the caller can see, and of its account, deals, cases and activities
+// only what they could open themselves: all of them were read whole.
 router.get('/profiles/:contactId', authenticate, requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     if (!(await canReach(req, 'contacts', 'contact', req.params.contactId))) return res.status(404).json({ error: 'Not found' });
-    const contact = await prisma.contact.findUnique({ where: { id: req.params.contactId }, include: { account: { select: { name: true, industry: true } } } });
+    const contact = await prisma.contact.findFirst({ where: { id: req.params.contactId, deletedAt: null } });
     if (!contact) return res.status(404).json({ error: 'Not found' });
-    const [deals, cases, activities, events] = await Promise.all([
-      prisma.deal.findMany({ where: { contactId: contact.id, deletedAt: null }, select: { id: true, name: true, stage: true, value: true, currency: true } }),
-      prisma.case.count({ where: { contactId: contact.id, deletedAt: null } }),
-      prisma.activity.findMany({ where: { contactId: contact.id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 10 }),
+    const visible = (module, model, where) => (permits(req, module, 'read') ? reachableWhere(req, module, model, where) : null);
+    const [dealWhere, caseWhere, activityWhere, accountWhere] = await Promise.all([
+      visible('deals', 'deal', { contactId: contact.id }),
+      visible('cases', 'case', { contactId: contact.id }),
+      visible('activities', 'activity', { contactId: contact.id }),
+      contact.accountId ? visible('accounts', 'account', { id: contact.accountId }) : null,
+    ]);
+    const [deals, cases, activities, events, account] = await Promise.all([
+      dealWhere ? prisma.deal.findMany({ where: dealWhere, select: { id: true, name: true, stage: true, value: true, currency: true } }) : [],
+      caseWhere ? prisma.case.count({ where: caseWhere }) : 0,
+      activityWhere ? prisma.activity.findMany({ where: activityWhere, orderBy: { createdAt: 'desc' }, take: 10 }) : [],
       prisma.cdpEvent.findMany({ where: { contactId: contact.id }, orderBy: { createdAt: 'desc' }, take: 20 }).catch(() => []),
+      accountWhere ? prisma.account.findFirst({ where: accountWhere, select: { name: true, industry: true } }) : null,
     ]);
     const ctx = await currencyContext(prisma);
     const lifetime = sumInBase(deals.filter(d => d.stage === 'Closed Won'), ctx);
-    res.json({ contact, account: contact.account, currency: ctx.base, deals, caseCount: cases, recentActivities: activities, events, lifetimeValue: lifetime, engagementScore: Math.min(100, activities.length * 8 + deals.length * 15) });
+    res.json({ contact: { ...contact, account }, account, currency: ctx.base, deals, caseCount: cases, recentActivities: activities, events, lifetimeValue: lifetime, engagementScore: Math.min(100, activities.length * 8 + deals.length * 15) });
   } catch (err) { next(err); }
 });
 
@@ -208,7 +220,8 @@ router.post('/segments/evaluate', authenticate, requirePermission('contacts', 'r
     const where = { deletedAt: null };
     if (criteria?.leadSource) where.leadSource = criteria.leadSource;
     if (criteria?.hasDeals) where.deals = { some: { deletedAt: null } };
-    if (criteria?.city) where.mailingCity = { contains: criteria.city, mode: 'insensitive' };
+    // A contact's city is `city`; there is no mailingCity, and naming it was a 500.
+    if (criteria?.city) where.city = { contains: criteria.city, mode: 'insensitive' };
     const contacts = await prisma.contact.findMany({ where: await reachableWhere(req, 'contacts', 'contact', where), select: { id: true, firstName: true, lastName: true, email: true }, take: 500 });
     res.json({ criteria, matchCount: contacts.length, contacts: contacts.slice(0, 50) });
   } catch (err) { next(err); }
@@ -221,13 +234,14 @@ router.post('/segments/evaluate', authenticate, requirePermission('contacts', 'r
 router.post('/segments/:id/evaluate', authenticate, requirePermission('contacts', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const segment = await prisma.segment.findUnique({ where: { id: req.params.id } });
+    const segment = await prisma.segment.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!segment) return res.status(404).json({ error: 'Segment not found' });
     const criteria = segment.criteria || {};
     const where = { deletedAt: null };
     if (criteria.leadSource) where.leadSource = criteria.leadSource;
     if (criteria.status) where.status = criteria.status;
-    if (criteria.industry) where.industry = criteria.industry;
+    // Industry is the account's; a contact has none, so this criterion was a 500.
+    if (criteria.industry) where.account = { is: { industry: criteria.industry } };
     if (criteria.createdAfter) where.createdAt = { gte: new Date(criteria.createdAfter) };
     const [memberCount, contacts] = await Promise.all([
       prisma.contact.count({ where }),

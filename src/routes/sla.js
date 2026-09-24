@@ -48,6 +48,46 @@ async function pausesForCase(prisma, caseId) {
   }
 }
 
+/**
+ * The per-priority targets PUT /targets saved, as numbers. GET /targets showed
+ * them, but every case's SLA was worked out from the defaults regardless.
+ */
+async function loadTargetOverrides(prisma) {
+  let saved = {};
+  try {
+    const setting = await prisma.setting.findFirst({ where: { key: 'sla.targets' } });
+    if (setting?.value) saved = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value;
+  } catch { /* settings table is optional */ }
+  const overrides = {};
+  for (const [priority, t] of Object.entries(saved && typeof saved === 'object' ? saved : {})) {
+    if (!t || typeof t !== 'object') continue;
+    const clean = {};
+    for (const key of ['firstResponse', 'resolution']) if (+t[key] > 0) clean[key] = +t[key];
+    if (Object.keys(clean).length) overrides[priority] = clean;
+  }
+  return overrides;
+}
+
+// Statuses that end a case's resolution clock. Resolved is done, as cases.js
+// counts it; the board and recompute kept its clock running until it breached.
+const DONE_STATUSES = ['Resolved', 'Closed', 'Rejected'];
+
+/**
+ * When each case was first answered: its earliest comment written by a staff
+ * member (a customer's emailed reply has no author) that is not internal.
+ * These routes read `firstRespondedAt`, which Case does not have, so a first
+ * response never counted as met.
+ */
+async function firstResponses(prisma, caseIds) {
+  if (!caseIds.length) return new Map();
+  const rows = await prisma.caseComment.groupBy({
+    by: ['caseId'],
+    where: { caseId: { in: caseIds }, authorId: { not: null }, isInternal: false },
+    _min: { createdAt: true },
+  });
+  return new Map(rows.map(r => [r.caseId, r._min.createdAt]));
+}
+
 // ── BUSINESS HOURS PROFILES ───────────────────────────────────────────
 
 router.get('/profiles', authenticate, async (req, res, next) => {
@@ -275,13 +315,14 @@ router.get('/cases/:id', authenticate, requirePermission('cases', 'read'), async
     if (!c) return res.status(404).json({ error: 'Case not found' });
 
     const config = await loadProfile(prisma, req.query.businessHoursId);
-    const targets = targetsForPriority(c.priority);
+    const targets = targetsForPriority(c.priority, await loadTargetOverrides(prisma));
     const pauses = await pausesForCase(prisma, c.id);
-    const closed = ['Closed', 'Resolved', 'Rejected'].includes(c.status);
+    const closed = DONE_STATUSES.includes(c.status);
+    const answeredAt = (await firstResponses(prisma, [c.id])).get(c.id) || null;
 
     const firstResponse = calculateSla({
       startedAt: c.createdAt, targetMinutes: targets.firstResponse, config,
-      completedAt: c.firstRespondedAt || null, pauses,
+      completedAt: answeredAt, pauses,
     });
     const resolution = calculateSla({
       startedAt: c.createdAt, targetMinutes: targets.resolution, config,
@@ -306,18 +347,21 @@ router.get('/cases', authenticate, requirePermission('cases', 'read'), async (re
 
     const where = { deletedAt: null };
     if (status) where.status = status;
-    else where.status = { notIn: ['Closed', 'Rejected'] };
+    else where.status = { notIn: DONE_STATUSES };
     if (priority) where.priority = priority;
     if (ownerId) where.ownerId = ownerId;
 
-    const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', where), take: Math.min(+limit, 500), orderBy: { createdAt: 'asc' } });
+    const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', where), take: Math.min(parseInt(limit, 10) || 100, 500), orderBy: { createdAt: 'asc' } });
     const config = await loadProfile(prisma, req.query.businessHoursId);
+    const overrides = await loadTargetOverrides(prisma);
+    const answered = await firstResponses(prisma, cases.map(c => c.id));
 
     const rows = [];
     for (const c of cases) {
-      const targets = targetsForPriority(c.priority);
-      const resolution = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.resolution, config });
-      const firstResponse = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.firstResponse, config, completedAt: c.firstRespondedAt || null });
+      const targets = targetsForPriority(c.priority, overrides);
+      const done = DONE_STATUSES.includes(c.status);
+      const resolution = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.resolution, config, completedAt: done ? (c.closedAt || c.updatedAt) : null });
+      const firstResponse = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.firstResponse, config, completedAt: answered.get(c.id) || null });
       rows.push({
         id: c.id, caseNumber: c.caseNumber, subject: c.subject,
         priority: c.priority, status: c.status, ownerId: c.ownerId, createdAt: c.createdAt,
@@ -349,15 +393,18 @@ router.post('/cases/recompute', authenticate, requirePermission('admin', 'edit')
   try {
     const prisma = req.app.locals.prisma;
     const config = await loadProfile(prisma, req.body.businessHoursId);
-    const cases = await prisma.case.findMany({ where: { deletedAt: null, status: { notIn: ['Closed', 'Rejected'] } }, take: 2000 });
+    const overrides = await loadTargetOverrides(prisma);
+    const cases = await prisma.case.findMany({ where: { deletedAt: null, status: { notIn: DONE_STATUSES } }, take: 2000 });
 
     let updated = 0, breached = 0;
     for (const c of cases) {
-      const targets = targetsForPriority(c.priority);
+      const targets = targetsForPriority(c.priority, overrides);
       const sla = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.resolution, config });
       if (sla.breached) breached++;
       try {
-        await prisma.case.update({ where: { id: c.id }, data: { slaDueAt: sla.dueAt, slaBreached: sla.breached, slaStatus: sla.status } });
+        // slaBreached is only ever set here, never cleared: the SLA job keeps
+        // it as its warned-once mark, and clearing it sent the warning again.
+        await prisma.case.update({ where: { id: c.id }, data: { slaDueAt: sla.dueAt, slaStatus: sla.status, ...(sla.breached && { slaBreached: true }) } });
         updated++;
       } catch { /* case model may not carry SLA columns */ }
     }
@@ -371,12 +418,7 @@ router.post('/cases/recompute', authenticate, requirePermission('admin', 'edit')
 
 router.get('/targets', authenticate, async (req, res, next) => {
   try {
-    const prisma = req.app.locals.prisma;
-    let overrides = {};
-    try {
-      const setting = await prisma.setting.findFirst({ where: { key: 'sla.targets' } });
-      if (setting?.value) overrides = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value;
-    } catch { /* settings table is optional */ }
+    const overrides = await loadTargetOverrides(req.app.locals.prisma);
 
     res.json(Object.keys(DEFAULT_SLA_TARGETS).map(priority => {
       const t = targetsForPriority(priority, overrides);
@@ -398,6 +440,7 @@ router.put('/targets', authenticate, requirePermission('admin', 'edit'), auditMi
 
     for (const [priority, t] of Object.entries(targets)) {
       if (!DEFAULT_SLA_TARGETS[priority]) return res.status(400).json({ error: `Unknown priority: ${priority}` });
+      if (!t || typeof t !== 'object') return res.status(400).json({ error: `${priority}: targets must be an object` });
       if (t.firstResponse != null && (+t.firstResponse <= 0)) return res.status(400).json({ error: 'firstResponse must be positive' });
       if (t.resolution != null && (+t.resolution <= 0)) return res.status(400).json({ error: 'resolution must be positive' });
       if (t.firstResponse && t.resolution && +t.firstResponse > +t.resolution) {
@@ -427,13 +470,14 @@ router.get('/report', authenticate, requirePermission('cases', 'read'), async (r
 
     // Over the cases the caller can see, as GET /cases is.
     const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', { createdAt: { gte: since } }), take: 5000 });
+    const overrides = await loadTargetOverrides(prisma);
 
     const byPriority = {};
     let met = 0, missed = 0, open = 0;
 
     for (const c of cases) {
-      const targets = targetsForPriority(c.priority);
-      const closed = ['Closed', 'Resolved'].includes(c.status);
+      const targets = targetsForPriority(c.priority, overrides);
+      const closed = DONE_STATUSES.includes(c.status);
       const sla = calculateSla({ startedAt: c.createdAt, targetMinutes: targets.resolution, config, completedAt: closed ? (c.closedAt || c.updatedAt) : null });
 
       const key = c.priority || 'Medium';
@@ -449,10 +493,13 @@ router.get('/report', authenticate, requirePermission('cases', 'read'), async (r
     const rows = Object.values(byPriority).map(r => {
       const closedCount = r._closed;
       const { _sum, _closed, ...rest } = r;
+      // Met over decided (met or breached), as the overall figure is. Over
+      // every case, open ones still on track counted as misses.
+      const decided = r.met + r.breached;
       return {
         ...rest,
         avgResolutionHours: closedCount ? +(_sum / closedCount).toFixed(2) : 0,
-        compliancePercent: r.total ? +((r.met / r.total) * 100).toFixed(1) : 0,
+        compliancePercent: decided ? +((r.met / decided) * 100).toFixed(1) : 100,
       };
     });
 

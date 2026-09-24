@@ -16,7 +16,9 @@ router.get('/', requirePermission('emails', 'read'), async (req, res, next) => {
     const take = Math.min(parseInt(limit) || 50, 200);
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
     let where = {};
-    if (status && status !== 'All') where.status = status;
+    // Statuses are stored lower case ('draft', 'sent', 'queued', 'failed');
+    // a filter for "Sent" matched nothing.
+    if (status && status !== 'All') where.status = { equals: status, mode: 'insensitive' };
     if (search) where.subject = { contains: search, mode: 'insensitive' };
     const [emails, total] = await Promise.all([
       prisma.email.findMany({
@@ -52,6 +54,9 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
     // see: the body went to Prisma whole, so `deal: { update: … }` rewrote a
     // deal and, through its owner, reached users and roles.
     const data = { ...columnsFrom('email', req.body), status: 'draft' };
+    // Subject and body are required columns: a draft with no body was a 500.
+    if (!data.subject) return res.status(400).json({ error: 'subject required' });
+    if (data.body == null) data.body = '';
     const linkProblem = await linkRefusal(req, 'email', data);
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const email = await prisma.email.create({ data });
@@ -66,6 +71,9 @@ router.post('/send', requirePermission('emails', 'edit'), async (req, res, next)
     // Spreading req.body straight into create let any unknown key 500 the
     // request, and any known one (opened, openedAt, id) be set by the caller.
     const { subject, body, from, to, toEmail, toName, contactId, dealId, templateId } = req.body || {};
+    // Checked before anything goes out: with no subject or body the mail was
+    // sent, then failed to save, so it went unrecorded and the caller saw a 500.
+    if (!subject) return res.status(400).json({ error: 'subject required' });
     const linkProblem = await linkRefusal(req, 'email', { contactId, dealId, templateId });
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const recipient = toEmail || to;
@@ -77,7 +85,7 @@ router.post('/send', requirePermission('emails', 'edit'), async (req, res, next)
 
     const email = await prisma.email.create({
       data: {
-        subject, body, from, to, toEmail, toName, contactId, dealId, templateId,
+        subject, body: body ?? '', from, to, toEmail, toName, contactId, dealId, templateId,
         status: delivery.status,
         sentAt: delivery.delivered ? new Date() : null,
       },
@@ -132,6 +140,10 @@ router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) =
     const current = await prisma.email.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ error: 'Not found' });
     const data = columnsFrom('email', req.body);
+    // Delivery and tracking are the send routes' and the tracking pixel's to
+    // record: an edit form sends the row back whole, which could mark a draft
+    // sent, or undo an open recorded since the form was opened.
+    for (const key of ['status', 'sentAt', 'opened', 'openedAt', 'clicked']) delete data[key];
     const linkProblem = await linkRefusal(req, 'email', data, current);
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const email = await prisma.email.update({ where: { id: req.params.id }, data });

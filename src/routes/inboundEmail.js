@@ -43,7 +43,7 @@ router.get('/accounts/:id', authenticate, requirePermission('admin', 'read'), as
     if (!account) return res.status(404).json({ error: 'Account not found' });
 
     const [messageCount, recentPolls] = await Promise.all([
-      prisma.inboundEmailMessage.count({ where: { accountId: account.id } }),
+      prisma.inboundEmailMessage.count({ where: { accountId: account.id, deletedAt: null } }),
       prisma.emailPollLog.findMany({ where: { accountId: account.id }, orderBy: { startedAt: 'desc' }, take: 10 }),
     ]);
     res.json({ ...safeAccount(account), messageCount, recentPolls });
@@ -78,11 +78,14 @@ router.post('/accounts', authenticate, requirePermission('admin', 'full'), audit
     if (port && (port < 1 || port > 65535)) return res.status(400).json({ error: 'port must be between 1 and 65535' });
     if (pollIntervalMinutes != null && +pollIntervalMinutes < 1) return res.status(400).json({ error: 'pollIntervalMinutes must be at least 1' });
 
+    // The default port follows the protocol stored: a pop3 account that named
+    // no protocol was stored as pop3 but given IMAP's port.
+    const proto = protocol || (kind === 'pop3' ? 'pop3' : 'imap');
     const account = await prisma.inboundEmailAccount.create({
       data: {
-        name, provider: kind, protocol: protocol || (kind === 'pop3' ? 'pop3' : 'imap'),
+        name, provider: kind, protocol: proto,
         host: kind === 'microsoft' ? null : host,
-        port: port ? +port : (protocol === 'pop3' ? 995 : 993),
+        port: port ? +port : (proto === 'pop3' ? 995 : 993),
         username: username || mailboxAddress,
         password: kind === 'microsoft' ? null : encrypt(password),
         mailboxAddress: kind === 'microsoft' ? mailboxAddress : null,
@@ -339,16 +342,20 @@ router.get('/messages', authenticate, requirePermission('cases', 'read'), async 
   try {
     const prisma = req.app.locals.prisma;
     const { accountId, status, search, page = 1, limit = 50 } = req.query;
-    const where = {};
+    // One `where` for the page and its total: live messages only (the count
+    // took in deleted ones), and a page size that is a number and capped.
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const where = { deletedAt: null };
     if (accountId) where.accountId = accountId;
     if (status) where.status = status;
     if (search) where.OR = [{ subject: { contains: search, mode: 'insensitive' } }, { fromEmail: { contains: search, mode: 'insensitive' } }];
 
     const [data, total] = await Promise.all([
-      prisma.inboundEmailMessage.findMany({ where, skip: (+page - 1) * +limit, take: +limit, orderBy: { receivedAt: 'desc' } }),
+      prisma.inboundEmailMessage.findMany({ where, skip: (current - 1) * take, take, orderBy: { receivedAt: 'desc' } }),
       prisma.inboundEmailMessage.count({ where }),
     ]);
-    res.json({ data, total, page: +page, limit: +limit });
+    res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });
 
@@ -501,8 +508,9 @@ router.post('/rules/test', authenticate, requirePermission('admin', 'read'), asy
     // A mailbox that exists, and an id rather than a filter object.
     const problem = await ruleTargetProblem(prisma, { accountId });
     if (problem) return res.status(400).json({ error: problem });
+    // A mailbox's test runs what its ingest runs: its own rules and the global ones.
     const where = { active: true };
-    if (accountId) where.accountId = String(accountId);
+    if (accountId) where.OR = [{ accountId: String(accountId) }, { accountId: null }];
     const rules = await prisma.inboundRoutingRule.findMany({ where, orderBy: { priority: 'asc' } });
 
     const haystack = { subject: subject.toLowerCase(), from: from.toLowerCase(), body: body.toLowerCase(), to: to.toLowerCase() };
@@ -540,7 +548,7 @@ router.get('/analytics', authenticate, requirePermission('admin', 'read'), async
     const [accounts, logs, messages] = await Promise.all([
       prisma.inboundEmailAccount.findMany({ where: { deletedAt: null }, select: { id: true, name: true, status: true, lastPolledAt: true, lastError: true, active: true } }),
       prisma.emailPollLog.findMany({ where: { startedAt: { gte: since } }, take: 5000 }),
-      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since } }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
+      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since }, deletedAt: null }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
     ]);
 
     res.json({

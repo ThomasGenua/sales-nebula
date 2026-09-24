@@ -89,11 +89,19 @@ router.post('/route', requirePermission('cases', 'edit'), async (req, res, next)
     const channels = await prisma.omniChannel.findMany({ where: { status: 'Online' }, orderBy: { priority: 'asc' } });
     for (const ch of channels) {
       if (ch.routingType === 'Least Active') {
-        const away = new Set((await prisma.agentPresence.findMany({ where: { status: { notIn: ['available', 'Available'] } }, select: { userId: true } })).map(p => p.userId));
-        const agents = (await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: 'Active' }, _count: true, orderBy: { _count: { assignedTo: 'asc' } } }))
-          .filter(a => !away.has(a.assignedTo));
-        if (agents.length > 0) {
-          await prisma.omniWorkItem.update({ where: { id: item.id }, data: { assignedTo: agents[0].assignedTo, status: 'Assigned', assignedAt: new Date(), channelId: ch.id } });
+        // The available staff agent with the fewest open items, counting
+        // those with none. Load was counted only for agents already holding
+        // an Active item, so an idle agent was never picked, and routed items
+        // not yet accepted (Assigned) counted against no one.
+        const presence = await prisma.agentPresence.findMany({ select: { userId: true, status: true } });
+        const away = new Set(presence.filter(p => !['available', 'Available'].includes(p.status)).map(p => p.userId));
+        const load = new Map(presence.filter(p => !away.has(p.userId)).map(p => [p.userId, 0]));
+        const open = await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: { in: ['Assigned', 'Active'] }, assignedTo: { not: null } }, _count: true });
+        for (const a of open) if (!away.has(a.assignedTo)) load.set(a.assignedTo, a._count);
+        const staff = new Set((await prisma.user.findMany({ where: { id: { in: [...load.keys()] }, active: true, isPortalUser: false }, select: { id: true } })).map(u => u.id));
+        const [agent] = [...load].filter(([userId]) => staff.has(userId)).sort((a, b) => a[1] - b[1]);
+        if (agent) {
+          await prisma.omniWorkItem.update({ where: { id: item.id }, data: { assignedTo: agent[0], status: 'Assigned', assignedAt: new Date(), channelId: ch.id } });
           break;
         }
       }
@@ -217,7 +225,9 @@ router.get('/channels/metrics', authenticate, requirePermission('cases', 'read')
     const recent = await reachableWhere(req, 'cases', 'case', { createdAt: { gte: new Date(Date.now() - 30*86400000) } });
     const metrics = [];
     for (const ch of channels) {
-      const count = await prisma.case.count({ where: { AND: [recent, { origin: ch }] } }).catch(() => 0);
+      // Case origins are written capitalised ('Email', 'Web', 'Phone'), so an
+      // exact match on these names counted nothing.
+      const count = await prisma.case.count({ where: { AND: [recent, { origin: { equals: ch, mode: 'insensitive' } }] } }).catch(() => 0);
       metrics.push({ channel: ch, casesLast30Days: count });
     }
     res.json(metrics);

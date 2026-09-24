@@ -69,8 +69,9 @@ router.get('/suppression', authenticate, requirePermission('campaigns', 'read'),
     const { page = 1, limit = 100, search } = req.query;
     const where = {};
     if (search) where.email = { contains: search, mode: 'insensitive' };
+    const take = Math.min(parseInt(limit) || 100, 500);
     const [data, total] = await Promise.all([
-      prisma.emailSuppression.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 500), orderBy: { suppressedAt: 'desc' } }),
+      prisma.emailSuppression.findMany({ where, skip: (Math.max(parseInt(page) || 1, 1) - 1) * take, take, orderBy: { suppressedAt: 'desc' } }),
       prisma.emailSuppression.count({ where }),
     ]);
     res.json({ data, total, page: +page });
@@ -148,14 +149,17 @@ router.get('/', authenticate, requirePermission('leads', 'read'), async (req, re
     if (converted === 'true') where.convertedAt = { not: null };
     if (converted === 'false') where.convertedAt = null;
     const visible = await visibleProspects(req, where);
+    // Pages step by the capped size: past 200 they skipped rows never shown.
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
 
     const [data, total] = await Promise.all([
       // Sorted by one of the prospect's own columns: the query string's key
       // went to orderBy as sent, relation names included.
-      prisma.prospect.findMany({ where: visible, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: scalarOrderBy('prospect', sortBy, sortDir) || { createdAt: 'desc' } }),
+      prisma.prospect.findMany({ where: visible, skip: (current - 1) * take, take, orderBy: scalarOrderBy('prospect', sortBy, sortDir) || { createdAt: 'desc' } }),
       prisma.prospect.count({ where: visible }),
     ]);
-    res.json({ data, total, page: +page, limit: +limit });
+    res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });
 
@@ -321,18 +325,32 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
     const prisma = req.app.locals.prisma;
     const { target = 'lead' } = req.body;
     if (!['lead', 'contact'].includes(target)) return res.status(400).json({ error: 'target must be lead or contact' });
+    // A contact takes contacts edit, as a lead takes leads edit above.
+    if (target === 'contact' && !permits(req, 'contacts', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for contacts' });
 
     // Converting copies the prospect's details into the response.
     const prospect = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id }, 'Edit') });
     if (!prospect) return res.status(404).json({ error: 'Prospect not found' });
     if (prospect.convertedAt) return res.status(409).json({ error: 'Prospect has already been converted', convertedAt: prospect.convertedAt });
 
+    // The owner is the prospect's (or the caller), unless an admin, or the
+    // manager of the user named, names another, as on create; and the account
+    // a contact joins must be one the caller can see. Both were taken as sent.
+    const named = req.body.ownerId ? String(req.body.ownerId) : null;
+    const ownerId = named && (isAdmin(req.user) || (await subordinateUserIds(prisma, req.user)).includes(named))
+      ? named : prospect.ownerId || req.user.id;
+    const accountId = target === 'contact' && req.body.accountId ? String(req.body.accountId) : null;
+    const linkProblem = await linkRefusal(req, 'contact', { accountId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+
+    // A lead and a contact need a first name, and a lead a company; a
+    // prospect needs neither, so converting one without them was a 500.
     if (target === 'lead') {
       const lead = await prisma.lead.create({
         data: {
-          firstName: prospect.firstName, lastName: prospect.lastName,
+          firstName: prospect.firstName || '', lastName: prospect.lastName,
           email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
-          company: prospect.accountName, title: prospect.title,
+          company: prospect.accountName || 'Unknown', title: prospect.title,
           // `leadSource` is a Contact column; on Lead it is `source`. Lead has
           // no industry column at all, so the prospect's is carried in the
           // description rather than silently dropped on conversion.
@@ -340,7 +358,7 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
           description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
             .filter(Boolean).join('\n') || null,
           city: prospect.city, state: prospect.state, country: prospect.country,
-          ownerId: req.body.ownerId || prospect.ownerId || req.user.id,
+          ownerId,
         },
       });
       await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedLeadId: lead.id, convertedAt: new Date(), status: 'Converted' } });
@@ -350,15 +368,16 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
 
     const contact = await prisma.contact.create({
       data: {
-        firstName: prospect.firstName, lastName: prospect.lastName,
+        firstName: prospect.firstName || '', lastName: prospect.lastName,
         email: prospect.email, phone: prospect.phoneWork, mobile: prospect.phoneMobile,
         title: prospect.title, department: prospect.department,
         description: prospect.description,
-        ownerId: req.body.ownerId || prospect.ownerId || req.user.id,
-        accountId: req.body.accountId || null,
+        ownerId,
+        accountId,
       },
     });
     await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedContactId: contact.id, convertedAt: new Date(), status: 'Converted' } });
+    await req.audit({ action: 'update', module: 'prospects', recordId: prospect.id, details: 'Converted to contact' });
     res.status(201).json({ target: 'contact', record: contact });
   } catch (err) { next(err); }
 });
@@ -380,17 +399,28 @@ router.post('/:id/merge', authenticate, requirePermission('leads', 'full'), audi
 
     const duplicates = await prisma.prospect.findMany({ where: await visibleProspects(req, { id: { in: duplicateIds.map(String) } }, 'Full') });
     const filled = { ...survivor };
+    const lists = new Set();
     for (const dupe of duplicates) {
       for (const [k, v] of Object.entries(dupe)) {
         if (['id', 'createdAt', 'updatedAt', 'deletedAt'].includes(k)) continue;
         if ((filled[k] === null || filled[k] === undefined || filled[k] === '') && v != null && v !== '') filled[k] = v;
       }
-      // Carry list memberships across before the duplicate is retired
+      // Carry list memberships across before the duplicate is retired: moved,
+      // once per list. They were copied, which left the retired duplicate on
+      // each list beside the survivor, and the survivor on some twice.
       const entries = await prisma.prospectListEntry.findMany({ where: { prospectId: dupe.id } }).catch(() => []);
       for (const e of entries) {
-        await prisma.prospectListEntry.create({ data: { listId: e.listId, prospectId: survivor.id, addedBy: req.user.id } }).catch(() => {});
+        const already = await prisma.prospectListEntry.findFirst({ where: { listId: e.listId, prospectId: survivor.id }, select: { id: true } });
+        await (already
+          ? prisma.prospectListEntry.delete({ where: { id: e.id } })
+          : prisma.prospectListEntry.update({ where: { id: e.id }, data: { prospectId: survivor.id } })).catch(() => {});
+        lists.add(e.listId);
       }
       await prisma.prospect.update({ where: { id: dupe.id }, data: { deletedAt: new Date(), duplicateOfId: survivor.id } });
+    }
+    for (const listId of lists) {
+      const total = await prisma.prospectListEntry.count({ where: { listId } });
+      await prisma.prospectList.update({ where: { id: listId }, data: { memberCount: total } }).catch(() => {});
     }
 
     const { id, createdAt, updatedAt, deletedAt, ...updateData } = filled;
@@ -491,10 +521,11 @@ router.get('/lists/:id/members', authenticate, requirePermission('campaigns', 'r
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 100 } = req.query;
+    const take = Math.min(parseInt(limit) || 100, 500);
     const [entries, total] = await Promise.all([
       prisma.prospectListEntry.findMany({
         where: { listId: req.params.id },
-        skip: (+page - 1) * +limit, take: Math.min(+limit, 500),
+        skip: (Math.max(parseInt(page) || 1, 1) - 1) * take, take,
         orderBy: { addedAt: 'desc' },
       }),
       prisma.prospectListEntry.count({ where: { listId: req.params.id } }),
@@ -527,9 +558,14 @@ router.post('/lists/:id/members', authenticate, requirePermission('campaigns', '
     const refusal = await entryRefusal(req, { prospectId: prospectIds, contactId: contactIds, leadId: leadIds });
     if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
 
+    // A record already on the list is not added twice (see populate below).
     let added = 0;
     for (const [ids, field] of [[prospectIds, 'prospectId'], [contactIds, 'contactId'], [leadIds, 'leadId']]) {
+      if (!ids.length) continue;
+      const onList = new Set((await prisma.prospectListEntry.findMany({ where: { listId: list.id, [field]: { in: ids.map(String) } }, select: { [field]: true } })).map(e => e[field]));
       for (const id of ids) {
+        if (onList.has(String(id))) continue;
+        onList.add(String(id));
         await prisma.prospectListEntry.create({ data: { listId: list.id, [field]: id, addedBy: req.user.id } })
           .then(() => added++).catch(() => {});
       }
@@ -574,9 +610,14 @@ router.post('/lists/:id/populate', authenticate, requirePermission('campaigns', 
     if (filter.requireEmail !== false) where.email = { not: null };
 
     const prospects = await prisma.prospect.findMany({ where: await visibleProspects(req, where), select: { id: true, email: true }, take: Math.min(parseInt(req.body.limit, 10) || 5000, 20000) });
+    // Prospects already on the list stay single. The entry's unique key takes
+    // in columns that are null here, and nulls never collide, so each rebuild
+    // added every member again.
+    const onList = new Set((await prisma.prospectListEntry.findMany({ where: { listId: list.id, prospectId: { not: null } }, select: { prospectId: true } })).map(e => e.prospectId));
 
     let added = 0, suppressed = 0;
     for (const p of prospects) {
+      if (onList.has(p.id)) continue;
       if (await isSuppressed(prisma, p.email)) { suppressed++; continue; }
       await prisma.prospectListEntry.create({ data: { listId: list.id, prospectId: p.id, addedBy: req.user.id } })
         .then(() => added++).catch(() => {});

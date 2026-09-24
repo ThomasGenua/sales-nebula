@@ -2,7 +2,8 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere } = require('../middleware/access');
-const { columnsFrom } = require('../utils/modelFields');
+const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
+const { sendEmail } = require('../services/mailer');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -31,15 +32,41 @@ async function mayReachPerson(req, res, key, id) {
   return true;
 }
 
+const STATUSES = ['Draft', 'Active', 'Paused', 'Archived'];
+
+/** A sequence's steps as a list, however they were stored. */
+function stepsOf(sequence) {
+  let steps = sequence.steps;
+  if (typeof steps === 'string') { try { steps = JSON.parse(steps); } catch { steps = []; } }
+  return Array.isArray(steps) ? steps : [];
+}
+
 // LIST sequences
+// Filtered, searched and paged, with the total and the step and enrollment
+// counts the list screen shows: it returned every sequence, unfiltered and
+// uncounted, and neither count under the name the screen reads.
 router.get('/', requirePermission('emails', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const sequences = await prisma.emailSequence.findMany({
-      orderBy: { updatedAt: 'desc' },
-      include: { _count: { select: { enrollments: true } } },
+    const { status, search, page = 1, limit = 50, sortBy, sortDir } = req.query;
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const where = {};
+    if (status && status !== 'All') where.status = status;
+    if (search) where.name = { contains: search, mode: 'insensitive' };
+    const [sequences, total] = await Promise.all([
+      prisma.emailSequence.findMany({
+        where,
+        orderBy: scalarOrderBy('emailSequence', sortBy, sortDir) || { updatedAt: 'desc' },
+        skip: (current - 1) * take, take,
+        include: { _count: { select: { enrollments: true } } },
+      }),
+      prisma.emailSequence.count({ where }),
+    ]);
+    res.json({
+      data: sequences.map(s => ({ ...s, enrollmentCount: s._count.enrollments, enrolledCount: s._count.enrollments, totalSteps: stepsOf(s).length })),
+      total, page: current, pages: Math.ceil(total / take),
     });
-    res.json({ data: sequences.map(s => ({ ...s, enrollmentCount: s._count.enrollments })) });
   } catch (err) { next(err); }
 });
 
@@ -59,12 +86,15 @@ router.get('/:id', requirePermission('emails', 'read'), async (req, res, next) =
     });
     if (!sequence) return res.status(404).json({ error: 'Not found' });
 
-    // Enrollment stats
-    const active = sequence.enrollments.filter(e => e.status === 'Active').length;
-    const completed = sequence.enrollments.filter(e => e.status === 'Completed').length;
-    const optedOut = sequence.enrollments.filter(e => e.status === 'Opted Out').length;
+    // Enrollment stats, over every enrollment: they were counted from the 50
+    // loaded above, beside a total of all of them.
+    const byStatus = await prisma.emailSequenceEnrollment.groupBy({ by: ['status'], where: { sequenceId: sequence.id }, _count: true });
+    const inStatus = status => byStatus.find(g => g.status === status)?._count || 0;
 
-    res.json({ ...sequence, stats: { total: sequence._count.enrollments, active, completed, optedOut } });
+    res.json({
+      ...sequence, enrolledCount: sequence._count.enrollments, totalSteps: stepsOf(sequence).length,
+      stats: { total: sequence._count.enrollments, active: inStatus('Active'), completed: inStatus('Completed'), optedOut: inStatus('Opted Out') },
+    });
   } catch (err) { next(err); }
 });
 
@@ -72,12 +102,19 @@ router.get('/:id', requirePermission('emails', 'read'), async (req, res, next) =
 router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, description, steps } = req.body;
+    const { name, description } = req.body;
+    const steps = req.body.steps ?? [];
+    const status = req.body.status || 'Draft';
     if (!name?.trim()) return res.status(400).json({ error: 'name required' });
-    if (!steps || !Array.isArray(steps) || steps.length === 0) return res.status(400).json({ error: 'At least one step required' });
+    // A draft may be saved before its steps are written; only an active
+    // sequence needs one. Every create required steps, which the Sequences
+    // screen has no field for, so it could not create a sequence at all.
+    if (!Array.isArray(steps)) return res.status(400).json({ error: 'steps must be an array' });
+    if (!STATUSES.includes(status)) return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
+    if (status === 'Active' && !steps.length) return res.status(400).json({ error: 'At least one step required' });
 
     const sequence = await prisma.emailSequence.create({
-      data: { name, description, steps, createdById: req.userId },
+      data: { name, description, steps, status, createdById: req.userId },
     });
     await req.audit({ action: 'create', module: 'emails', recordId: sequence.id, details: `Created email sequence: ${name}` });
     res.status(201).json(sequence);
@@ -88,7 +125,16 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
 router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const sequence = await prisma.emailSequence.update({ where: { id: req.params.id }, data: columnsFrom('emailSequence', req.body) });
+    const current = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    const data = columnsFrom('emailSequence', req.body);
+    // As on create: a known status, and steps before it is active.
+    if (data.steps !== undefined && !Array.isArray(data.steps)) return res.status(400).json({ error: 'steps must be an array' });
+    if (data.status !== undefined && !STATUSES.includes(data.status)) return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
+    if ((data.status ?? current.status) === 'Active' && !(data.steps ?? stepsOf(current)).length) {
+      return res.status(400).json({ error: 'At least one step required' });
+    }
+    const sequence = await prisma.emailSequence.update({ where: { id: current.id }, data });
     res.json(sequence);
   } catch (err) { next(err); }
 });
@@ -106,6 +152,9 @@ router.delete('/:id', requirePermission('emails', 'full'), async (req, res, next
 router.post('/:id/activate', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const current = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    if (!stepsOf(current).length) return res.status(400).json({ error: 'At least one step required' });
     const sequence = await prisma.emailSequence.update({
       where: { id: req.params.id },
       data: { status: 'Active' },
@@ -145,7 +194,7 @@ router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res,
     const refusal = await enrollRefusal(req, 'contactId', contactIds) || await enrollRefusal(req, 'leadId', leadIds);
     if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
 
-    const steps = typeof sequence.steps === 'string' ? JSON.parse(sequence.steps) : sequence.steps;
+    const steps = stepsOf(sequence);
     const firstDelay = steps[0]?.delayDays || 0;
     const nextSendAt = new Date(Date.now() + firstDelay * 86400000);
 
@@ -211,12 +260,21 @@ router.post('/:id/unenroll', requirePermission('emails', 'edit'), async (req, re
   } catch (err) { next(err); }
 });
 
+/** Whether an address, or its whole domain (`@domain`), is on the suppression list. */
+async function suppressed(prisma, address) {
+  const email = String(address).trim().toLowerCase();
+  return !!(await prisma.emailSuppression.findFirst({ where: { email: { in: [email, `@${email.split('@')[1]}`] } }, select: { id: true } }));
+}
+
 // POST /process - Process due enrollments (called by job scheduler)
+// Sends each due step as the scheduler's processSequenceSteps job does. Every
+// step was recorded as sent and nothing went out; a lead's was not recorded.
 router.post('/process', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Only for sequences that are running: pausing one held nothing back.
     const due = await prisma.emailSequenceEnrollment.findMany({
-      where: { status: 'Active', nextSendAt: { lte: new Date() } },
+      where: { status: 'Active', nextSendAt: { lte: new Date() }, sequence: { status: 'Active' } },
       include: { sequence: true },
     });
 
@@ -224,8 +282,7 @@ router.post('/process', requirePermission('emails', 'edit'), async (req, res, ne
     let completed = 0;
 
     for (const enrollment of due) {
-      const steps = typeof enrollment.sequence.steps === 'string'
-        ? JSON.parse(enrollment.sequence.steps) : enrollment.sequence.steps;
+      const steps = stepsOf(enrollment.sequence);
 
       if (enrollment.currentStep >= steps.length) {
         await prisma.emailSequenceEnrollment.update({
@@ -238,15 +295,31 @@ router.post('/process', requirePermission('emails', 'edit'), async (req, res, ne
 
       const step = steps[enrollment.currentStep];
 
-      // Create the email record
-      const emailData = {
-        subject: step.subject || `Sequence step ${enrollment.currentStep + 1}`,
-        body: step.body || '',
-        status: 'sent',
-        sentAt: new Date(),
-      };
-      if (enrollment.contactId) emailData.contactId = enrollment.contactId;
-      await prisma.email.create({ data: emailData });
+      // To the live contact's or lead's address, unless it or its domain is
+      // suppressed, with the step's template when it carries no text itself.
+      // Email has no lead column, so only a contact's is filed on them.
+      try {
+        const person = enrollment.contactId
+          ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, select: { email: true } })
+          : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null }, select: { email: true } });
+        const to = person?.email ? String(person.email).trim() : null;
+        if (to && !(await suppressed(prisma, to))) {
+          const template = step.templateId && !(step.subject && step.body)
+            ? await prisma.emailTemplate.findUnique({ where: { id: String(step.templateId) } }).catch(() => null)
+            : null;
+          const subject = step.subject || template?.subject || `Sequence step ${enrollment.currentStep + 1}`;
+          const body = step.body || template?.body || '';
+          const delivery = await sendEmail(prisma, { to, subject, body });
+          await prisma.email.create({
+            data: {
+              subject, body, toEmail: to, status: delivery.status,
+              sentAt: delivery.delivered ? new Date() : null,
+              ...(enrollment.contactId && { contactId: enrollment.contactId }),
+            },
+          });
+          if (delivery.status !== 'failed') sent++;
+        }
+      } catch (e) { /* one failed send does not stop the batch, as in the job */ }
 
       // Advance to next step
       const nextStep = enrollment.currentStep + 1;
@@ -263,7 +336,6 @@ router.post('/process', requirePermission('emails', 'edit'), async (req, res, ne
           data: { currentStep: nextStep, nextSendAt: new Date(Date.now() + nextDelay * 86400000) },
         });
       }
-      sent++;
     }
 
     res.json({ processed: due.length, sent, completed });

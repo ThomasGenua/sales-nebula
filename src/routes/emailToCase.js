@@ -36,28 +36,33 @@ router.post('/inbound', requireInboundSecret, async (req, res, next) => {
     const { from, to, subject, body, htmlBody, threadId, messageId, attachments, headers } = req.body;
     if (!from || !subject) return res.status(400).json({ error: 'from and subject required' });
 
-    // Thread matching: reply to existing case
+    // Load config for defaults. Switching the feature, or threading, off in
+    // it changed nothing: neither setting was read.
+    let config = await prisma.emailToCaseConfig.findFirst().catch(() => null);
+    if (!config) config = { defaultPriority: 'Medium', defaultStatus: 'New', autoResponse: true };
+    if (config.enabled === false) return res.status(503).json({ error: 'Email-to-case is turned off' });
+
+    // Thread matching: reply to existing case. Only a live one: a reply to a
+    // deleted case was filed on it, where nobody would see it.
     let existingCase = null;
-    if (threadId) existingCase = await prisma.case.findFirst({ where: { emailThreadId: threadId } });
-    if (!existingCase && subject) {
+    const threading = config.threadingEnabled !== false;
+    if (threading && threadId) existingCase = await prisma.case.findFirst({ where: { emailThreadId: threadId, deletedAt: null } });
+    if (threading && !existingCase && subject) {
       // Case numbers read "CS-001"; a tag may carry the whole number or just its digits.
       const caseRefMatch = subject.match(/\[Case#\s*([\w-]+)\]/i);
       if (caseRefMatch) {
         const ref = caseRefMatch[1];
-        existingCase = await prisma.case.findFirst({ where: { caseNumber: { in: [ref, `${CASE_NUMBER.prefix}${ref}`] } } });
+        existingCase = await prisma.case.findFirst({ where: { caseNumber: { in: [ref, `${CASE_NUMBER.prefix}${ref}`] }, deletedAt: null } });
       }
     }
-    if (!existingCase && messageId) {
-      existingCase = await prisma.case.findFirst({ where: { lastEmailMessageId: messageId } });
+    if (threading && !existingCase && messageId) {
+      existingCase = await prisma.case.findFirst({ where: { lastEmailMessageId: messageId, deletedAt: null } });
     }
 
-    // Find contact by email
+    // Find contact by email: a live one, and only with an address to match
+    // (with none, the filter matched any contact).
     const emailAddr = typeof from === 'object' ? from.address : from;
-    const contact = await prisma.contact.findFirst({ where: { email: { equals: emailAddr, mode: 'insensitive' } } });
-
-    // Load config for defaults
-    let config = await prisma.emailToCaseConfig.findFirst().catch(() => null);
-    if (!config) config = { defaultPriority: 'Medium', defaultStatus: 'New', autoResponse: true };
+    const contact = emailAddr ? await prisma.contact.findFirst({ where: { email: { equals: emailAddr, mode: 'insensitive' }, deletedAt: null } }) : null;
 
     if (existingCase) {
       await prisma.caseComment.create({
@@ -103,11 +108,13 @@ router.post('/inbound/bulk', requireInboundSecret, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { emails } = req.body;
-    if (!emails?.length) return res.status(400).json({ error: 'emails array required' });
+    if (!Array.isArray(emails) || !emails.length) return res.status(400).json({ error: 'emails array required' });
+    const config = await prisma.emailToCaseConfig.findFirst().catch(() => null);
+    if (config?.enabled === false) return res.status(503).json({ error: 'Email-to-case is turned off' });
     const results = [];
     for (const email of emails.slice(0, 50)) {
       try {
-        const contact = await prisma.contact.findFirst({ where: { email: { equals: email.from, mode: 'insensitive' } } });
+        const contact = email.from ? await prisma.contact.findFirst({ where: { email: { equals: email.from, mode: 'insensitive' }, deletedAt: null } }) : null;
         const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
           data: { subject: email.subject || 'No Subject', description: email.body || '', origin: 'Email', status: 'New', priority: 'Medium', contactEmail: email.from, ...(contact && { contactId: contact.id }) },
         });

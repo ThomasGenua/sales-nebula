@@ -195,7 +195,9 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
         continue;
       }
 
-      const rules = await prisma.inboundRoutingRule.findMany({ where: { accountId: account.id, active: true }, orderBy: { priority: 'asc' } }).catch(() => []);
+      // This mailbox's rules and the global ones (no mailbox), which the rules
+      // API allows and ingest never read.
+      const rules = await prisma.inboundRoutingRule.findMany({ where: { OR: [{ accountId: account.id }, { accountId: null }], active: true }, orderBy: { priority: 'asc' } }).catch(() => []);
       const routed = matchRule(rules, { subject, from: from.email || '', body: bodyText, to: raw.to || '' });
 
       if (account.autoCreateCase) {

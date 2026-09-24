@@ -498,8 +498,13 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
     const area = await prisma.mapArea.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!area) return res.status(404).json({ error: 'Area not found' });
 
-    const ownerId = req.body.userId || area.assignedUserId;
-    if (!ownerId) return res.status(400).json({ error: 'userId required, or set assignedUserId on the area' });
+    const named = req.body.userId || area.assignedUserId;
+    if (!named) return res.status(400).json({ error: 'userId required, or set assignedUserId on the area' });
+    // An active staff user: the id was taken as sent, so a mistyped one or a
+    // customer's portal account became the owner of every record in the area.
+    const owner = await prisma.user.findFirst({ where: { id: String(named), active: true, isPortalUser: false }, select: { id: true } });
+    if (!owner) return res.status(400).json({ error: 'userId does not name an active staff user' });
+    const ownerId = owner.id;
 
     const markers = await prisma.mapMarker.findMany({ where: { areaId: area.id } });
     const byModule = {};
@@ -509,8 +514,11 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
     for (const [module, ids] of Object.entries(byModule)) {
       const model = MAPPABLE[module];
       if (!model) continue;
+      // Live records the caller could change, in a module they may edit: this
+      // rewrote the owner of every record in the area, deleted ones included.
+      if (!permits(req, permissionFor(module), 'edit')) { summary.push({ module, error: `Insufficient permissions for ${permissionFor(module)}` }); continue; }
       try {
-        const result = await prisma[model].updateMany({ where: { id: { in: ids } }, data: { ownerId } });
+        const result = await prisma[model].updateMany({ where: await reachableRecords(req, module, { id: { in: ids } }, 'Edit'), data: { ownerId } });
         summary.push({ module, updated: result.count });
       } catch (e) { summary.push({ module, error: String(e.message).slice(0, 100) }); }
     }
