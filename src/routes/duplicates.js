@@ -1,5 +1,6 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { columnsFrom } = require('../utils/modelFields');
@@ -54,8 +55,11 @@ router.post('/check/:module', async (req, res, next) => {
     const { module } = req.params;
     const modelName = MODEL_MAP[module];
     if (!modelName || !prisma[modelName]) return res.status(400).json({ error: 'Invalid module' });
+    // Matches come back whole, so they are the module's records the caller
+    // could open anyway; this answered anyone signed in, about every record.
+    if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
 
-    const record = req.body;
+    const record = req.body || {};
     const rules = await prisma.duplicateRule.findMany({ where: { module, active: true } });
 
     const duplicates = [];
@@ -63,9 +67,9 @@ router.post('/check/:module', async (req, res, next) => {
       const matchFields = rule.matchFields || [];
       for (const mf of matchFields) {
         const val = record[mf.field];
-        if (!val) continue;
+        if (!val || !['string', 'number'].includes(typeof val)) continue;
         const matches = await prisma[modelName].findMany({
-          where: { [mf.field]: { equals: val, mode: 'insensitive' } },
+          where: await reachableWhere(req, module, modelName, { [mf.field]: { equals: val, mode: 'insensitive' } }),
           take: 10,
         });
         for (const match of matches) {
@@ -103,16 +107,20 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
   try {
     const prisma = req.app.locals.prisma;
     const { module } = req.params;
-    const { masterId, mergeIds, fieldOverrides } = req.body;
+    const { masterId, fieldOverrides } = req.body;
     const modelName = MODEL_MAP[module];
     if (!modelName) return res.status(400).json({ error: 'Invalid module' });
+    // Records other than the master: naming the master here deleted it.
+    const mergeIds = Array.isArray(req.body.mergeIds) ? req.body.mergeIds.map(String).filter(id => id !== String(masterId)) : [];
+    if (!masterId || !mergeIds.length) return res.status(400).json({ error: 'masterId and mergeIds required' });
 
     const master = await prisma[modelName].findUnique({ where: { id: masterId } });
     if (!master) return res.status(404).json({ error: 'Master record not found' });
 
     // Apply field overrides to master
     if (fieldOverrides && Object.keys(fieldOverrides).length > 0) {
-      await prisma[modelName].update({ where: { id: masterId }, data: fieldOverrides });
+      // The master's own columns: overrides went to Prisma whole.
+      await prisma[modelName].update({ where: { id: masterId }, data: columnsFrom(modelName, fieldOverrides) });
     }
 
     // Reassign child records from merge targets to master
