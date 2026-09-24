@@ -163,18 +163,3 @@ router.get('/by-product', authenticate, requirePermission('invoices', 'read'), a
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'revenue', model: 'revenueSchedule' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "revenueRecognition" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'revenueRecognition', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

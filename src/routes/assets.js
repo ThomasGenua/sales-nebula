@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { statusRoutes } = require('../utils/moduleStatus');
 
@@ -106,12 +107,15 @@ router.get('/:id/service-history', authenticate, async (req, res, next) => {
 });
 
 // Bulk status update
+// Assets the caller could edit one at a time; this set any asset's status.
 router.post('/bulk/status', authenticate, requirePermission('assets', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const result = await prisma.asset.updateMany({ where: { id: { in: ids } }, data: { status } });
+    if (!Array.isArray(ids) || !ids.length || typeof status !== 'string' || !status) return res.status(400).json({ error: 'ids and status required' });
+    if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
+    const where = await reachableWhere(req, 'assets', 'asset', { id: { in: ids.map(String) } }, 'Edit');
+    const result = await prisma.asset.updateMany({ where, data: { status } });
     res.json({ updated: result.count });
   } catch (err) { next(err); }
 });
