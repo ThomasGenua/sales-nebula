@@ -12,7 +12,6 @@
  */
 
 const MS_PER_MINUTE = 60000;
-const MS_PER_DAY = 86400000;
 
 const DEFAULT_SCHEDULE = [
   { dayOfWeek: 0, openMinute: 0, closeMinute: 0, closed: true },
@@ -33,6 +32,17 @@ function isoDate(d) {
 function startOfDay(d) {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+/**
+ * Local midnight of the next day. Adding 24 hours landed back on the same
+ * date across the autumn clock change (a 25-hour day), so a Friday deadline
+ * came out as Sunday midnight and that Monday went uncounted.
+ */
+function nextDay(d) {
+  const x = startOfDay(d);
+  x.setDate(x.getDate() + 1);
   return x;
 }
 
@@ -71,12 +81,12 @@ function windowForDate(date, schedule, holidays) {
   if (holidays.has(isoDate(date))) return null;
   const day = schedule[new Date(date).getDay()];
   if (!day || day.closed || day.closeMinute <= day.openMinute) return null;
-  const base = startOfDay(date);
-  return {
-    open: new Date(base.getTime() + day.openMinute * MS_PER_MINUTE),
-    close: new Date(base.getTime() + day.closeMinute * MS_PER_MINUTE),
-    minutes: day.closeMinute - day.openMinute,
-  };
+  // Wall-clock minutes, so 9:00 stays 9:00 on a clock-change day.
+  const open = startOfDay(date);
+  open.setMinutes(day.openMinute);
+  const close = startOfDay(date);
+  close.setMinutes(day.closeMinute);
+  return { open, close, minutes: day.closeMinute - day.openMinute };
 }
 
 /** True when a timestamp falls inside open hours. */
@@ -113,8 +123,7 @@ function businessMinutesBetween(start, end, config = {}) {
       const segEnd = to < win.close ? to : win.close;
       if (segEnd > segStart) total += (segEnd - segStart) / MS_PER_MINUTE;
     }
-    cursor = new Date(cursor.getTime() + MS_PER_DAY);
-    cursor.setHours(0, 0, 0, 0);
+    cursor = nextDay(cursor);
   }
 
   return +total.toFixed(2);
@@ -141,20 +150,20 @@ function addBusinessMinutes(start, minutesToAdd, config = {}) {
   while (remaining > 0 && guard++ < 3650) {
     const win = windowForDate(cursor, schedule, holidays);
     if (!win) {
-      cursor = startOfDay(new Date(cursor.getTime() + MS_PER_DAY));
+      cursor = nextDay(cursor);
       continue;
     }
     // Before opening: jump to the open bell
     if (cursor < win.open) cursor = new Date(win.open);
     // After closing: move to the next day
     if (cursor >= win.close) {
-      cursor = startOfDay(new Date(cursor.getTime() + MS_PER_DAY));
+      cursor = nextDay(cursor);
       continue;
     }
     const availableMinutes = (win.close - cursor) / MS_PER_MINUTE;
     if (availableMinutes >= remaining) return new Date(cursor.getTime() + remaining * MS_PER_MINUTE);
     remaining -= availableMinutes;
-    cursor = startOfDay(new Date(cursor.getTime() + MS_PER_DAY));
+    cursor = nextDay(cursor);
   }
   return cursor;
 }
@@ -176,7 +185,7 @@ function nextBusinessOpen(from, config = {}) {
       if (cursor < win.open) return new Date(win.open);
       if (cursor < win.close) return new Date(cursor);
     }
-    cursor = startOfDay(new Date(cursor.getTime() + MS_PER_DAY));
+    cursor = nextDay(cursor);
   }
   return new Date(from);
 }

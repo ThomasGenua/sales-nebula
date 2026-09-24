@@ -23,6 +23,13 @@ const quoteReach = minLevel => async (req, res, next) => {
 const visibleQuote = quoteReach('Read');
 const editableQuote = quoteReach('Edit');
 
+// A quote's lines are its `items` (QuoteItem), which quotes.js writes and its
+// PDF and invoices read. These routes read `lineItems` (QuoteLineItem), which
+// nothing writes, so a discount zeroed the quote's total, a clone had no
+// lines, and the comparison, preview and order had none either. A quote's
+// amount is `total`, kept equal to `totalAmount` by quotes.js; the amounts
+// read here as subtotalAmount and taxAmount are not columns.
+
 // Quote approvals
 router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
@@ -41,21 +48,28 @@ router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'e
 router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { discountPercent, discountReason } = req.body;
+    const { discountReason } = req.body;
+    const discountPercent = Number(req.body.discountPercent);
     if (!discountPercent || discountPercent <= 0 || discountPercent > 100) return res.status(400).json({ error: 'Valid discountPercent (1-100) required' });
-    const items = await prisma.quoteLineItem.findMany({ where: { quoteId: req.params.id } });
-    const multiplier = 1 - (discountPercent / 100);
-    await prisma.$transaction(items.map(item =>
-      prisma.quoteLineItem.update({
-        where: { id: item.id },
-        data: { discount: discountPercent, totalPrice: parseFloat(item.unitPrice) * (item.quantity || 1) * multiplier },
-      })
-    ));
-    const updatedItems = await prisma.quoteLineItem.findMany({ where: { quoteId: req.params.id } });
-    const newTotal = updatedItems.reduce((s, i) => s + (parseFloat(i.totalPrice) || 0), 0);
-    await prisma.quote.update({ where: { id: req.params.id }, data: { totalAmount: newTotal, discount: discountPercent, discountReason } });
+    const quote = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: true } });
+    if (!quote) return res.status(404).json({ error: 'Not found' });
+    if (!quote.items.length) return res.status(400).json({ error: 'The quote has no lines to discount' });
+    // Each line's discount is an amount, as the PDF shows it: the percentage
+    // of the line before discount. The quote's own discount, also an amount,
+    // still comes off the subtotal; it was overwritten with the percentage.
+    const lines = quote.items.map(item => {
+      const gross = (item.unitPrice || 0) * (item.quantity || 1);
+      const off = gross * discountPercent / 100;
+      return { id: item.id, discount: off, total: gross - off };
+    });
+    const subtotal = lines.reduce((s, l) => s + l.total, 0);
+    const newTotal = subtotal - (quote.discount || 0) + (quote.tax || 0);
+    await prisma.$transaction([
+      ...lines.map(({ id, ...data }) => prisma.quoteItem.update({ where: { id }, data })),
+      prisma.quote.update({ where: { id: quote.id }, data: { subtotal, total: newTotal, totalAmount: newTotal, discountReason } }),
+    ]);
     await req.audit({ action: 'update', module: 'quotes', recordId: req.params.id, details: `Applied ${discountPercent}% discount` });
-    res.json({ discount: discountPercent, newTotal, itemsUpdated: items.length });
+    res.json({ discount: discountPercent, newTotal, itemsUpdated: lines.length });
   } catch (err) { next(err); }
 });
 
@@ -63,17 +77,18 @@ router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'ed
 router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const original = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
+    const original = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: true } });
     if (!original) return res.status(404).json({ error: 'Quote not found' });
     // The copy gets its own number: `number` is unique, so reusing the
-    // original's failed every clone.
-    const { id, createdAt, updatedAt, lineItems, number, ...quoteData } = original;
+    // original's failed every clone. It is a new draft, not submitted or
+    // turned into the original's order.
+    const { id, createdAt, updatedAt, deletedAt, items, number, orderId, submittedAt, ...quoteData } = original;
     const clone = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
       data: {
-        ...quoteData, name: `${original.name} (Copy)`, status: 'Draft', quoteNumber: null,
-        lineItems: { create: lineItems.map(({ id, quoteId, createdAt, updatedAt, ...item }) => item) },
+        ...quoteData, name: `${original.name || original.number} (Copy)`, status: 'Draft', quoteNumber: null,
+        items: { create: items.map(({ id, quoteId, ...item }) => item) },
       },
-      include: { lineItems: true },
+      include: { items: true },
     });
     await req.audit({ action: 'create', module: 'quotes', recordId: clone.id, details: `Cloned from ${original.id}` });
     res.status(201).json(clone);
@@ -85,13 +100,21 @@ router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), edi
 router.post('/:id/convert-to-order', authenticate, requirePermission('orders', 'edit'), requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
+    const quote = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: true } });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
+    // An order must have an account; without one the create answered 500.
+    if (!quote.accountId) return res.status(400).json({ error: 'The quote has no account, and an order needs one' });
+    // The order is the caller's, as one they create is. It had no owner or
+    // creator, so row security's ownership arm matched nobody. Its lines and
+    // amounts are the quote's, as /api/orders/from-quote copies them.
     const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
       data: {
-        name: `Order - ${quote.name}`, status: 'Draft',
+        name: `Order - ${quote.name || quote.number}`, status: 'Draft',
         accountId: quote.accountId, dealId: quote.dealId, contactId: quote.contactId,
-        totalAmount: quote.totalAmount, quoteId: quote.id,
+        subtotal: quote.total - quote.tax + quote.discount, discount: quote.discount, tax: quote.tax,
+        total: quote.total, totalAmount: quote.total, quoteId: quote.id,
+        ownerId: req.user.id, createdById: req.user.id,
+        items: { create: quote.items.map(i => ({ productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, discount: i.discount, total: i.total })) },
       },
     });
     await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Accepted', orderId: order.id } });
@@ -111,15 +134,15 @@ router.post('/compare', authenticate, requirePermission('quotes', 'read'), async
       if (!(await canReach(req, 'quotes', 'quote', id))) return res.status(404).json({ error: 'Not found' });
     }
     const quotes = await prisma.quote.findMany({
-      where: { id: { in: quoteIds } },
-      include: { lineItems: { include: { product: { select: { id: true, name: true } } } } },
+      where: { id: { in: quoteIds.map(String) }, deletedAt: null },
+      include: { items: { include: { product: { select: { id: true, name: true } } } } },
     });
     res.json({
       quotes: quotes.map(q => ({
-        id: q.id, name: q.name, status: q.status,
-        totalAmount: q.totalAmount, discount: q.discount,
-        lineItemCount: q.lineItems.length,
-        products: q.lineItems.map(li => ({ name: li.product?.name || li.name, quantity: li.quantity, unitPrice: li.unitPrice, totalPrice: li.totalPrice })),
+        id: q.id, name: q.name, number: q.number, status: q.status,
+        totalAmount: q.total, discount: q.discount,
+        lineItemCount: q.items.length,
+        products: q.items.map(li => ({ name: li.product?.name || li.description, quantity: li.quantity, unitPrice: li.unitPrice, totalPrice: li.total })),
       })),
     });
   } catch (err) { next(err); }
@@ -142,9 +165,9 @@ module.exports = router;
 router.get('/:id/preview', authenticate, requirePermission('quotes', 'read'), visibleQuote, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: { include: { product: true } }, account: { select: { name: true, billingCity: true, billingCountry: true } } } });
+    const quote = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: { include: { product: true } }, account: { select: { name: true, billingCity: true, billingCountry: true } } } });
     if (!quote) return res.status(404).json({ error: 'Not found' });
-    res.json({ quote, lineItems: quote.lineItems, account: quote.account, totals: { subtotal: quote.subtotalAmount || 0, discount: quote.discount || 0, tax: quote.taxAmount || 0, total: quote.totalAmount || 0 } });
+    res.json({ quote, lineItems: quote.items, account: quote.account, totals: { subtotal: quote.subtotal || 0, discount: quote.discount || 0, tax: quote.tax || 0, total: quote.total || 0 } });
   } catch (err) { next(err); }
 });
 
@@ -158,10 +181,10 @@ router.get('/analytics/overview', authenticate, requirePermission('quotes', 'rea
     const [total, accepted, avgValue, byStatus] = await Promise.all([
       prisma.quote.count({ where }),
       prisma.quote.count({ where: { AND: [where, { status: 'Accepted' }] } }),
-      prisma.quote.aggregate({ where, _avg: { totalAmount: true } }),
+      prisma.quote.aggregate({ where, _avg: { total: true } }),
       prisma.quote.groupBy({ by: ['status'], where, _count: true }),
     ]);
-    res.json({ total, accepted, acceptanceRate: total ? Math.round(accepted / total * 100) : 0, avgValue: Math.round(avgValue._avg.totalAmount || 0), byStatus: byStatus.map(s => ({ status: s.status, count: s._count })) });
+    res.json({ total, accepted, acceptanceRate: total ? Math.round(accepted / total * 100) : 0, avgValue: Math.round(avgValue._avg.total || 0), byStatus: byStatus.map(s => ({ status: s.status, count: s._count })) });
   } catch (err) { next(err); }
 });
 

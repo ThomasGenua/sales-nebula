@@ -1,11 +1,28 @@
 const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
 const { lineItemFields } = require('../utils/modelFields');
 
 /** The order's lines as sent, each cut down to the columns an item has. */
 const orderLines = req => (Array.isArray(req.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
+
+const sameValue = (a, b) => String(a) === String(b);
+
+/**
+ * `data` with `total` (what the seed, the lines and quote conversion write)
+ * and `totalAmount` (what the list page, adding an item and the stats use)
+ * kept equal, whichever the caller changed. Each writer set one, so an order
+ * made with lines showed a total of 0 on the page and counted nothing in
+ * revenue, and one made on the page had no total anywhere else.
+ */
+function withTotals(data, current = {}) {
+  const totalChanged = data.total !== undefined && !sameValue(data.total, current.total);
+  const twinChanged = data.totalAmount !== undefined && !sameValue(data.totalAmount, current.totalAmount);
+  if (twinChanged && !totalChanged) return { ...data, total: data.totalAmount };
+  return data.total !== undefined ? { ...data, totalAmount: data.total } : data;
+}
 
 const include = {
   account: { select: { id: true, name: true } },
@@ -22,13 +39,24 @@ const router = createCrudRouter('order', 'orders', {
     ],
   }),
   numbering: ORDER_NUMBER,
+  // An order must have an account; without one the create answered 500.
+  validate: (data) => {
+    const errors = {};
+    if (!data.accountId) errors.accountId = 'Required';
+    return { valid: Object.keys(errors).length === 0, errors };
+  },
   beforeCreate: async (data, req) => {
     const lines = orderLines(req);
     if (lines.length) {
       data.subtotal = lines.reduce((sum, line) => sum + line.total, 0);
       data.total = data.subtotal + (Number(data.tax) || 0) - (Number(data.discount) || 0);
     }
-    return data;
+    return withTotals(data);
+  },
+  beforeUpdate: async (data, req) => {
+    if (data.total === undefined && data.totalAmount === undefined) return data;
+    const current = await req.app.locals.prisma.order.findUnique({ where: { id: req.params.id }, select: { total: true, totalAmount: true } });
+    return withTotals(data, current || {});
   },
   // The items went to Prisma exactly as sent, as a bare list it rejected.
   nestedWrites: async (req, operation) => {
@@ -47,7 +75,10 @@ router.post('/:id/activate', authenticate, requirePermission('orders', 'edit'), 
       include,
     });
     await req.audit({ action: 'update', module: 'orders', recordId: order.id, details: 'Order activated' });
-    req.app.locals.emit?.('order:activated', { orderId: order.id });
+    // emit is an object of senders, not a function: calling it threw after
+    // the order was saved, so every activation answered 500. It sends ids
+    // only, as the CRUD update does, and cannot fail the request.
+    try { req.app.locals.emit?.recordUpdated?.('orders', order); } catch (e) { /* Real-time is best-effort */ }
     res.json(order);
   } catch (err) { next(err); }
 });
@@ -56,22 +87,32 @@ router.post('/:id/activate', authenticate, requirePermission('orders', 'edit'), 
 router.post('/from-quote/:quoteId', authenticate, requirePermission('orders', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const quote = await prisma.quote.findUnique({
-      where: { id: req.params.quoteId },
-      include: { items: true, account: true },
+    // A live quote the caller can see: the router checks :id, not :quoteId, so
+    // any quote id was copied, account, lines and amounts, into an order.
+    const quote = permits(req, 'quotes', 'read') && await prisma.quote.findFirst({
+      where: await reachableWhere(req, 'quotes', 'quote', { id: String(req.params.quoteId) }),
+      include: { items: true },
     });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
+    // An order must have an account; without one the create answered 500.
+    if (!quote.accountId) return res.status(400).json({ error: 'The quote has no account, and an order needs one' });
 
+    // The subtotal is before the discount, as an order's total is subtotal
+    // plus tax less discount; it was taken after it, so the parts did not
+    // add up to the total.
     const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
       data: {
+        name: `Order - ${quote.name || quote.number}`,
         accountId: quote.accountId,
         contactId: quote.contactId,
         quoteId: quote.id,
-        subtotal: quote.total - quote.tax,
+        subtotal: quote.total - quote.tax + quote.discount,
         tax: quote.tax,
         total: quote.total,
+        totalAmount: quote.total,
         discount: quote.discount,
         ownerId: req.userId,
+        createdById: req.userId,
         items: {
           create: quote.items.map(qi => ({
             productId: qi.productId,
@@ -136,14 +177,21 @@ router.post('/:id/items', authenticate, requirePermission('orders', 'full'), asy
     const prisma = req.app.locals.prisma;
     const { productId, quantity, unitPrice, discount } = req.body;
     if (!productId) return res.status(400).json({ error: 'productId required' });
+    // A live product the caller can see; the id was stored as sent.
+    const linkProblem = await linkRefusal(req, 'orderItem', { productId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const product = await prisma.product.findUnique({ where: { id: productId } });
-    const price = unitPrice || product?.price || 0;
-    const qty = quantity || 1;
-    const item = await prisma.orderItem.create({ data: { orderId: req.params.id, productId, quantity: qty, unitPrice: price, discount: discount || 0, total: price * qty * (1 - (discount || 0) / 100) } });
-    // Recalculate order total
+    const price = Number(unitPrice) || product?.price || 0;
+    const qty = parseInt(quantity) || 1;
+    const off = Number(discount) || 0;
+    const item = await prisma.orderItem.create({ data: { orderId: req.params.id, productId, quantity: qty, unitPrice: price, discount: off, total: price * qty * (1 - off / 100) } });
+    // Recalculate the order's subtotal and total from its lines, as a create
+    // does; only totalAmount was set, so the order's total and PDF kept the old one.
     const allItems = await prisma.orderItem.findMany({ where: { orderId: req.params.id } });
-    const total = allItems.reduce((s, i) => s + (i.total || 0), 0);
-    await prisma.order.update({ where: { id: req.params.id }, data: { totalAmount: total } });
+    const subtotal = allItems.reduce((s, i) => s + (i.total || 0), 0);
+    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { tax: true, discount: true } });
+    const total = subtotal + (order?.tax || 0) - (order?.discount || 0);
+    await prisma.order.update({ where: { id: req.params.id }, data: { subtotal, total, totalAmount: total } });
     res.status(201).json(item);
   } catch (err) { next(err); }
 });
@@ -152,10 +200,16 @@ router.post('/:id/items', authenticate, requirePermission('orders', 'full'), asy
 router.post('/:id/clone', authenticate, requirePermission('orders', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
+    const order = await prisma.order.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: true } });
     if (!order) return res.status(404).json({ error: 'Not found' });
-    const { id, createdAt, updatedAt, items, orderNumber, ...data } = order;
-    const clone = await createNumbered(prisma, 'order', ORDER_NUMBER, { data: { ...data, status: 'Draft', name: `${order.name} (Copy)`, createdById: req.user.id } });
+    // A new draft, the caller's: it kept the source's owner, its deleted
+    // marker, and its activation, shipping and cancellation.
+    const {
+      id, createdAt, updatedAt, deletedAt, items, orderNumber,
+      activatedDate, fulfilledAt, shippedDate, trackingNumber, carrier, fulfillmentNotes, cancelledAt, cancelReason,
+      ...data
+    } = order;
+    const clone = await createNumbered(prisma, 'order', ORDER_NUMBER, { data: { ...data, status: 'Draft', name: `${order.name || order.orderNumber} (Copy)`, ownerId: req.user.id, createdById: req.user.id } });
     for (const item of items) {
       const { id: iId, orderId, createdAt: iC, updatedAt: iU, ...iData } = item;
       await prisma.orderItem.create({ data: { ...iData, orderId: clone.id } });
@@ -170,13 +224,17 @@ router.get('/stats/summary', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const now = new Date();
     const thirtyDaysAgo = new Date(now - 30 * 86400000);
-    const [total, fulfilled, cancelled, recent, revenueAgg] = await Promise.all([
-      prisma.order.count({ where: { deletedAt: null } }),
-      prisma.order.count({ where: { status: 'Fulfilled', deletedAt: null } }),
-      prisma.order.count({ where: { status: 'Cancelled', deletedAt: null } }),
-      prisma.order.count({ where: { createdAt: { gte: thirtyDaysAgo }, deletedAt: null } }),
-      prisma.order.aggregate({ where: { status: 'Fulfilled', deletedAt: null }, _sum: { totalAmount: true }, _avg: { totalAmount: true } }),
+    // Over the live orders the caller may see; this counted everyone's. An
+    // order's amount is its total, or totalAmount where only that was set.
+    const visible = where => reachableWhere(req, 'orders', 'order', where);
+    const [total, fulfilled, cancelled, recent, fulfilledOrders] = await Promise.all([
+      prisma.order.count({ where: await visible() }),
+      prisma.order.count({ where: await visible({ status: 'Fulfilled' }) }),
+      prisma.order.count({ where: await visible({ status: 'Cancelled' }) }),
+      prisma.order.count({ where: await visible({ createdAt: { gte: thirtyDaysAgo } }) }),
+      prisma.order.findMany({ where: await visible({ status: 'Fulfilled' }), select: { total: true, totalAmount: true } }),
     ]);
-    res.json({ totalOrders: total, fulfilled, cancelled, last30Days: recent, fulfillmentRate: total ? Math.round(fulfilled / total * 100) : 0, totalRevenue: revenueAgg._sum.totalAmount || 0, avgOrderValue: Math.round(revenueAgg._avg.totalAmount || 0) });
+    const revenue = fulfilledOrders.reduce((s, o) => s + (o.total || o.totalAmount || 0), 0);
+    res.json({ totalOrders: total, fulfilled, cancelled, last30Days: recent, fulfillmentRate: total ? Math.round(fulfilled / total * 100) : 0, totalRevenue: revenue, avgOrderValue: fulfilledOrders.length ? Math.round(revenue / fulfilledOrders.length) : 0 });
   } catch (err) { next(err); }
 });

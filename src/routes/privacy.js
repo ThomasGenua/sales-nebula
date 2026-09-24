@@ -39,14 +39,16 @@ router.get('/requests', authenticate, requirePermission('admin', 'read'), async 
     const where = {};
     if (status) where.status = status;
     if (requestType) where.requestType = requestType;
+    // Skip and page count by the capped size: past 200, pages skipped rows.
+    const take = Math.min(+limit || 50, 200);
     const [data, total] = await Promise.all([
       prisma.dataSubjectRequest.findMany({
         where, orderBy: { requestedAt: 'desc' },
-        take: Math.min(+limit || 50, 200), skip: ((+page || 1) - 1) * (+limit || 50),
+        take, skip: ((+page || 1) - 1) * take,
       }),
       prisma.dataSubjectRequest.count({ where }),
     ]);
-    res.json({ data, total, page: +page || 1, pages: Math.ceil(total / (+limit || 50)) });
+    res.json({ data, total, page: +page || 1, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
 
@@ -135,9 +137,16 @@ router.post('/erase', authenticate, requirePermission('admin', 'full'), auditMid
     const subject = await resolveSubject(prisma, input);
     if (!subject.found) return res.status(404).json({ error: 'No data subject matched that identifier' });
 
-    request = req.body.requestId
-      ? await prisma.dataSubjectRequest.findUnique({ where: { id: req.body.requestId } })
-      : await prisma.dataSubjectRequest.create({
+    // A named request must be an erasure still to do. An export or an already
+    // processed request was marked a completed erasure, and an unknown id
+    // erased with no request logged at all.
+    if (req.body.requestId) {
+      const logged = await prisma.dataSubjectRequest.findUnique({ where: { id: String(req.body.requestId) } });
+      if (!logged || logged.requestType !== 'erasure') return res.status(404).json({ error: 'Erasure request not found' });
+      if (logged.status === 'completed') return res.status(409).json({ error: 'Request has already been processed' });
+      request = logged;
+    } else {
+      request = await prisma.dataSubjectRequest.create({
         data: {
           requestType: 'erasure', subjectType: subjectTypeOf(input), strategy,
           contactId: subject.contactId, leadId: subject.leadId,
@@ -145,6 +154,7 @@ router.post('/erase', authenticate, requirePermission('admin', 'full'), auditMid
           requestedById: req.userId || null, notes: req.body.notes || null,
         },
       });
+    }
 
     const result = await eraseSubject(prisma, subject, { strategy, actorId: req.userId });
 

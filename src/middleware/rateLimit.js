@@ -32,8 +32,20 @@ const limiters = {
   // Strict: login, register (prevent brute force)
   auth: createLimiter({ windowMs: 15 * 60 * 1000, max: 20, keyGenerator: (req) => req.ip }),
 
-  // Standard: most API calls
-  standard: createLimiter({ windowMs: 15 * 60 * 1000, max: 200 }),
+  // Signed-in account actions (profile save, MFA enrolment, device removal).
+  // These shared the per-address `auth` counter, so a few profile saves used
+  // up the sign-in attempts of everyone on that address. Keyed by user (the
+  // default key), so mount it after authenticate.
+  account: createLimiter({ windowMs: 15 * 60 * 1000, max: 30 }),
+
+  // Standard: most API calls. It runs before sign-in is known, so it counts
+  // per address, and the SPA makes several calls a page: at 200 one busy user,
+  // or an office behind one NAT address, got 429s in normal use. It also
+  // passed its own max, so RATE_LIMIT_MAX could not raise it; now it can.
+  standard: createLimiter({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 1000,
+  }),
 
   // Generous: read-only endpoints
   read: createLimiter({ windowMs: 15 * 60 * 1000, max: 500 }),

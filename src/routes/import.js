@@ -11,23 +11,26 @@ const OWNERSHIP_FIELDS = ['ownerId', 'assignedId'];
 const router = Router();
 router.use(authenticate, auditMiddleware);
 
+// Columns the models have. zip, linkedin, twitter and a lead's website are
+// not, and any row carrying one failed to import ("Unknown argument").
 const IMPORTABLE_MODULES = {
   contacts: {
     model: 'contact',
     required: ['firstName', 'lastName'],
-    fields: ['firstName', 'lastName', 'email', 'phone', 'title', 'department', 'accountId', 'ownerId', 'source', 'address', 'city', 'state', 'country', 'zip', 'linkedin', 'twitter', 'description'],
+    fields: ['firstName', 'lastName', 'email', 'phone', 'title', 'department', 'accountId', 'ownerId', 'source', 'address', 'city', 'state', 'country', 'description'],
     dedupeFields: ['email'],
   },
   leads: {
     model: 'lead',
-    required: ['firstName', 'lastName'],
-    fields: ['firstName', 'lastName', 'email', 'phone', 'company', 'title', 'source', 'status', 'address', 'city', 'state', 'country', 'zip', 'website', 'description', 'ownerId', 'assignedId'],
+    // company is a required column: a row without it failed at the database.
+    required: ['firstName', 'lastName', 'company'],
+    fields: ['firstName', 'lastName', 'email', 'phone', 'company', 'title', 'source', 'status', 'address', 'city', 'state', 'country', 'description', 'ownerId', 'assignedId'],
     dedupeFields: ['email'],
   },
   accounts: {
     model: 'account',
     required: ['name'],
-    fields: ['name', 'industry', 'website', 'phone', 'address', 'city', 'state', 'country', 'zip', 'employees', 'revenue', 'type', 'description', 'ownerId'],
+    fields: ['name', 'industry', 'website', 'phone', 'address', 'city', 'state', 'country', 'employees', 'revenue', 'type', 'description', 'ownerId'],
     dedupeFields: ['name'],
   },
   products: {

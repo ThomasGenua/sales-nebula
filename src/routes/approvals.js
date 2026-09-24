@@ -2,6 +2,8 @@ const { Router } = require('express');
 const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { fireWebhookEvent } = require('../services/webhooks');
+const { notify } = require('../services/notify');
 const {
   APPROVER_TYPES, APPROVAL_MODELS, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
   finalActionProblem, runFinalAction, findVisibleRecord, canSeeAllRequests,
@@ -120,6 +122,11 @@ router.put('/processes/:id', requirePermission('workflows', 'edit'), async (req,
 router.delete('/processes/:id', requirePermission('workflows', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Requests keep a required link to their process, so deleting one that
+    // had been used failed with a 500. They are the approval record, so the
+    // process stays; switching it off stops new requests.
+    const requests = await prisma.approvalRequest.count({ where: { processId: req.params.id } });
+    if (requests) return res.status(409).json({ error: `This process has ${requests} approval request(s). Deactivate it instead.` });
     await prisma.approvalProcess.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -228,6 +235,7 @@ router.post('/requests', async (req, res, next) => {
     await notifyApprovers(prisma, request, 1, 'Approval Required', `${process.name}: Submitted by ${req.user.firstName}`);
 
     await req.audit({ action: 'create', module: 'approvals', recordId: request.id, details: `Submitted for approval: ${process.name}` });
+    await fireWebhookEvent(prisma, 'approval.requested', { id: request.id, module: request.module, recordId: request.recordId });
     res.status(201).json(request);
   } catch (err) { next(err); }
 });
@@ -278,10 +286,9 @@ router.post('/requests/:id/approve', async (req, res, next) => {
       await notifyApprovers(prisma, request, nextStepNum, `Approval Required (Step ${nextStepNum})`, request.process.name);
     } else {
       // The submitter only ever heard about rejections.
-      await prisma.notification.create({
-        data: { title: 'Approval Granted', message: comments || `${request.process.name} was approved`, userId: request.submittedById, recordModule: request.module, recordId: request.recordId },
-      });
+      await notify(prisma, 'approvals', { title: 'Approval Granted', message: comments || `${request.process.name} was approved`, userId: request.submittedById, recordModule: request.module, recordId: request.recordId });
       finalAction = await runFinalAction(prisma, request, request.process, 'Approved');
+      await fireWebhookEvent(prisma, 'approval.completed', { id: request.id, module: request.module, recordId: request.recordId, status: 'Approved' });
     }
 
     await req.audit({
@@ -309,10 +316,9 @@ router.post('/requests/:id/reject', async (req, res, next) => {
     await settleStep(prisma, request, currentStep, 'Rejected', comments);
     await closeOpenSteps(prisma, request.id);
 
-    await prisma.notification.create({
-      data: { title: 'Approval Rejected', message: comments || 'Your request was rejected', userId: request.submittedById, recordModule: request.module, recordId: request.recordId },
-    });
+    await notify(prisma, 'approvals', { title: 'Approval Rejected', message: comments || 'Your request was rejected', userId: request.submittedById, recordModule: request.module, recordId: request.recordId });
     const finalAction = await runFinalAction(prisma, request, request.process, 'Rejected');
+    await fireWebhookEvent(prisma, 'approval.completed', { id: request.id, module: request.module, recordId: request.recordId, status: 'Rejected' });
 
     await req.audit({
       action: 'update', module: 'approvals', recordId: req.params.id,

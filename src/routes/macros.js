@@ -33,7 +33,7 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 router.get('/:id', authenticate, idParam, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const m = await prisma.macro.findUnique({ where: { id: req.params.id } }); if (!m) return res.status(404).json({ error: 'Not found' }); res.json(m); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const m = await prisma.macro.findFirst({ where: { id: req.params.id, deletedAt: null } }); if (!m) return res.status(404).json({ error: 'Not found' }); res.json(m); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
@@ -65,7 +65,8 @@ router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'),
 router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const macro = await prisma.macro.findUnique({ where: { id: req.params.id } });
+    // A live, active macro. A deleted one still ran if it was active.
+    const macro = await prisma.macro.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!macro || !macro.active) return res.status(404).json({ error: 'Macro not found or inactive' });
     const { recordId } = req.body;
     if (!recordId) return res.status(400).json({ error: 'recordId required' });
@@ -87,7 +88,11 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
           await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });
           results.push({ action: 'updateField', field: action.field, success: true });
         } else if (action.type === 'addComment') {
-          await prisma.caseComment.create({ data: { caseId: recordId, text: action.value, isPublic: action.isPublic || false, authorId: req.user.id } });
+          // A case comment, so only on a case; its text is `value`, or `body`
+          // as the templates below write it, which left the comment empty and
+          // the action failing.
+          if (delegate !== 'case') throw new Error('Comments can only be added to cases');
+          await prisma.caseComment.create({ data: { caseId: recordId, text: action.value ?? action.body, isPublic: action.isPublic || false, authorId: req.user.id } });
           results.push({ action: 'addComment', success: true });
         } else if (action.type === 'sendEmail') {
           results.push({ action: 'sendEmail', success: true, note: 'Email queued' });
@@ -108,8 +113,10 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
 router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const macro = await prisma.macro.findUnique({ where: { id: req.params.id } });
-    if (!macro) return res.status(404).json({ error: 'Macro not found' });
+    // A live, active macro, as for a single run. This ran deleted and
+    // inactive ones.
+    const macro = await prisma.macro.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!macro || !macro.active) return res.status(404).json({ error: 'Macro not found or inactive' });
     const { recordIds } = req.body;
     if (!Array.isArray(recordIds) || !recordIds.length) return res.status(400).json({ error: 'recordIds required' });
     const delegate = MACRO_MODELS[macro.module];

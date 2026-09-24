@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { validate, schemas } = require('../middleware/validate');
 const { limiters } = require('../middleware/rateLimit');
@@ -22,12 +23,41 @@ const router = Router();
 const DEFAULT_SIGNUP_ROLE = process.env.DEFAULT_SIGNUP_ROLE || 'Sales Rep';
 
 /**
+ * The account an address signs in to: the exact match, else the one account
+ * whose address differs only in case. Some routes stored addresses as typed
+ * and others lowercased them, so Alice@x.com could not sign in to alice@x.com.
+ * Two accounts that differ only in case are matched by neither.
+ */
+async function findAccountByEmail(prisma, email, args = {}) {
+  const exact = await prisma.user.findUnique({ where: { email }, ...args });
+  if (exact) return exact;
+  // SQLite, the development fallback, has no case-insensitive mode: there
+  // only the exact match is tried.
+  const alike = await prisma.user.findMany({ where: { email: { equals: email, mode: 'insensitive' } }, take: 2, ...args }).catch(() => []);
+  return alike.length === 1 ? alike[0] : null;
+}
+
+/**
+ * A LoginHistory row, which /api/security/threats and /sessions read and
+ * nothing wrote. It never fails the sign-in it records.
+ */
+const recordSignIn = (prisma, req, userId, status, loginType = 'password') => prisma.loginHistory.create({
+  data: { userId, status, loginType, sourceIp: req.ip || null, browser: String(req.get('user-agent') || '').slice(0, 300) || null },
+}).catch(() => {});
+
+/**
+ * A stamp of the password a reset link replaces. The link carries it, so it
+ * stops working once the password changes: it used to work for its whole hour.
+ */
+const passwordStamp = hash => crypto.createHmac('sha256', JWT_SECRET).update(String(hash || '')).digest('base64url').slice(0, 22);
+
+/**
  * Issue the session for a fully authenticated user. Shared by password login
  * and the MFA second step so both return an identical shape. A browser that
  * asks for a cookie session gets its tokens only as httpOnly cookies; every
  * other caller gets them in the body, as before.
  */
-async function issueSession(prisma, user, req, res) {
+async function issueSession(prisma, user, req, res, loginType = 'password') {
   const accessToken = signAccessToken(user.id, user.role.name);
   const { token: refreshToken } = signRefreshToken(user.id);
 
@@ -40,6 +70,7 @@ async function issueSession(prisma, user, req, res) {
     details: `${user.firstName} ${user.lastName} logged in`,
     userId: user.id,
   });
+  await recordSignIn(prisma, req, user.id, 'Success', loginType);
 
   const { password: _pw, ...rest } = user;
   const safeUser = { ...rest, lastLoginAt };
@@ -56,6 +87,33 @@ async function issueSession(prisma, user, req, res) {
   });
 }
 
+/**
+ * Finish a sign-in whose first factor checked out: the MFA step for a user
+ * with a verified device, a session for anyone else. Password sign-in and
+ * social sign-in (routes/oauth.js) both end here.
+ */
+async function completeSignIn(prisma, user, req, res, loginType = 'password') {
+  // A user with a verified device does not get a session from the password
+  // alone. Without this gate, enrolling MFA protects nothing: this route
+  // still hands out a token and every MFA endpoint lives elsewhere.
+  const devices = await prisma.mfaDevice.findMany({
+    where: { userId: user.id, verified: true },
+    select: { id: true, type: true },
+    // The same order every time, oldest first: the sign-in page submits the first.
+    orderBy: { createdAt: 'asc' },
+  });
+  if (devices.length) {
+    const mfaToken = jwt.sign(
+      { sub: user.id, purpose: 'mfa-pending' },
+      JWT_SECRET,
+      { expiresIn: '5m' }
+    );
+    return res.json({ mfaRequired: true, mfaToken, devices, expiresIn: 300 });
+  }
+
+  return issueSession(prisma, user, req, res, loginType);
+}
+
 // POST /api/auth/login
 router.post('/login', limiters.auth, validate(schemas.login), async (req, res, next) => {
   try {
@@ -66,23 +124,26 @@ router.post('/login', limiters.auth, validate(schemas.login), async (req, res, n
       return res.status(400).json({ error: 'Email and password required' });
     }
 
+    // Attempts count per address whatever its case: Bob@x.com and bob@x.com
+    // were counted apart, so changing the case went round the lockout.
+    const lockKey = String(email).toLowerCase();
+
     // Account lockout check
-    if (isAccountLocked(email)) {
-      const lockedUntil = getLockedUntil(email);
+    if (isAccountLocked(lockKey)) {
+      const lockedUntil = getLockedUntil(lockKey);
       return res.status(423).json({
         error: 'Account temporarily locked due to too many failed attempts',
         lockedUntil: lockedUntil.toISOString(),
       });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email },
+    const user = await findAccountByEmail(prisma, email, {
       include: { role: { include: { permissions: true } } },
     });
 
     if (!user) {
-      recordFailedLogin(email);
-      const remaining = getRemainingAttempts(email);
+      recordFailedLogin(lockKey);
+      const remaining = getRemainingAttempts(lockKey);
       return res.status(401).json({ error: 'Invalid credentials', remainingAttempts: remaining });
     }
 
@@ -92,31 +153,16 @@ router.post('/login', limiters.auth, validate(schemas.login), async (req, res, n
 
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) {
-      recordFailedLogin(email);
-      const remaining = getRemainingAttempts(email);
+      recordFailedLogin(lockKey);
+      await recordSignIn(prisma, req, user.id, 'Failed');
+      const remaining = getRemainingAttempts(lockKey);
       return res.status(401).json({ error: 'Invalid credentials', remainingAttempts: remaining });
     }
 
     // Successful login: clear attempts
-    clearLoginAttempts(email);
+    clearLoginAttempts(lockKey);
 
-    // A user with a verified device does not get a session from the password
-    // alone. Without this gate, enrolling MFA protects nothing: this route
-    // still hands out a token and every MFA endpoint lives elsewhere.
-    const devices = await prisma.mfaDevice.findMany({
-      where: { userId: user.id, verified: true },
-      select: { id: true, type: true },
-    });
-    if (devices.length) {
-      const mfaToken = jwt.sign(
-        { sub: user.id, purpose: 'mfa-pending' },
-        JWT_SECRET,
-        { expiresIn: '5m' }
-      );
-      return res.json({ mfaRequired: true, mfaToken, devices, expiresIn: 300 });
-    }
-
-    return issueSession(prisma, user, req, res);
+    return completeSignIn(prisma, user, req, res);
   } catch (err) { next(err); }
 });
 
@@ -226,7 +272,9 @@ router.get('/me', authenticate, async (req, res, next) => {
 });
 
 // PUT /api/auth/me — update own profile (no users:full required)
-router.put('/me', authenticate, limiters.auth, async (req, res, next) => {
+// Limited per user (limiters.account): the per-address sign-in counter was
+// used up by profile saves, for everyone signing in from that address.
+router.put('/me', authenticate, limiters.account, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { firstName, lastName, email, avatar, timezone, locale, currentPassword } = req.body || {};
@@ -257,7 +305,11 @@ router.put('/me', authenticate, limiters.auth, async (req, res, next) => {
     let previousEmail = null;
     if (data.email) {
       const current = await prisma.user.findUnique({ where: { id: req.userId }, select: { email: true, password: true } });
-      if (data.email === current.email) {
+      // The Settings page asks for the password only when the address differs
+      // ignoring case, and sends it back as stored; a stored address with a
+      // capital in it failed every profile save. A case-only difference is no
+      // change: the address is left as it is and nothing is written.
+      if (data.email === String(current.email).toLowerCase()) {
         delete data.email;
       } else {
         if (typeof currentPassword !== 'string' || !(await bcrypt.compare(currentPassword, current.password))) {
@@ -356,7 +408,9 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
 });
 
 // POST /api/auth/change-password
-router.post('/change-password', authenticate, async (req, res, next) => {
+// Rate limited like the other password checks: a stolen session could try
+// current passwords here without limit.
+router.post('/change-password', authenticate, limiters.account, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { currentPassword, newPassword } = req.body;
@@ -372,7 +426,9 @@ router.post('/change-password', authenticate, async (req, res, next) => {
 
     const user = await prisma.user.findUnique({ where: { id: req.userId } });
     const valid = await bcrypt.compare(currentPassword, user.password);
-    if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
+    // 403, as the other password confirmations answer: the page takes a 401
+    // for an expired session, so a mistyped current password signed it out.
+    if (!valid) return res.status(403).json({ error: 'Current password incorrect' });
 
     // Prevent reuse of same password
     const sameAsOld = await bcrypt.compare(newPassword, user.password);
@@ -391,7 +447,7 @@ router.post('/change-password', authenticate, async (req, res, next) => {
 router.post('/forgot-password', limiters.auth, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const email = String(req.body?.email || '').trim().toLowerCase();
+    const email = String(req.body?.email || '').trim();
     const generic = {
       accepted: true,
       message: 'If an account exists for that address, a reset link is on its way. Check your inbox and spam folder.',
@@ -400,11 +456,12 @@ router.post('/forgot-password', limiters.auth, async (req, res, next) => {
       return res.status(202).json(generic);
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    // As sign-in finds it: lowercasing first missed every account stored with a capital.
+    const user = await findAccountByEmail(prisma, email);
     if (user && user.active !== false) {
       const { sendPasswordResetEmail, appUrl } = require('../utils/mail');
       const resetToken = jwt.sign(
-        { sub: user.id, purpose: 'password-reset' },
+        { sub: user.id, purpose: 'password-reset', pw: passwordStamp(user.password) },
         JWT_SECRET,
         { expiresIn: '1h' }
       );
@@ -454,7 +511,9 @@ router.post('/reset-password', limiters.auth, async (req, res, next) => {
     }
 
     const user = await prisma.user.findUnique({ where: { id: decoded.sub } });
-    if (!user || user.active === false) {
+    // A link works once: its stamp names the password it replaces, which a
+    // reset (or any other change) leaves behind.
+    if (!user || user.active === false || decoded.pw !== passwordStamp(user.password)) {
       return res.status(400).json({ error: 'That reset link is invalid or has expired.' });
     }
 
@@ -493,10 +552,11 @@ router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
 
     const device = deviceId
       ? await prisma.mfaDevice.findFirst({ where: { id: deviceId, userId: decoded.sub, verified: true } })
-      : await prisma.mfaDevice.findFirst({ where: { userId: decoded.sub, verified: true } });
+      : await prisma.mfaDevice.findFirst({ where: { userId: decoded.sub, verified: true }, orderBy: { createdAt: 'asc' } });
     if (!device) return res.status(400).json({ error: 'No verified device for this account' });
 
     let ok = false;
+    let used = device;
     if (device.type === 'totp') {
       ok = verifyTotp(device.secret, code);
     } else {
@@ -511,11 +571,23 @@ router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
       }
     }
 
+    // The page names the first device; a user with two authenticator apps may
+    // have read the code off the other, so those are tried before refusing.
+    if (!ok) {
+      const others = await prisma.mfaDevice.findMany({
+        where: { userId: decoded.sub, verified: true, type: 'totp', NOT: { id: device.id } },
+        orderBy: { createdAt: 'asc' },
+      });
+      used = others.find(d => verifyTotp(d.secret, code)) || device;
+      ok = used !== device;
+    }
+
     if (!ok) {
       await audit(prisma, {
         action: 'mfa_failed', module: 'auth',
         details: 'Incorrect MFA code', userId: decoded.sub,
       }).catch(() => {});
+      await recordSignIn(prisma, req, decoded.sub, 'Failed', 'mfa');
       return res.status(401).json({ error: 'Incorrect code' });
     }
 
@@ -525,9 +597,13 @@ router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
     });
     if (!user || !user.active) return res.status(403).json({ error: 'Account disabled' });
 
-    await prisma.mfaDevice.update({ where: { id: device.id }, data: { lastUsedAt: new Date() } });
-    return issueSession(prisma, user, req, res);
+    await prisma.mfaDevice.update({ where: { id: used.id }, data: { lastUsedAt: new Date() } });
+    return issueSession(prisma, user, req, res, 'mfa');
   } catch (err) { next(err); }
 });
 
 module.exports = router;
+// Social sign-in (routes/oauth.js) finds the account and finishes as a
+// password sign-in does, MFA step included.
+module.exports.completeSignIn = completeSignIn;
+module.exports.findAccountByEmail = findAccountByEmail;

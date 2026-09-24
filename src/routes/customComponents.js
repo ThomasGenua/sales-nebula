@@ -44,6 +44,17 @@ router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'),
   try { await req.app.locals.prisma.customComponent.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
+// Bulk activate/deactivate. Before /:id/activate, which took `bulk` for an id.
+router.post('/bulk/activate', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { ids, active } = req.body;
+    if (!ids?.length) return res.status(400).json({ error: 'ids required' });
+    const result = await prisma.customComponent.updateMany({ where: { id: { in: ids } }, data: { active: active !== false } });
+    res.json({ updated: result.count });
+  } catch (err) { next(err); }
+});
+
 // Activate/deactivate
 router.post('/:id/activate', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const c = await prisma.customComponent.update({ where: { id: req.params.id }, data: { active: true } }); res.json(c); } catch (err) { next(err); }
@@ -74,17 +85,6 @@ router.post('/:id/clone', authenticate, requirePermission('admin', 'full'), asyn
     const { id, createdAt, updatedAt, ...data } = original;
     const clone = await prisma.customComponent.create({ data: { ...data, name: `${original.name} (Copy)`, active: false, createdById: req.user.id } });
     res.status(201).json(clone);
-  } catch (err) { next(err); }
-});
-
-// Bulk activate/deactivate
-router.post('/bulk/activate', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, active } = req.body;
-    if (!ids?.length) return res.status(400).json({ error: 'ids required' });
-    const result = await prisma.customComponent.updateMany({ where: { id: { in: ids } }, data: { active: active !== false } });
-    res.json({ updated: result.count });
   } catch (err) { next(err); }
 });
 

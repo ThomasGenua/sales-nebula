@@ -24,9 +24,12 @@ async function nextFreeNumber(prisma, delegate, { field, prefix, width = 4 }) {
 
   // Rows were deleted below count() + 1. Carry on from the highest number
   // in use rather than probing upward one query at a time.
+  // Only numbers in this format count: parseInt read the seed's
+  // "INV-2025-001" as 2025, so the next invoice after a clash was INV-2026.
   const rows = await model.findMany({ where: { [field]: { startsWith: prefix } }, select: { [field]: true } });
   const highest = rows.reduce((max, r) => {
-    const n = parseInt(String(r[field]).slice(prefix.length), 10);
+    const digits = String(r[field]).slice(prefix.length);
+    const n = /^\d+$/.test(digits) ? parseInt(digits, 10) : NaN;
     return Number.isFinite(n) && n > max ? n : max;
   }, 0);
   return format(prefix, highest + 1, width);

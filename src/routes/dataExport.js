@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 
 const fs = require('fs');
@@ -12,11 +12,13 @@ const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 // Never under a served path.
 const EXPORT_DIR = path.resolve(process.env.EXPORT_DIR || path.join(process.env.UPLOAD_DIR || './uploads', '..', 'private-exports'));
 
-/** Whether the caller's role grants at least read on a module. */
-function canRead(user, module) {
-  if (isAdmin(user)) return true;
-  const perm = user?.role?.permissions?.find(p => p.module === module);
-  return !!perm && ['read', 'edit', 'full'].includes(perm.level);
+/**
+ * Whether the caller may read a module: their role's grant, capped by an API
+ * key's (permits). Reading the role alone let a key granted only contacts
+ * export deals.
+ */
+function canRead(req, module) {
+  return isAdmin(req.user) || permits(req, module, 'read');
 }
 
 const router = Router();
@@ -51,7 +53,7 @@ router.post('/', async (req, res, next) => {
 
     // Exporting a module is reading it, in bulk. Any authenticated user could
     // previously export every row of any module whatever their role allowed.
-    if (!canRead(req.user, module)) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    if (!canRead(req, module)) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
 
     const exportReq = await prisma.dataExport.create({
       data: { module, format, filters: filters || {}, fields: fields || [], requestedById: req.userId },
@@ -77,13 +79,16 @@ router.post('/', async (req, res, next) => {
         // CSV
         if (records.length === 0) { content = ''; }
         else {
+          // Every column by default. Keeping only the first record's non-object
+          // values dropped every date (a Date is an object) and any column the
+          // first record left empty (null is too), for the whole file.
           const requested = Array.isArray(fields) ? fields.filter(f => modelHasField(modelName, f)) : [];
-          const cols = requested.length ? requested : Object.keys(records[0]).filter(k => typeof records[0][k] !== 'object');
+          const cols = requested.length ? requested : Object.keys(records[0]);
           const header = cols.join(',');
           const rows = records.map(r => cols.map(c => {
             const val = r[c];
             if (val === null || val === undefined) return '';
-            const str = String(val);
+            const str = val instanceof Date ? val.toISOString() : typeof val === 'object' ? JSON.stringify(val) : String(val);
             return str.includes(',') || str.includes('"') || str.includes('\n') ? `"${str.replace(/"/g, '""')}"` : str;
           }).join(','));
           content = [header, ...rows].join('\n');

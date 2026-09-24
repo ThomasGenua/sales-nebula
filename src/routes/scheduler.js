@@ -48,16 +48,19 @@ router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, userId, from, to, status } = req.query;
+    // A page of at most 200; a limit that is not a number made the query fail.
+    const take = Math.min(parseInt(limit, 10) || 50, 200);
+    const current = Math.max(parseInt(page, 10) || 1, 1);
     // userId narrows the caller's own appointments; an admin may name anyone.
     const where = { deletedAt: null, ...ownAppointments(req) };
     if (userId) where.assignedToId = userId;
     if (status) where.status = status;
     if (from || to) { where.startTime = {}; if (from) where.startTime.gte = new Date(from); if (to) where.startTime.lte = new Date(to); }
     const [data, total] = await Promise.all([
-      queryWithIncludes(prisma, 'appointment', 'findMany', { where, orderBy: { startTime: 'asc' }, take: +limit, skip: (+page - 1) * +limit, include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, contact: { select: { id: true, firstName: true, lastName: true } } } }),
+      queryWithIncludes(prisma, 'appointment', 'findMany', { where, orderBy: { startTime: 'asc' }, take, skip: (current - 1) * take, include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, contact: { select: { id: true, firstName: true, lastName: true } } } }),
       prisma.appointment.count({ where }),
     ]);
-    res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
+    res.json({ data, total, page: current, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
 
@@ -67,15 +70,20 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { subject, startTime, endTime, contactId, accountId, type, location, notes } = req.body;
     if (!subject || !startTime || !endTime) return res.status(400).json({ error: 'subject, startTime, endTime required' });
+    // An unreadable date failed in the database (500), and an end before the
+    // start was booked, and then never clashed with anything.
+    const s = new Date(startTime), e = new Date(endTime);
+    if (isNaN(s) || isNaN(e)) return res.status(400).json({ error: 'Invalid date format' });
+    if (e <= s) return res.status(400).json({ error: 'endTime must be after startTime' });
     // Only on a contact and account the caller can see (see linkProblem).
     const refusal = await linkProblem(req, { contactId, accountId });
     if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     // Conflict check
     const conflicts = await prisma.appointment.findMany({
       where: {
-        assignedToId: req.body.assignedToId || req.user.id, status: { not: 'Cancelled' },
+        assignedToId: req.body.assignedToId || req.user.id, status: { not: 'Cancelled' }, deletedAt: null,
         OR: [
-          { startTime: { lt: new Date(endTime) }, endTime: { gt: new Date(startTime) } },
+          { startTime: { lt: e }, endTime: { gt: s } },
         ],
       },
     });
@@ -84,7 +92,7 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     if (conflicts.length) return res.status(409).json({ error: 'Time conflict with existing appointment', conflicts: conflicts.map(c => ({ id: c.id, subject: mayRead(req, c) ? c.subject : 'Busy', startTime: c.startTime, endTime: c.endTime })) });
     // The booker owns it, so booking for a colleague does not lose it.
     const apt = await prisma.appointment.create({
-      data: { subject, startTime: new Date(startTime), endTime: new Date(endTime), assignedToId: req.body.assignedToId || req.user.id, ownerId: req.user.id, contactId, accountId, type: type || 'Meeting', location, notes, status: 'Scheduled' },
+      data: { subject, startTime: s, endTime: e, assignedToId: req.body.assignedToId || req.user.id, ownerId: req.user.id, contactId, accountId, type: type || 'Meeting', location, notes, status: 'Scheduled' },
     });
     await req.audit({ action: 'create', module: 'scheduler', recordId: apt.id, details: `Appointment: ${subject}` });
     res.status(201).json(apt);
@@ -130,10 +138,12 @@ router.get('/slots', authenticate, async (req, res, next) => {
     const dayStart = new Date(targetDate); dayStart.setHours(9, 0, 0, 0);
     const dayEnd = new Date(targetDate); dayEnd.setHours(17, 0, 0, 0);
 
+    // Everything overlapping the working day: one that began before 9:00 and
+    // ran into it was left out, and its time offered as free.
     const existing = await prisma.appointment.findMany({
       where: {
-        assignedToId: targetUserId, status: { not: 'Cancelled' },
-        startTime: { gte: dayStart, lt: dayEnd },
+        assignedToId: targetUserId, status: { not: 'Cancelled' }, deletedAt: null,
+        startTime: { lt: dayEnd }, endTime: { gt: dayStart },
       },
       orderBy: { startTime: 'asc' },
     });
@@ -179,6 +189,29 @@ router.get('/availability', authenticate, async (req, res, next) => {
 
 module.exports = router;
 
-// Record count, health and summary, answered from the module's own table.
-statusRoutes(router, { module: 'scheduler', model: 'appointment', analytics: true });
+// Record count and summary of the appointments the caller may see, as the list
+// shows them (ownAppointments; an admin's are everyone's). The shared routes
+// counted every user's, having no way to narrow them to the caller.
+router.get('/count', authenticate, async (req, res, next) => {
+  try {
+    const count = await req.app.locals.prisma.appointment.count({ where: { deletedAt: null, ...ownAppointments(req) } });
+    res.json({ count, module: 'scheduler' });
+  } catch (err) { next(err); }
+});
+
+router.get('/analytics/summary', authenticate, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const base = { deletedAt: null, ...ownAppointments(req) };
+    const since = new Date(Date.now() - 30 * 86400000);
+    const [total, recent] = await Promise.all([
+      prisma.appointment.count({ where: base }),
+      prisma.appointment.count({ where: { AND: [base, { createdAt: { gte: since } }] } }),
+    ]);
+    res.json({ module: 'scheduler', total, createdLast30Days: recent, checkedAt: new Date() });
+  } catch (err) { next(err); }
+});
+
+// Health, from the shared route; without a model it checks the database connection.
+statusRoutes(router, { module: 'scheduler' });
 

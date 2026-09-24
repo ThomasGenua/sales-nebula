@@ -21,9 +21,10 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuid } = require('uuid');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { buildAccessFilter, applyAccessFilter, isAdmin } = require('../middleware/rowSecurity');
+const { modelHasField } = require('../utils/modelFields');
 const { resolveModel } = require('../services/workflowEngine');
 
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './uploads');
@@ -69,9 +70,14 @@ async function visibleParent(req, parentModule, parentId) {
   const prisma = req.app.locals.prisma;
   const modelName = resolveModel(parentModule);
   if (!modelName || !prisma[modelName]?.findFirst) return null;
+  // Read permission on the module as well, as for the record itself, and a
+  // live record: row security alone let a role with no access to the module
+  // reach its files, and a deleted record went on listing and serving them.
+  if (!permits(req, parentModule, 'read')) return null;
   const filter = await buildAccessFilter(prisma, req.user, parentModule, { modelName });
+  const live = modelHasField(modelName, 'deletedAt') ? { deletedAt: null } : {};
   return prisma[modelName].findFirst({
-    where: applyAccessFilter({ id: parentId }, filter),
+    where: applyAccessFilter({ id: parentId, ...live }, filter),
     select: { id: true },
   }).catch(() => null);
 }

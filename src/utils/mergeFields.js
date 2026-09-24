@@ -45,13 +45,15 @@ const FORMATTERS = {
     return isNaN(n) ? '' : String(Math.round(n));
   },
 
+  // In UTC like `iso`: a date field is stored as UTC midnight, so on a server
+  // west of UTC the other formats printed the day before.
   date: (v, fmt = 'medium') => {
     const d = new Date(v);
     if (isNaN(d)) return '';
     if (fmt === 'iso') return d.toISOString().slice(0, 10);
-    if (fmt === 'short') return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit' });
-    if (fmt === 'long') return d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    if (fmt === 'short') return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit', timeZone: 'UTC' });
+    if (fmt === 'long') return d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
   },
   datetime: v => {
     const d = new Date(v);
@@ -74,7 +76,10 @@ const FORMATTERS = {
   json: v => JSON.stringify(v),
 };
 
-/** Escape a value for safe HTML output. */
+/**
+ * Escape a value for safe HTML output. Braces too: a record value holding
+ * "{{owner.email}}" was otherwise read as a merge field by a later pass.
+ */
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
@@ -82,7 +87,9 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/'/g, '&#39;')
+    .replace(/\{/g, '&#123;')
+    .replace(/\}/g, '&#125;');
 }
 
 /** Walk a dotted path against a context object. Returns undefined on a miss. */
@@ -126,55 +133,76 @@ function isTruthy(value) {
 function substitute(template, context, { escape = true } = {}) {
   return String(template).replace(/\{\{\s*([^#/@}][^}]*?)\s*\}\}/g, (match, expr) => {
     const [pathPart, ...formatterChain] = expr.split('|').map(s => s.trim());
+    // nl2br makes markup, so when escaping it runs after the escape: its
+    // <br/> tags were escaped with the value and printed as text.
+    const isBreaks = step => step.split(':')[0].trim() === 'nl2br';
+    const breaks = escape && formatterChain.some(isBreaks);
     let value = resolvePath(context, pathPart);
-    if (formatterChain.length) value = applyFormatters(value, formatterChain);
+    if (formatterChain.length) value = applyFormatters(value, breaks ? formatterChain.filter(s => !isBreaks(s)) : formatterChain);
     if (value === null || value === undefined) return '';
     if (typeof value === 'object') return '';
-    return escape ? escapeHtml(value) : String(value);
+    if (!escape) return String(value);
+    return breaks ? escapeHtml(value).replace(/\r?\n/g, '<br/>') : escapeHtml(value);
   });
 }
 
-/** Expand {{#each list}}...{{/each}} blocks, innermost first. */
+/**
+ * Expand {{#each list}}...{{/each}} blocks. A block ends at its own
+ * {{/each}}, and a block nested in it is expanded in each item's scope.
+ * Taking the first {{/each}} paired an outer block with its inner block's
+ * end, so nested loops came out garbled.
+ */
 function expandLoops(template, context, opts) {
-  const pattern = /\{\{#each\s+([\w.]+)\s*\}\}([\s\S]*?)\{\{\/each\}\}/;
+  const open = /\{\{#each\s+([\w.]+)\s*\}\}/g;
+  const tags = /\{\{#each\s+[\w.]+\s*\}\}|\{\{\/each\}\}/g;
   let out = String(template);
   let guard = 0;
+  let m;
 
-  while (pattern.test(out) && guard++ < 100) {
-    out = out.replace(pattern, (match, path, body) => {
-      const list = resolvePath(context, path);
-      if (!Array.isArray(list) || !list.length) return '';
-      return list.map((item, i) => {
-        const scope = {
-          ...context,
-          ...(typeof item === 'object' && item !== null ? item : { this: item }),
-          this: item,
-          '@index': i,
-          '@number': i + 1,
-          '@first': i === 0,
-          '@last': i === list.length - 1,
-          '@odd': i % 2 === 1,
-          '@even': i % 2 === 0,
-        };
-        let chunk = body;
-        chunk = expandConditionals(chunk, scope);
-        chunk = chunk.replace(/\{\{\s*@(\w+)\s*\}\}/g, (m, k) => {
-          const v = scope[`@${k}`];
-          return v === undefined ? '' : String(v);
-        });
-        return substitute(chunk, scope, opts);
-      }).join('');
-    });
+  while ((m = open.exec(out)) && guard++ < 100) {
+    tags.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let tag;
+    while (depth && (tag = tags.exec(out))) depth += tag[0] === '{{/each}}' ? -1 : 1;
+    if (depth) continue; // unclosed; render() strips the stray tag
+    const body = out.slice(m.index + m[0].length, tag.index);
+    const list = resolvePath(context, m[1]);
+    const expanded = !Array.isArray(list) || !list.length ? '' : list.map((item, i) => {
+      const scope = {
+        ...context,
+        ...(typeof item === 'object' && item !== null ? item : { this: item }),
+        this: item,
+        '@index': i,
+        '@number': i + 1,
+        '@first': i === 0,
+        '@last': i === list.length - 1,
+        '@odd': i % 2 === 1,
+        '@even': i % 2 === 0,
+      };
+      let chunk = expandLoops(body, scope, opts);
+      chunk = expandConditionals(chunk, scope);
+      chunk = chunk.replace(/\{\{\s*@(\w+)\s*\}\}/g, (match, k) => {
+        const v = scope[`@${k}`];
+        return v === undefined ? '' : String(v);
+      });
+      return substitute(chunk, scope, opts);
+    }).join('');
+    out = out.slice(0, m.index) + expanded + out.slice(tag.index + tag[0].length);
+    open.lastIndex = m.index + expanded.length;
   }
   return out;
 }
 
-/** Expand {{#if}} and {{#unless}} blocks, with optional {{else}}. */
+/**
+ * Expand {{#if}} and {{#unless}} blocks, with optional {{else}}. Innermost
+ * first: taking the first {{/if}} after an outer {{#if}} closed it at the
+ * inner block's end, so nested conditionals showed the wrong branch.
+ */
 function expandConditionals(template, context) {
   let out = String(template);
   let guard = 0;
 
-  const ifPattern = /\{\{#if\s+([\w.]+)\s*\}\}([\s\S]*?)\{\{\/if\}\}/;
+  const ifPattern = /\{\{#if\s+([\w.]+)\s*\}\}((?:(?!\{\{#if\s)[\s\S])*?)\{\{\/if\}\}/;
   while (ifPattern.test(out) && guard++ < 100) {
     out = out.replace(ifPattern, (match, path, body) => {
       const [truthy, falsy = ''] = body.split(/\{\{else\}\}/);
@@ -183,7 +211,7 @@ function expandConditionals(template, context) {
   }
 
   guard = 0;
-  const unlessPattern = /\{\{#unless\s+([\w.]+)\s*\}\}([\s\S]*?)\{\{\/unless\}\}/;
+  const unlessPattern = /\{\{#unless\s+([\w.]+)\s*\}\}((?:(?!\{\{#unless\s)[\s\S])*?)\{\{\/unless\}\}/;
   while (unlessPattern.test(out) && guard++ < 100) {
     out = out.replace(unlessPattern, (match, path, body) =>
       isTruthy(resolvePath(context, path)) ? '' : body);
@@ -273,8 +301,16 @@ function buildContext(module, record, related = {}, extras = {}) {
   };
 
   // Totals for line-item documents
-  const items = related.lineItems || record?.lineItems || record?.items;
-  if (Array.isArray(items)) {
+  const rows = related.lineItems || record?.lineItems || record?.items;
+  if (Array.isArray(rows)) {
+    // The documented {{name}} and {{total}}, whatever the line model calls
+    // them: quote lines have description and totalPrice, so starter templates
+    // printed blank items and the subtotal ignored line discounts.
+    const items = rows.map(i => (i && typeof i === 'object' ? {
+      ...i,
+      name: i.name ?? i.product?.name ?? i.description ?? null,
+      total: i.total ?? i.totalPrice ?? null,
+    } : i));
     const subtotal = items.reduce((s, i) => s + (Number(i.total) || Number(i.amount) || (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0)), 0);
     const taxTotal = items.reduce((s, i) => s + (Number(i.taxAmount) || 0), 0);
     const discountTotal = items.reduce((s, i) => s + (Number(i.discountAmount) || 0), 0);
@@ -300,12 +336,14 @@ function buildDocument(template, context, opts = {}) {
   const size = template.pageSize || 'A4';
   const orientation = template.orientation || 'portrait';
   const margins = `${template.marginTop ?? 20}mm ${template.marginRight ?? 15}mm ${template.marginBottom ?? 20}mm ${template.marginLeft ?? 15}mm`;
+  // Rendered raw and escaped once; render() escaped it already, so "A&B" read "A&amp;B".
+  const title = escapeHtml(render(template.name || 'Document', context, { escape: false }));
 
   return `<!DOCTYPE html>
 <html lang="${template.locale || 'en'}">
 <head>
 <meta charset="utf-8"/>
-<title>${escapeHtml(render(template.name || 'Document', context))}</title>
+<title>${title}</title>
 <style>
 @page { size: ${size} ${orientation}; margin: ${margins}; }
 body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #1a1a1a; margin: 0; }
@@ -330,12 +368,16 @@ ${footer ? `<div class="footer">${footer}</div>` : ''}
 </html>`;
 }
 
-/** Starter templates offered in the UI when a module has none. */
+/**
+ * Starter templates offered in the UI when a module has none. A quote's and
+ * an invoice's number is `number` (quoteNumber and invoiceNumber are left
+ * empty), and a quote has notes, not a description; the starters printed blanks.
+ */
 const STARTER_TEMPLATES = {
   quotes: {
     name: 'Standard Quote',
-    bodyHtml: `<h1>Quote {{quote.quoteNumber}}</h1>
-<p class="muted">Issued {{quote.createdAt|date}} | Valid until {{quote.expirationDate|date}}</p>
+    bodyHtml: `<h1>Quote {{quote.number}}</h1>
+<p class="muted">Issued {{quote.createdAt|date}} | Valid until {{#if quote.expirationDate}}{{quote.expirationDate|date}}{{else}}{{quote.validUntil|date}}{{/if}}</p>
 
 <h2>Prepared for</h2>
 <p>{{account.name}}<br/>{{contact.firstName}} {{contact.lastName}}<br/>{{contact.email}}</p>
@@ -356,12 +398,12 @@ const STARTER_TEMPLATES = {
 <tr class="grand"><td class="text-right">Total</td><td class="text-right">{{totals.grandTotal|currency}}</td></tr>
 </table>
 
-{{#if quote.description}}<h2>Notes</h2><p>{{quote.description|nl2br}}</p>{{/if}}`,
+{{#if quote.notes}}<h2>Notes</h2><p>{{quote.notes|nl2br}}</p>{{/if}}`,
     footerHtml: '<p>{{system.year}} | Generated {{system.date}}</p>',
   },
   invoices: {
     name: 'Standard Invoice',
-    bodyHtml: `<h1>Invoice {{invoice.invoiceNumber}}</h1>
+    bodyHtml: `<h1>Invoice {{invoice.number}}</h1>
 <p class="muted">Date {{invoice.createdAt|date}} | Due {{invoice.dueDate|date}}</p>
 <p><span class="badge">{{invoice.status}}</span></p>
 

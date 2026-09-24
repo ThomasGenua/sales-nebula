@@ -19,7 +19,7 @@ router.get('/', authenticate, requirePermission('admin', 'read'), async (req, re
 });
 
 router.get('/:id', authenticate, idParam, requirePermission('admin', 'read'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const env = await prisma.environment.findUnique({ where: { id: req.params.id } }); if (!env) return res.status(404).json({ error: 'Not found' }); res.json(env); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const env = await prisma.environment.findFirst({ where: { id: req.params.id, deletedAt: null } }); if (!env) return res.status(404).json({ error: 'Not found' }); res.json(env); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
@@ -100,10 +100,12 @@ router.post('/change-sets', authenticate, requirePermission('admin', 'full'), au
 router.get('/metadata/export', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Flows are the Flow Builder's FlowDefinition rows; the Flow table read
+    // here is written by nothing, so the export never carried a flow.
     const [customObjects, workflows, flows, validationRules] = await Promise.all([
       prisma.customObject.findMany({ where: { deletedAt: null } }),
       prisma.workflow.findMany(),
-      prisma.flow.findMany({ where: { deletedAt: null } }),
+      prisma.flowDefinition.findMany(),
       prisma.validationRule.findMany().catch(() => []),
     ]);
     res.json({ exportedAt: new Date(), metadata: { customObjects, workflows, flows, validationRules } });
@@ -139,9 +141,12 @@ router.post('/:id/rollback', authenticate, requirePermission('admin', 'full'), a
     const prisma = req.app.locals.prisma;
     const { deploymentId } = req.body;
     if (!deploymentId) return res.status(400).json({ error: 'deploymentId required' });
-    const deployment = await prisma.deployment.findUnique({ where: { id: deploymentId } });
+    // A deployment of this environment. Its metadata, which deploys never set,
+    // was copied as a plain null, which a Json column refuses, so every
+    // rollback failed; empty columns are now left out.
+    const deployment = await prisma.deployment.findFirst({ where: { id: String(deploymentId), environmentId: req.params.id } });
     if (!deployment) return res.status(404).json({ error: 'Deployment not found' });
-    const rollback = await prisma.deployment.create({ data: { environmentId: req.params.id, status: 'RolledBack', type: 'rollback', rollbackOfId: deploymentId, userId: req.user.id, metadata: deployment.metadata } });
+    const rollback = await prisma.deployment.create({ data: { environmentId: req.params.id, status: 'RolledBack', type: 'rollback', rollbackOfId: deployment.id, userId: req.user.id, metadata: deployment.metadata ?? undefined, components: deployment.components ?? undefined } });
     await req.audit({ action: 'rollback', module: 'environments', recordId: req.params.id, details: `Rolled back deployment ${deploymentId}` });
     res.json(rollback);
   } catch (err) { next(err); }

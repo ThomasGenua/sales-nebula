@@ -216,8 +216,11 @@ router.get('/markers', authenticate, async (req, res, next) => {
     const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: Math.min(+limit, 5000) }));
 
     if (cluster === 'true') {
-      const precision = precisionForZoom(parseInt(zoom, 10) || 10);
-      const clusters = clusterByGeohash(markers.map(m => ({ ...m, lat: m.latitude, lng: m.longitude })), precision);
+      // clusterByGeohash takes the zoom and converts it itself; handed the
+      // precision, it converted twice and clustered far coarser than asked.
+      const zoomLevel = parseInt(zoom, 10) || 10;
+      const precision = precisionForZoom(zoomLevel);
+      const clusters = clusterByGeohash(markers.map(m => ({ ...m, lat: m.latitude, lng: m.longitude })), zoomLevel);
       return res.json({ clustered: true, precision, totalMarkers: markers.length, clusters });
     }
 
@@ -338,12 +341,13 @@ router.get('/nearby', authenticate, async (req, res, next) => {
 
     const candidates = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: 5000 }));
     const origin = { lat: +lat, lng: +lng };
-    const within = findWithinRadius(origin, candidates.map(c => ({ ...c, lat: c.latitude, lng: c.longitude })), radius)
-      .slice(0, Math.min(+limit, 200))
+    // Results carry distanceKm; reading `distance` threw whenever anything
+    // was in range. findWithinRadius stops at 100 unless told otherwise.
+    const within = findWithinRadius(origin, candidates.map(c => ({ ...c, lat: c.latitude, lng: c.longitude })), radius, { limit: Math.min(+limit || 50, 200) })
       .map(m => ({
         module: m.module, recordId: m.recordId, label: m.label, sublabel: m.sublabel,
         latitude: m.latitude, longitude: m.longitude,
-        distanceKm: +m.distance.toFixed(2),
+        distanceKm: m.distanceKm,
         bearing: compassDirection(bearing(origin, { lat: m.latitude, lng: m.longitude })),
       }));
 
@@ -356,8 +360,11 @@ router.post('/route', authenticate, async (req, res, next) => {
   try {
     const { start, stops, returnToStart } = req.body;
     if (!Array.isArray(stops) || stops.length < 2) return res.status(400).json({ error: 'At least two stops required' });
+    // The optimizer's passes grow with the cube of the stops.
+    if (stops.length > 100) return res.status(400).json({ error: 'At most 100 stops per route' });
     for (const s of stops) {
-      if (!isValidPoint({ lat: +s.lat ?? +s.latitude, lng: +s.lng ?? +s.longitude })) {
+      // +undefined is NaN, not null, so `+s.lat ?? +s.latitude` never fell back.
+      if (!isValidPoint({ lat: +(s.lat ?? s.latitude), lng: +(s.lng ?? s.longitude) })) {
         return res.status(400).json({ error: `Invalid coordinates on stop: ${s.label || s.id || 'unknown'}` });
       }
     }
@@ -379,9 +386,16 @@ router.get('/areas', authenticate, async (req, res, next) => {
     if (req.query.type) where.type = req.query.type;
     if (req.query.active !== 'false') where.active = true;
 
+    // An area is a shape and its settings, no record's data, so it stays open
+    // to anyone signed in. Its count took in every module's markers, records
+    // the caller cannot open included; now it is of those GET /markers shows.
     const areas = await prisma.mapArea.findMany({ where, orderBy: [{ priority: 'asc' }, { name: 'asc' }] });
-    const counts = await prisma.mapMarker.groupBy({ by: ['areaId'], _count: true });
-    const byArea = new Map(counts.map(c => [c.areaId, c._count]));
+    const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({
+      where: { module: { in: readableModules(req) }, areaId: { in: areas.map(a => a.id) } },
+      select: { module: true, recordId: true, areaId: true }, take: 20000,
+    }));
+    const byArea = new Map();
+    for (const m of markers) byArea.set(m.areaId, (byArea.get(m.areaId) || 0) + 1);
 
     res.json(areas.map(a => ({ ...a, markerCount: byArea.get(a.id) || 0 })));
   } catch (err) { next(err); }
@@ -491,8 +505,13 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
     const area = await prisma.mapArea.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!area) return res.status(404).json({ error: 'Area not found' });
 
-    const ownerId = req.body.userId || area.assignedUserId;
-    if (!ownerId) return res.status(400).json({ error: 'userId required, or set assignedUserId on the area' });
+    const named = req.body.userId || area.assignedUserId;
+    if (!named) return res.status(400).json({ error: 'userId required, or set assignedUserId on the area' });
+    // An active staff user: the id was taken as sent, so a mistyped one or a
+    // customer's portal account became the owner of every record in the area.
+    const owner = await prisma.user.findFirst({ where: { id: String(named), active: true, isPortalUser: false }, select: { id: true } });
+    if (!owner) return res.status(400).json({ error: 'userId does not name an active staff user' });
+    const ownerId = owner.id;
 
     const markers = await prisma.mapMarker.findMany({ where: { areaId: area.id } });
     const byModule = {};
@@ -502,8 +521,11 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
     for (const [module, ids] of Object.entries(byModule)) {
       const model = MAPPABLE[module];
       if (!model) continue;
+      // Live records the caller could change, in a module they may edit: this
+      // rewrote the owner of every record in the area, deleted ones included.
+      if (!permits(req, permissionFor(module), 'edit')) { summary.push({ module, error: `Insufficient permissions for ${permissionFor(module)}` }); continue; }
       try {
-        const result = await prisma[model].updateMany({ where: { id: { in: ids } }, data: { ownerId } });
+        const result = await prisma[model].updateMany({ where: await reachableRecords(req, module, { id: { in: ids } }, 'Edit'), data: { ownerId } });
         summary.push({ module, updated: result.count });
       } catch (e) { summary.push({ module, error: String(e.message).slice(0, 100) }); }
     }
@@ -545,7 +567,8 @@ router.delete('/layers/:id', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const layer = await prisma.mapLayer.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!layer) return res.status(404).json({ error: 'Layer not found' });
-    if (layer.ownerId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Not your layer' });
+    // req.user.role is the Role record, never 'admin', so no admin could delete another's layer.
+    if (layer.ownerId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Not your layer' });
     await prisma.mapLayer.update({ where: { id: layer.id }, data: { deletedAt: new Date() } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
@@ -612,7 +635,9 @@ router.get('/analytics/coverage', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const areas = await prisma.mapArea.findMany({ where: { deletedAt: null, active: true } });
-    const markers = await prisma.mapMarker.findMany({ take: 20000 });
+    // The markers GET /markers would show the caller; this counted every
+    // module's for anyone signed in, records they cannot open included.
+    const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where: { module: { in: readableModules(req) } }, take: 20000 }));
 
     const byArea = areas.map(a => {
       const inside = markers.filter(m => m.areaId === a.id);

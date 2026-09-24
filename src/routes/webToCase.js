@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { visibleWhere } = require('../middleware/rowSecurity');
 const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
@@ -13,6 +14,10 @@ router.post('/', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { name, email, phone, subject, description, priority, type, product, company, captchaToken, customFields } = req.body;
     if (!subject || !email) return res.status(400).json({ error: 'subject and email required' });
+    // The rules GET /validation-rules publishes, which nothing applied.
+    if (!/^[^@]+@[^@]+\.[^@]+$/.test(String(email))) return res.status(400).json({ error: 'Invalid email format' });
+    if (String(subject).length > 255) return res.status(400).json({ error: 'Subject too long' });
+    if (description && String(description).length > 5000) return res.status(400).json({ error: 'Description too long' });
 
     // Rate limiting by email
     const recentFromEmail = await prisma.case.count({
@@ -86,7 +91,8 @@ router.get('/embed', authenticate, async (req, res, next) => {
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   res.json({
     iframeSnippet: `<iframe src="${baseUrl}/web-to-case/form" width="100%" height="600" frameborder="0"></iframe>`,
-    apiEndpoint: `${baseUrl}/api/web-to-case`,
+    // Where this router is mounted (/api/public/web-to-case); /api/web-to-case does not exist.
+    apiEndpoint: `${baseUrl}${req.baseUrl}`,
     examplePayload: { name: 'Jane Doe', email: 'jane@example.com', subject: 'Help needed', description: 'Details...', priority: 'Medium' },
   });
 });
@@ -97,10 +103,16 @@ router.get('/stats', authenticate, requirePermission('admin', 'read'), async (re
     const prisma = req.app.locals.prisma;
     const now = new Date();
     const thirtyDaysAgo = new Date(now - 30 * 86400000);
+    // Live cases the caller may see, as the /count and /analytics/summary
+    // routes below count them; deleted cases were counted.
+    const [all, recent] = await Promise.all([
+      visibleWhere(req, 'cases', 'case', { origin: 'Web' }),
+      visibleWhere(req, 'cases', 'case', { origin: 'Web', createdAt: { gte: thirtyDaysAgo } }),
+    ]);
     const [total, last30, byPriority] = await Promise.all([
-      prisma.case.count({ where: { origin: 'Web' } }),
-      prisma.case.count({ where: { origin: 'Web', createdAt: { gte: thirtyDaysAgo } } }),
-      prisma.case.groupBy({ by: ['priority'], where: { origin: 'Web', createdAt: { gte: thirtyDaysAgo } }, _count: true }),
+      prisma.case.count({ where: all }),
+      prisma.case.count({ where: recent }),
+      prisma.case.groupBy({ by: ['priority'], where: recent, _count: true }),
     ]);
     res.json({ totalWebCases: total, last30Days: last30, byPriority: byPriority.map(p => ({ priority: p.priority, count: p._count })) });
   } catch (err) { next(err); }
@@ -128,13 +140,15 @@ router.get('/validation-rules', authenticate, requirePermission('admin', 'read')
 router.get('/analytics', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { period = '30' } = req.query;
-    const since = new Date(Date.now() - (+period) * 86400000);
+    // A period that is not a positive number fell through to an Invalid Date.
+    const period = parseInt(req.query.period, 10) > 0 ? parseInt(req.query.period, 10) : 30;
+    const since = new Date(Date.now() - period * 86400000);
+    const where = await visibleWhere(req, 'cases', 'case', { origin: 'Web', createdAt: { gte: since } });
     const [total, byDay] = await Promise.all([
-      prisma.case.count({ where: { origin: 'Web', createdAt: { gte: since } } }),
-      prisma.case.groupBy({ by: ['priority'], where: { origin: 'Web', createdAt: { gte: since } }, _count: true }),
+      prisma.case.count({ where }),
+      prisma.case.groupBy({ by: ['priority'], where, _count: true }),
     ]);
-    res.json({ period: +period, totalSubmissions: total, avgPerDay: Math.round(total / +period * 10) / 10, byPriority: byDay.map(p => ({ priority: p.priority, count: p._count })) });
+    res.json({ period, totalSubmissions: total, avgPerDay: Math.round(total / period * 10) / 10, byPriority: byDay.map(p => ({ priority: p.priority, count: p._count })) });
   } catch (err) { next(err); }
 });
 

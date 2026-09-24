@@ -72,7 +72,7 @@ const AuthContext = createContext();
  * to, bookmarked, or closed with the browser's back button, and a refresh
  * dropped you back on the dashboard.
  */
-const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {} });
+const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {}, navigate: () => {} });
 
 /** "/app/contacts/abc123" -> { module: "contacts", recordId: "abc123" } */
 function parseAppPath(pathname) {
@@ -137,17 +137,19 @@ function AuthProvider({ children }) {
     const method = String(init.method || "GET").toUpperCase();
     // The session cookies ride along on their own; a request that changes
     // anything also echoes the CSRF token, which a forged one cannot.
+    // A file upload (FormData) goes as it is, with the browser's multipart type.
+    const isForm = typeof FormData !== "undefined" && opts.body instanceof FormData;
     const call = () => {
       const csrf = UNSAFE_METHODS.has(method) ? csrfToken() : null;
       return fetch(`${API}${path}`, {
         ...init,
         credentials: "same-origin",
         headers: {
-          "Content-Type": "application/json",
+          ...(!isForm && { "Content-Type": "application/json" }),
           ...(csrf && { "X-CSRF-Token": csrf }),
           ...opts.headers,
         },
-        ...(opts.body && typeof opts.body === "object" && !rawBody && { body: JSON.stringify(opts.body) }),
+        ...(opts.body && typeof opts.body === "object" && !rawBody && !isForm && { body: JSON.stringify(opts.body) }),
       });
     };
 
@@ -168,7 +170,13 @@ function AuthProvider({ children }) {
       if (!skipRefresh) clearSession();
       throw new Error(e.error || "Unauthorized");
     }
-    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+    // A refusal's reasons (the password rules a new password misses) come in
+    // `details`; the message alone said only that something was not met.
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      const reasons = Array.isArray(e.details) && e.details.length && e.details.every(d => typeof d === "string") ? `: ${e.details.join(". ")}` : "";
+      throw new Error((e.error || res.statusText) + reasons);
+    }
     return res.json();
   }, [demoMode, renewSession, clearSession]);
 
@@ -192,7 +200,8 @@ function AuthProvider({ children }) {
 
     // skipRefresh: a stale refresh token from a previous session must not be
     // spent trying to rescue a wrong password.
-    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true, headers: COOKIE_SESSION });
+    // Trimmed: autofill often leaves a trailing space, which the API refuses as an invalid address.
+    const d = await apiFetch("/auth/login", { method: "POST", body: { email: email.trim(), password }, skipRefresh: true, headers: COOKIE_SESSION });
 
     // A verified MFA device means no session yet. The caller collects a code
     // and finishes at /auth/mfa/verify.
@@ -287,10 +296,15 @@ function Button({ children, variant = "primary", size = "md", onClick, disabled,
 }
 
 function Input({ label, value, onChange, type = "text", placeholder, required, className = "", ...props }) {
+  // A saved date comes back as a full ISO timestamp, which a date input shows
+  // as blank, so editing a record hid its dates; and 0 is a value, not blank.
+  const shown = typeof value === "string" && type === "date" ? value.slice(0, 10)
+    : typeof value === "string" && type === "datetime-local" ? value.slice(0, 16)
+    : value ?? "";
   return (
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium mb-1.5" style={{ color: "var(--sn-slate)" }}>{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
-      <input type={type} value={value || ""} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      <input type={type} value={shown} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         aria-label={label ? undefined : placeholder}
         {...props}
         className="w-full px-3 py-2.5 rounded-lg text-sm focus:outline-none focus:ring-1 transition-colors min-h-[44px]"
@@ -1050,7 +1064,7 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
     </div>
   );
 }
-function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs }) {
+function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true }) {
   const { apiFetch } = useAuth();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1091,7 +1105,9 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
     if (sortField) qs += `&sortBy=${sortField}&sortDir=${sortDir}`;
     Object.entries(filterValues).forEach(([k, v]) => { if (v) qs += `&${k}=${encodeURIComponent(v)}`; });
     apiFetch(`${endpoint}${qs}`, { signal })
-      .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.total ?? d.length ?? 0); })
+      // The CRUD routes put the count in meta.total, which this never read: every
+      // list showed no count and no pages, so nothing past the first 50 was reachable.
+      .then(d => { setItems(d.data || d.items || (Array.isArray(d) ? d : [])); setTotal(d.meta?.total ?? d.pagination?.total ?? d.total ?? (Array.isArray(d) ? d.length : 0)); })
       .catch(err => {
         if (err?.name === "AbortError") return;   // superseded by a newer request
         setItems([]);
@@ -1099,7 +1115,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         setLoadError(err?.message || "Check your connection and try again.");
       })
       .finally(() => { if (!signal?.aborted) setLoading(false); });
-  }, [page, debouncedSearch, endpoint, apiFetch, sortField, sortDir, filterValues]);
+  }, [page, debouncedSearch, endpoint, apiFetch, sortField, sortDir, filterValues, reloadKey]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1205,9 +1221,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             <Button variant="danger" size="md" icon={Trash2} onClick={bulkDelete} ariaLabel={`Delete ${selected.length} selected`}><span className="hidden sm:inline">Delete ({selected.length})</span>
             </Button>
           )}
-          <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
+          {headerActions}
+          {canCreate && <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
             <span className="hidden sm:inline">New</span>
-          </Button>
+          </Button>}
         </div>
       </div>
 
@@ -1279,8 +1296,8 @@ function ContactsPage() {
       { key: "email", label: "Email" }, { key: "phone", label: "Phone" },
       { key: "mobilePhone", label: "Mobile" }, { key: "title", label: "Job Title" },
       { key: "department", label: "Department" }, { key: "leadSource", label: "Lead Source" },
-      { key: "mailingCity", label: "City" }, { key: "mailingState", label: "State" },
-      { key: "mailingCountry", label: "Country" }, { key: "status", label: "Status" },
+      { key: "city", label: "City" }, { key: "state", label: "State" },
+      { key: "country", label: "Country" }, { key: "status", label: "Status" },
     ]}
     formFields={[
       { key: "firstName", label: "First Name", required: true }, { key: "lastName", label: "Last Name", required: true },
@@ -1302,7 +1319,7 @@ function LeadsPage() {
     formFields={[
       { key: "firstName", label: "First Name", required: true }, { key: "lastName", label: "Last Name", required: true },
       { key: "email", label: "Email", type: "email" }, { key: "phone", label: "Phone", type: "tel" },
-      { key: "company", label: "Company" }, { key: "title", label: "Title" },
+      { key: "company", label: "Company", required: true }, { key: "title", label: "Title" },
       { key: "status", label: "Status", type: "select", options: ["New","Contacted","Qualified","Unqualified","Nurture"] },
       { key: "source", label: "Source", type: "select", options: ["Web","Referral","Campaign","Social","Partner","Other"] },
     ]} />;
@@ -1331,7 +1348,7 @@ function DealsPage() {
       { key: "probability", label: "Probability", render: v => `${v||0}%` },
       { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "source", label: "Source" }, { key: "type", label: "Type" },
-      { key: "nextStep", label: "Next Step" }, { key: "description", label: "Description" },
+      { key: "description", label: "Description" },
     ]}
     formFields={[
       { key: "name", label: "Deal Name", required: true }, { key: "value", label: "Value", type: "number" },
@@ -1365,12 +1382,12 @@ function ActivitiesPage() {
     columns={[
       { key: "subject", label: "Subject" }, { key: "type", label: "Type", render: typeBadge },
       { key: "status", label: "Status" },
-      { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "dueDate", label: "Due", render: (v, row) => (v || row?.date) ? new Date(v || row.date).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "subject", label: "Subject", required: true },
       { key: "type", label: "Type", type: "select", options: ["Call","Email","Meeting","Task","Demo","Follow-up"] },
-      { key: "status", label: "Status", type: "select", options: ["Open","InProgress","Completed","Deferred","Cancelled"] },
+      { key: "status", label: "Status", type: "select", options: ["Scheduled","Pending","Open","InProgress","Completed","Deferred","Cancelled"] },
       { key: "priority", label: "Priority", type: "select", options: ["Low","Medium","High"] },
       { key: "dueDate", label: "Due Date", type: "date" }, { key: "duration", label: "Duration (min)", type: "number" },
       { key: "description", label: "Notes", type: "textarea" },
@@ -1387,7 +1404,7 @@ function CasesPage() {
     ]}
     formFields={[
       { key: "subject", label: "Subject", required: true },
-      { key: "status", label: "Status", type: "select", options: ["New","Open","Pending","Escalated","Closed"] },
+      { key: "status", label: "Status", type: "select", options: ["New","Open","Pending","Escalated","Resolved","Closed"] },
       { key: "priority", label: "Priority", type: "select", options: ["Low","Medium","High","Critical"] },
       { key: "origin", label: "Origin", type: "select", options: ["Phone","Email","Web","Chat","Social"] },
       { key: "type", label: "Type", type: "select", options: ["Question","Problem","Feature Request","Bug"] },
@@ -1398,13 +1415,13 @@ function CasesPage() {
 function ProductsPage() {
   return <ModulePage title="Products" icon={Package} endpoint="/products"
     columns={[
-      { key: "name", label: "Product" }, { key: "code", label: "Code" },
+      { key: "name", label: "Product" }, { key: "sku", label: "SKU" },
       { key: "category", label: "Category" },
       { key: "price", label: "Price", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
       { key: "active", label: "Active", render: v => v !== false ? <Badge color="success">Yes</Badge> : <Badge color="neutral">No</Badge> },
     ]}
     formFields={[
-      { key: "name", label: "Product Name", required: true }, { key: "code", label: "Product Code" },
+      { key: "name", label: "Product Name", required: true }, { key: "sku", label: "SKU", required: true },
       { key: "category", label: "Category" }, { key: "price", label: "Price", type: "number", required: true },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
@@ -1413,14 +1430,14 @@ function ProductsPage() {
 function QuotesPage() {
   return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes"
     columns={[
-      { key: "name", label: "Quote" }, { key: "quoteNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
-      { key: "expirationDate", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "name", label: "Quote" }, { key: "number", label: "#" }, { key: "status", label: "Status" },
+      { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "validUntil", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
       { key: "name", label: "Quote Name", required: true },
-      { key: "status", label: "Status", type: "select", options: ["Draft","Pending","Approved","Rejected","Accepted"] },
-      { key: "expirationDate", label: "Expiration", type: "date" }, { key: "discount", label: "Discount %", type: "number" },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Pending Approval","Accepted","Rejected","Expired"] },
+      { key: "validUntil", label: "Expiration", type: "date" }, { key: "discount", label: "Discount", type: "number" },
       { key: "terms", label: "Terms", type: "textarea" },
     ]} />;
 }
@@ -1428,8 +1445,8 @@ function QuotesPage() {
 function InvoicesPage() {
   return <ModulePage title="Invoices" icon={DollarSign} endpoint="/invoices"
     columns={[
-      { key: "invoiceNumber", label: "#" }, { key: "status", label: "Status" },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
+      { key: "number", label: "#" }, { key: "status", label: "Status" },
+      { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
       { key: "dueDate", label: "Due", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[
@@ -1444,14 +1461,14 @@ function CampaignsPage() {
     columns={[
       { key: "name", label: "Campaign" }, { key: "type", label: "Type" }, { key: "status", label: "Status" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "budgetedCost", label: "Budget", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
+      { key: "budget", label: "Budget", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
     ]}
     formFields={[
       { key: "name", label: "Name", required: true },
       { key: "type", label: "Type", type: "select", options: ["Email","Social","Webinar","Event","Content","PPC","Referral"] },
       { key: "status", label: "Status", type: "select", options: ["Planned","Active","Completed","Cancelled"] },
       { key: "startDate", label: "Start", type: "date" }, { key: "endDate", label: "End", type: "date" },
-      { key: "budgetedCost", label: "Budget", type: "number" },
+      { key: "budget", label: "Budget", type: "number" },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
 }
@@ -1459,12 +1476,12 @@ function CampaignsPage() {
 function EmailsPage() {
   return <ModulePage title="Emails" icon={Mail} endpoint="/emails"
     columns={[
-      { key: "subject", label: "Subject" }, { key: "to", label: "To" },
-      { key: "status", label: "Status", render: v => <Badge color={v==='Sent'?'success':v==='Opened'?'info':v==='Bounced'?'danger':'neutral'}>{v||'Draft'}</Badge> },
+      { key: "subject", label: "Subject" }, { key: "to", label: "To", render: (v, row) => v || row?.toEmail || "-" },
+      { key: "status", label: "Status", render: v => { const s = (v || 'draft').toLowerCase(); return <Badge color={s==='sent'?'success':s==='queued'?'info':s==='failed'?'danger':'neutral'}>{s}</Badge>; } },
       { key: "sentAt", label: "Sent", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Opened","Bounced","Failed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Queued","Sent","Failed"] },
     ]}
     detailFields={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To" }, { key: "from", label: "From" },
@@ -1476,7 +1493,7 @@ function EmailsPage() {
   />;
 }
 function KnowledgePage() {
-  return <ModulePage title="Knowledge" icon={BookOpen} endpoint="/knowledge"
+  return <ModulePage title="Knowledge" icon={BookOpen} endpoint="/knowledge" nameField="title"
     columns={[
       { key: "title", label: "Title" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Published'?'success':v==='Archived'?'neutral':'warning'}>{v||'Draft'}</Badge> },
@@ -1496,14 +1513,24 @@ function KnowledgePage() {
     formFields={[{ key: "title", label: "Title", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Archived"] },{ key: "category", label: "Category" },{ key: "body", label: "Body", type: "textarea" }]}
   />;
 }
+/**
+ * Accounts as select options, for records that belong to one (contracts,
+ * orders, subscriptions, entitlements): the first 200 by name.
+ */
+function useAccountOptions() {
+  const { data } = useApi("/accounts?limit=200&sortBy=name&sortDir=asc");
+  return (data?.data || []).map(a => ({ value: a.id, label: a.name }));
+}
+
 function ContractsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Contracts" icon={FileText} endpoint="/contracts"
     columns={[
       { key: "contractNumber", label: "#" }, { key: "name", label: "Contract" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Activated'?'success':v==='Terminated'?'danger':v==='Expired'?'warning':'neutral'}>{v||'Draft'}</Badge> },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "value", label: "Value", render: v => v ? `$${(v/1000).toFixed(0)}K` : "-" },
+      { key: "value", label: "Value", render: (v, row) => (v ?? row?.totalValue) ? `$${((v ?? row.totalValue)/1000).toFixed(0)}K` : "-" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },
@@ -1515,23 +1542,25 @@ function ContractsPage() {
       { key: "endDate", label: "End", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
       { key: "description", label: "Description" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" },{ key: "value", label: "Value", type: "number" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Terminated","Expired"] },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true },{ key: "value", label: "Value", type: "number" }]}
   />;
 }
 function OrdersPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Orders" icon={Package} endpoint="/orders"
     columns={[
       { key: "name", label: "Order" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Fulfilled'?'success':v==='Cancelled'?'danger':v==='Activated'?'info':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "totalAmount", label: "Total", render: v => <span className="font-mono">${(v||0).toLocaleString(...fmt())}</span> },
+      { key: "total", label: "Total", render: (v, row) => <span className="font-mono">${(v ?? row?.totalAmount ?? 0).toLocaleString(...fmt())}</span> },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },
     ]}
-    formFields={[{ key: "name", label: "Order Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },{ key: "totalAmount", label: "Total", type: "number" }]}
+    formFields={[{ key: "name", label: "Order Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Draft","Activated","Fulfilled","Cancelled"] },{ key: "total", label: "Total", type: "number" }]}
   />;
 }
 function SubscriptionsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Subscriptions" icon={RefreshCw} endpoint="/subscriptions"
     columns={[
       { key: "subscriptionNumber", label: "#" },
@@ -1544,7 +1573,7 @@ function SubscriptionsPage() {
       { key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },
       { key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },
     ]}
-    formFields={[{ key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },{ key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },{ key: "unitPrice", label: "Unit Price", type: "number", required: true },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" }]}
+    formFields={[{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Active","Pending","Expired","Cancelled"] },{ key: "billingFrequency", label: "Billing", type: "select", options: ["Monthly","Quarterly","Annual"] },{ key: "unitPrice", label: "Unit Price", type: "number", required: true },{ key: "quantity", label: "Quantity", type: "number" },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true }]}
   />;
 }
 function WorkOrdersPage() {
@@ -1569,22 +1598,23 @@ function WorkOrdersPage() {
   />;
 }
 function EntitlementsPage() {
+  const accountOptions = useAccountOptions();
   return <ModulePage title="Entitlements" icon={Shield} endpoint="/entitlements"
     columns={[
       { key: "name", label: "Entitlement" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Expired'?'danger':'neutral'}>{v||'Inactive'}</Badge> },
       { key: "type", label: "Type" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
-      { key: "casesPerEntitlement", label: "Case Limit", render: v => v || "Unlimited" },
+      { key: "casesPerEntitlement", label: "Case Limit", render: (v, row) => v ?? row?.casesAllowed ?? "Unlimited" },
     ]}
     filterDefs={[
       { key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },{ key: "type", label: "Type" },{ key: "startDate", label: "Start", type: "date" },{ key: "endDate", label: "End", type: "date" },{ key: "casesPerEntitlement", label: "Case Limit", type: "number" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "accountId", label: "Account", type: "select", options: accountOptions },{ key: "status", label: "Status", type: "select", options: ["Active","Expired","Inactive"] },{ key: "type", label: "Type" },{ key: "startDate", label: "Start", type: "date", required: true },{ key: "endDate", label: "End", type: "date", required: true },{ key: "casesPerEntitlement", label: "Case Limit", type: "number" }]}
   />;
 }
 function CustomObjectsPage() {
-  return <ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects"
+  return <ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects" nameField="label"
     columns={[
       { key: "label", label: "Label" }, { key: "apiName", label: "API Name" },
       { key: "description", label: "Description" },
@@ -1655,7 +1685,7 @@ function MarketplacePage() {
       { key: "rating", label: "Rating" }, { key: "installCount", label: "Installs" },
       { key: "description", label: "Description" }, { key: "version", label: "Version" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "author", label: "Author", required: true },{ key: "category", label: "Category", type: "select", options: ["Utility","Analytics","Integration","Sales","Service"] },{ key: "pricing", label: "Pricing", type: "select", options: ["Free","Paid","Freemium"] },{ key: "description", label: "Description" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "author", label: "Author", required: true },{ key: "category", label: "Category", type: "select", options: ["Utility","Analytics","Integration","Sales","Service","Marketing"] },{ key: "pricing", label: "Pricing", type: "select", options: ["Free","Paid","Freemium"] },{ key: "description", label: "Description" }]}
   />;
 }
 
@@ -1667,14 +1697,16 @@ function ForecastsPage() {
   const { data, loading } = useApi("/forecasts/current");
   if (loading) return <Spinner />;
   const f = data || {};
+  const amount = v => money(v || 0, f.currency || "USD", { notation: "compact" });
+  const scale = Math.max(f.quota || 0, f.pipeline || 0, 1);
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Forecasts</h1>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Closed" value={`$${((f.closed || 0) / 1000).toFixed(0)}K`} icon={CheckCircle2} color="success" />
-        <StatCard label="Commit" value={`$${((f.commit || 0) / 1000).toFixed(0)}K`} icon={Target} color="primary" />
-        <StatCard label="Best Case" value={`$${((f.bestCase || 0) / 1000).toFixed(0)}K`} icon={TrendingUp} color="purple" />
-        <StatCard label="Pipeline" value={`$${((f.pipeline || 0) / 1000).toFixed(0)}K`} icon={BarChart3} color="cyan" />
+        <StatCard label="Closed" value={amount(f.closed)} icon={CheckCircle2} color="success" />
+        <StatCard label="Commit" value={amount(f.commit)} icon={Target} color="primary" />
+        <StatCard label="Best Case" value={amount(f.bestCase)} icon={TrendingUp} color="purple" />
+        <StatCard label="Pipeline" value={amount(f.pipeline)} icon={BarChart3} color="cyan" />
       </div>
       {f.categories && (
         <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6">
@@ -1684,9 +1716,9 @@ function ForecastsPage() {
               <div key={cat} className="flex items-center gap-3">
                 <div className="w-24 sm:w-32 text-xs text-[#7E8598] truncate">{cat}</div>
                 <div className="flex-1 h-5 bg-[#0E1630] rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-[#F5A623] to-[#FBBF24] rounded-full" style={{ width: `${Math.min(100, (val / (f.quota || 1)) * 100)}%` }} />
+                  <div className="h-full bg-gradient-to-r from-[#F5A623] to-[#FBBF24] rounded-full" style={{ width: `${Math.min(100, ((val || 0) / scale) * 100)}%` }} />
                 </div>
-                <div className="w-20 text-right text-xs font-mono text-[#C8C2B4]">${(val / 1000).toFixed(0)}K</div>
+                <div className="w-20 text-right text-xs font-mono text-[#C8C2B4]">{amount(val)}</div>
               </div>
             ))}
           </div>
@@ -1700,13 +1732,14 @@ function WorkflowsPage() {
   return <ModulePage title="Workflows" icon={GitBranch} endpoint="/workflows"
     columns={[
       { key: "name", label: "Workflow" }, { key: "module", label: "Module" },
-      { key: "triggerType", label: "Trigger" },
+      { key: "trigger", label: "Trigger" },
       { key: "active", label: "Active", render: v => <Badge color={v ? "success" : "neutral"}>{v ? "Active" : "Inactive"}</Badge> },
-      { key: "executionCount", label: "Runs", render: v => <span className="font-mono">{v || 0}</span> },
+      { key: "runCount", label: "Runs", render: v => <span className="font-mono">{v || 0}</span> },
     ]}
     formFields={[
-      { key: "name", label: "Name", required: true }, { key: "module", label: "Module", required: true },
-      { key: "triggerType", label: "Trigger", type: "select", options: ["create","update","delete","createOrUpdate","scheduled"] },
+      { key: "name", label: "Name", required: true },
+      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","activities","cases","campaigns","products","contracts","orders"] },
+      { key: "trigger", label: "Trigger", type: "select", options: ["create","update","statusChange","scheduled"] },
       { key: "description", label: "Description", type: "textarea" },
     ]} />;
 }
@@ -1729,7 +1762,7 @@ function DashboardPage() {
   // Prepare chart data
   const pipelineChartData = pipeline.slice(0, 8).map(st => ({ label: (st.stage || st._id || "").substring(0, 8), value: st.value || 0 }));
   const donutData = [
-    { label: "Won", value: rev.wonThisMonth?.count || counts.wonDeals || 0 },
+    { label: "Won", value: counts.wonDeals || 0 },
     { label: "Open", value: counts.openDeals || pipe.dealCount || 0 },
     { label: "Lost", value: counts.lostDeals || 0 },
   ].filter(d => d.value > 0);
@@ -1748,7 +1781,7 @@ function DashboardPage() {
         { label: "Pipeline", value: money(pipe.totalValue, s.currency, { notation: "compact" }), sub: `${pipe.dealCount || 0} deals` },
         { label: "Won MTD", value: money(rev.wonThisMonth?.value, s.currency, { notation: "compact" }) },
         { label: "Open Leads", value: counts.leads || 0 },
-        { label: "Win Rate", value: `${s.winRate || pipe.winRate || 0}%` },
+        { label: "Win Rate", value: `${s.rates?.winRate ?? s.winRate ?? pipe.winRate ?? 0}%` },
         { label: "Cases", value: counts.openCases || 0 },
       ]} />
 
@@ -1819,15 +1852,21 @@ function DashboardPage() {
   );
 }
 
+/** Search result modules that have a record page to open. */
+const SEARCH_OPENABLE = new Set(["contacts", "leads", "deals", "accounts", "cases", "products", "quotes", "invoices", "campaigns", "emails", "knowledge", "contracts", "orders"]);
+
 function GlobalSearchPage() {
   const { apiFetch } = useAuth();
+  const { navigate } = useContext(RouteContext);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const search = async () => {
     if (!query.trim()) return;
     setLoading(true);
-    try { const d = await apiFetch(`/search?q=${encodeURIComponent(query)}`); setResults(d); } catch (e) { setResults({ error: e.message }); }
+    // The matches are under `results` (by module); the page read the top-level
+    // keys, so every search showed nothing.
+    try { const d = await apiFetch(`/search?q=${encodeURIComponent(query)}`); setResults(d.results || {}); } catch (e) { setResults({ error: e.message }); }
     finally { setLoading(false); }
   };
   const moduleIcons = { contacts: Users, leads: UserPlus, deals: Target, accounts: Building2, cases: Shield, products: Package };
@@ -1855,12 +1894,17 @@ function GlobalSearchPage() {
               <span className="text-xs text-[#4A5168]">({items.length})</span>
             </div>
             <div className="space-y-1.5">
-              {items.slice(0, 5).map(item => (
-                <div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-lg p-3 hover:border-[#203060] transition-colors">
-                  <div className="text-sm text-[#F0EDE5]">{item.name || item.firstName || item.subject || item.title || "Untitled"}</div>
-                  <div className="text-xs text-[#4A5168] mt-0.5">{item.email || item.status || item.stage || ""}</div>
-                </div>
-              ))}
+              {items.slice(0, 5).map(item => {
+                const title = item.name || [item.firstName, item.lastName].filter(Boolean).join(" ") || item.subject || item.title || "Untitled";
+                const opens = SEARCH_OPENABLE.has(mod);
+                return (
+                  <div key={item.id} {...(opens ? clickable(() => navigate(mod, item.id), `Open ${title}`) : {})}
+                    className={`bg-[#0B1228] border border-[#182550] rounded-lg p-3 hover:border-[#203060] transition-colors ${opens ? "cursor-pointer" : ""}`}>
+                    <div className="text-sm text-[#F0EDE5]">{title}</div>
+                    <div className="text-xs text-[#4A5168] mt-0.5">{item.email || item.status || item.stage || ""}</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
@@ -2079,37 +2123,167 @@ function SettingsPage() {
             <Button size="md" onClick={changePassword} disabled={saving || demoMode}>Update Password</Button>
             {demoMode && <p className="text-xs mt-2" style={dim}>Password changes are unavailable in demo mode.</p>}
           </div>
-          <div className={panel} style={panelStyle}>
-            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Two-Factor Authentication</h3>
-            <p className="text-xs mb-4" style={muted}>Add an extra layer of security to your account.</p>
-            <Button variant="secondary" size="md" icon={Shield} onClick={() => setToast({ message: "2FA setup is available after you create a live account.", type: "success" })}>
-              Enable 2FA
-            </Button>
-          </div>
+          <TwoFactorPanel className={panel} style={panelStyle} setToast={setToast} />
           <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
 
       {activeTab === "notifications" && (
-        <div className={panel} style={panelStyle}>
-          <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Notification Preferences</h3>
-          <div className="space-y-4">
-            {[["Deal updates", "Get notified when deals change stage"], ["New leads", "Alerts for newly assigned leads"], ["Case assignments", "Notifications for case routing"], ["Task reminders", "Reminders for upcoming due dates"], ["Mentions", "When someone mentions you in a comment"], ["Weekly digest", "Weekly summary of your pipeline"]].map(([title, desc], i) => (
-              <div key={i} className="flex items-center justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
-                <div>
-                  <div className="text-sm" style={heading}>{title}</div>
-                  <div className="text-xs" style={dim}>{desc}</div>
-                </div>
-                <div className="w-10 h-5 rounded-full relative cursor-pointer touch-manipulation" style={{ background: "var(--sn-amber)" }}>
-                  <div className="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow" />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <NotificationPreferences className={panel} style={panelStyle} setToast={setToast} />
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+/** The notifications a user can turn off, as the API names them (services/notify.js). */
+const NOTIFICATION_SETTINGS = [
+  ["mentions", "Mentions and comments", "When someone mentions you, or comments on your post"],
+  ["approvals", "Approvals", "Requests waiting on you, and decisions on your own"],
+  ["reminders", "Reminders", "Reminders you set on events and activities"],
+  ["dealAlerts", "Stale deal alerts", "Your open deals with no activity in 30 days"],
+  ["caseAlerts", "SLA warnings", "Your cases that pass their service level"],
+];
+
+/**
+ * Which notifications this user gets. The switches here were drawn always on,
+ * saved nothing, and named notifications the app never sends (new leads, case
+ * assignments, a weekly digest); these are the ones it sends, and each is
+ * stored with the user's preferences and honoured when a notification is made.
+ */
+function NotificationPreferences({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [prefs, setPrefs] = useState(null);
+  useEffect(() => {
+    if (demoMode) { setPrefs({}); return; }
+    apiFetch("/users/me/preferences").then(d => setPrefs(d.notifications || {})).catch(() => setPrefs({}));
+  }, [apiFetch, demoMode]);
+  const toggle = async (kind) => {
+    const before = prefs;
+    const next = { ...prefs, [kind]: prefs[kind] === false };   // on unless turned off
+    setPrefs(next);
+    try { await apiFetch("/users/me/preferences", { method: "PUT", body: { notifications: next } }); }
+    catch (e) { setPrefs(before); setToast({ message: e.message, type: "error" }); }
+  };
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--sn-body)" }}>Notification Preferences</h3>
+      {prefs === null ? <Spinner label="Loading preferences" /> : (
+        <div className="space-y-4">
+          {NOTIFICATION_SETTINGS.map(([kind, title, desc]) => {
+            const on = prefs[kind] !== false;
+            return (
+              <div key={kind} className="flex items-center justify-between py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+                <div>
+                  <div className="text-sm" style={{ color: "var(--sn-cream)" }}>{title}</div>
+                  <div className="text-xs" style={{ color: "var(--sn-dim)" }}>{desc}</div>
+                </div>
+                <button type="button" role="switch" aria-checked={on} aria-label={title} disabled={demoMode} onClick={() => toggle(kind)}
+                  className="w-10 h-5 rounded-full relative cursor-pointer touch-manipulation transition-colors disabled:opacity-50"
+                  style={{ background: on ? "var(--sn-amber)" : "var(--sn-rule)" }}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? "right-0.5" : "left-0.5"}`} />
+                </button>
+              </div>
+            );
+          })}
+          {demoMode && <p className="text-xs" style={{ color: "var(--sn-dim)" }}>Preferences are unavailable in demo mode.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Sign-in codes from an authenticator app. The Enable 2FA button here only
+ * ever showed a toast, so nobody could turn two-factor sign-in on. Adding or
+ * removing a device takes the current password, as the API requires.
+ */
+function TwoFactorPanel({ className, style, setToast }) {
+  const { apiFetch, demoMode } = useAuth();
+  const [devices, setDevices] = useState(null);
+  const [password, setPassword] = useState("");
+  const [setup, setSetup] = useState(null);   // { deviceId, secret, otpAuthUrl } until the first code checks out
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    if (demoMode) { setDevices([]); return; }
+    apiFetch("/security/mfa/devices").then(d => setDevices(d.data || [])).catch(() => setDevices([]));
+  }, [apiFetch, demoMode]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (action) => {
+    setBusy(true);
+    try { await action(); } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const start = () => run(async () => {
+    setSetup(await apiFetch("/security/mfa/enroll", { method: "POST", body: { type: "totp", currentPassword: password } }));
+    setCode("");
+  });
+  const confirm = () => run(async () => {
+    await apiFetch("/security/mfa/verify", { method: "POST", body: { deviceId: setup.deviceId, code } });
+    setSetup(null); setCode(""); setPassword(""); load();
+    setToast({ message: "Two-factor sign-in is on. You will be asked for a code when you sign in.", type: "success" });
+  });
+  const remove = (device) => run(async () => {
+    if (!password) throw new Error("Enter your current password to remove a device");
+    await apiFetch(`/security/mfa/devices/${encodeURIComponent(device.id)}`, { method: "DELETE", body: { currentPassword: password } });
+    if (setup?.deviceId === device.id) setSetup(null);
+    setPassword(""); load();
+    setToast({ message: "Device removed", type: "success" });
+  });
+
+  const verified = (devices || []).filter(d => d.verified);
+  const secretGroups = setup?.secret ? setup.secret.match(/.{1,4}/g).join(" ") : "";
+
+  return (
+    <div className={className} style={style}>
+      <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--sn-body)" }}>Two-Factor Authentication</h3>
+      <p className="text-xs mb-4" style={{ color: "var(--sn-slate)" }}>
+        {verified.length ? "On: signing in asks for a code from your authenticator app." : "Add a code from an authenticator app to every sign-in."}
+      </p>
+      {demoMode ? (
+        <p className="text-xs" style={{ color: "var(--sn-dim)" }}>Two-factor sign-in is unavailable in demo mode.</p>
+      ) : devices === null ? <Spinner label="Loading devices" /> : (
+        <div className="space-y-3">
+          {devices.length > 0 && (
+            <ul className="space-y-2">
+              {devices.map(device => (
+                <li key={device.id} className="flex items-center justify-between gap-3 py-2 border-b" style={{ borderColor: "var(--sn-rule-soft)" }}>
+                  <div className="min-w-0">
+                    <div className="text-sm" style={{ color: "var(--sn-cream)" }}>Authenticator app</div>
+                    <div className="text-xs" style={{ color: "var(--sn-dim)" }}>
+                      {device.verified ? `Added ${new Date(device.createdAt).toLocaleDateString(...fmt())}` : "Setup not finished"}
+                    </div>
+                  </div>
+                  <Button variant="danger" size="sm" onClick={() => remove(device)} disabled={busy}>Remove</Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {setup ? (
+            <div className="space-y-3">
+              <p className="text-xs" style={{ color: "var(--sn-slate)" }}>
+                In your authenticator app, add an account with this key{setup.otpAuthUrl ? <> or <a href={setup.otpAuthUrl} className="underline" style={{ color: "var(--sn-amber)" }}>open it in the app</a></> : null}, then enter the six-digit code it shows.
+              </p>
+              <div className="font-mono text-sm px-3 py-2 rounded-lg break-all" style={{ background: "var(--sn-raised)", color: "var(--sn-cream)" }}>{secretGroups}</div>
+              <Input label="Code from the app" value={code} onChange={v => setCode(v.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" />
+              <div className="flex gap-2">
+                <Button size="md" onClick={confirm} disabled={busy || code.length !== 6}>Turn on</Button>
+                <Button variant="secondary" size="md" onClick={() => remove({ id: setup.deviceId })} disabled={busy}>Cancel</Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <Input label="Current password" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
+              <Button variant="secondary" size="md" icon={Shield} onClick={start} disabled={busy || !password}>
+                {verified.length ? "Add another device" : "Enable 2FA"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2190,9 +2364,9 @@ function AdminDashboardPage() {
       <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-6 gap-2 sm:gap-3 mb-4 sm:mb-6">
         <Pill label="Uptime" value={`${upHrs}h`} color="green" />
         <Pill label="Memory" value={`${memMB}MB`} color={memMB > 500 ? "red" : "blue"} />
-        <Pill label="Models" value={p.models || 173} color="purple" />
-        <Pill label="Endpoints" value={p.endpoints || 575} color="amber" />
-        <Pill label="Indexes" value={p.indexes || 253} color="blue" />
+        <Pill label="Models" value={p.models ?? "-"} color="purple" />
+        <Pill label="Endpoints" value={p.endpoints ?? "-"} color="amber" />
+        <Pill label="Indexes" value={p.indexes ?? "-"} color="blue" />
         <Pill label="Node" value={(health.nodeVersion || "?").replace("v","").split(".")[0]} color="cyan" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4 mb-4">
@@ -2557,7 +2731,7 @@ function ReportsPage() {
   const [toast, setToast] = useState(null); const [selectedReport, setSelectedReport] = useState(null); const [reportData, setReportData] = useState(null);
   const load = useCallback(() => { setLoading(true); apiFetch('/reports').then(d => setReports(d.data || d || [])).catch(() => setReports([])).finally(() => setLoading(false)); }, [apiFetch]);
   useEffect(() => { load(); }, [load]);
-  const runReport = async (r) => { setSelectedReport(r); try { const d = await apiFetch(`/reports/${r.id}/run`, { method: 'POST', body: {} }); setReportData(d); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
+  const runReport = async (r) => { setSelectedReport(r); try { const d = await apiFetch(`/reports/${r.id}/execute`, { method: 'POST', body: {} }); setReportData(d); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
   const save = async () => { try { await apiFetch('/reports', { method: 'POST', body: form }); setModalOpen(false); setForm({}); load(); setToast({ message: 'Report created', type: 'success' }); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
   return (
     <div>
@@ -2565,14 +2739,14 @@ function ReportsPage() {
       {loading ? <Spinner /> : reports.length === 0 ? <EmptyState icon={BarChart3} title="No reports yet" action="Create Report" onAction={() => setModalOpen(true)} /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{reports.map(r => (
           <div key={r.id} {...clickable(() => runReport(r), `Run report ${r.name}`)} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.98] touch-manipulation">
-            <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.type === 'Summary' ? 'info' : 'primary'}>{r.type || 'Tabular'}</Badge></div>
+            <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.reportType === 'summary' ? 'info' : 'primary'}>{r.reportType || 'tabular'}</Badge></div>
             <div className="text-xs text-[#4A5168]">{r.module || 'All'}</div></div>))}</div>)}
       {selectedReport && reportData && (<Modal open={!!selectedReport} onClose={() => { setSelectedReport(null); setReportData(null); }} title={selectedReport.name} wide>
-        <div className="text-xs text-[#4A5168] mb-3">{reportData.totalRecords || 0} records</div>
-        {reportData.rows?.length > 0 ? (<div className="overflow-x-auto -mx-4 sm:mx-0"><table className="w-full min-w-[400px] text-xs"><thead><tr className="border-b border-[#182550]">{Object.keys(reportData.rows[0]).slice(0,6).map(k=><th key={k} className="py-2 px-2 text-left text-[#4A5168] uppercase">{k}</th>)}</tr></thead><tbody>{reportData.rows.slice(0,20).map((row,i)=><tr key={i} className="border-b border-[#182550]/40">{Object.values(row).slice(0,6).map((v,j)=><td key={j} className="py-2 px-2 text-[#C8C2B4]">{String(v??'-').substring(0,30)}</td>)}</tr>)}</tbody></table></div>) : <div className="text-sm text-[#4A5168] text-center py-6">No data</div>}
+        <div className="text-xs text-[#4A5168] mb-3">{reportData.totalCount ?? 0} records</div>
+        {(reportData.rows || reportData.chartData)?.length > 0 ? (<div className="overflow-x-auto -mx-4 sm:mx-0"><table className="w-full min-w-[400px] text-xs"><thead><tr className="border-b border-[#182550]">{Object.keys((reportData.rows || reportData.chartData)[0]).slice(0,6).map(k=><th key={k} className="py-2 px-2 text-left text-[#4A5168] uppercase">{k}</th>)}</tr></thead><tbody>{(reportData.rows || reportData.chartData).slice(0,20).map((row,i)=><tr key={i} className="border-b border-[#182550]/40">{Object.values(row).slice(0,6).map((v,j)=><td key={j} className="py-2 px-2 text-[#C8C2B4]">{String(v??'-').substring(0,30)}</td>)}</tr>)}</tbody></table></div>) : <div className="text-sm text-[#4A5168] text-center py-6">No data</div>}
       </Modal>)}
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="New Report">
-        <div className="space-y-3 mb-4"><Input label="Report Name" value={form.name} onChange={v => setForm(p => ({...p, name: v}))} required /><Select label="Module" value={form.module} onChange={v => setForm(p => ({...p, module: v}))} options={['contacts','leads','deals','accounts','cases','activities','products','campaigns']} placeholder="Select module" /><Select label="Type" value={form.type} onChange={v => setForm(p => ({...p, type: v}))} options={['Tabular','Summary','Matrix']} /></div>
+        <div className="space-y-3 mb-4"><Input label="Report Name" value={form.name} onChange={v => setForm(p => ({...p, name: v}))} required /><Select label="Module" value={form.module} onChange={v => setForm(p => ({...p, module: v}))} options={['contacts','leads','deals','accounts','cases','activities','products','quotes','invoices']} placeholder="Select module" /><Select label="Type" value={form.reportType} onChange={v => setForm(p => ({...p, reportType: v}))} options={[{ value: 'tabular', label: 'Tabular' }, { value: 'summary', label: 'Summary' }, { value: 'matrix', label: 'Matrix' }]} /></div>
         <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]"><Button variant="secondary" onClick={() => setModalOpen(false)}>Cancel</Button><Button onClick={save}>Create</Button></div>
       </Modal>
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
@@ -2584,19 +2758,19 @@ function ReportsPage() {
 function SurveysPage() {
   return <ModulePage title="Surveys" icon={MessageSquare} endpoint="/surveys"
     columns={[
-      { key: "title", label: "Title" },
-      { key: "status", label: "Status", render: v => <Badge color={v==='Published'?'success':v==='Closed'?'neutral':'warning'}>{v||'Draft'}</Badge> },
+      { key: "name", label: "Name" },
+      { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Closed'?'neutral':'warning'}>{v||'Draft'}</Badge> },
       { key: "responseCount", label: "Responses", render: v => <span className="font-mono">{v||0}</span> },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Published","Closed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Closed"] },
     ]}
     detailFields={[
-      { key: "title", label: "Title" }, { key: "status", label: "Status" },
+      { key: "name", label: "Name" }, { key: "status", label: "Status" },
       { key: "description", label: "Description" }, { key: "responseCount", label: "Responses" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "title", label: "Title", required: true },{ key: "description", label: "Description", type: "textarea" },{ key: "status", label: "Status", type: "select", options: ["Draft","Published","Closed"] }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "description", label: "Description", type: "textarea" },{ key: "status", label: "Status", type: "select", options: ["Draft","Active","Closed"] }]}
   />;
 }
 // ── Territories ──
@@ -2607,30 +2781,79 @@ function TerritoriesPage() {
       { key: "description", label: "Description" },
     ]}
     filterDefs={[
-      { key: "type", label: "Type", type: "select", options: ["Region","State","City","Custom"] },
+      { key: "type", label: "Type", type: "select", options: ["Sales","Support","Partner","Region","State","City","Custom"] },
     ]}
     detailFields={[
       { key: "name", label: "Name" }, { key: "type", label: "Type" },
       { key: "description", label: "Description" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Sales","Support","Partner","Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
   />;
 }
 // ── Documents ──
+const DOCUMENT_CATEGORIES = ["Contract", "Proposal", "Invoice", "Report", "Other"];
+
+/**
+ * Documents are files. The page made document records with no file behind
+ * them and had no way to download one; it now uploads files (the New button
+ * is Upload) and each row links to its download.
+ */
 function DocumentsPage() {
-  return <ModulePage title="Documents" icon={FolderOpen} endpoint="/documents"
-    columns={[
-      { key: "name", label: "Name" }, { key: "category", label: "Category" },
-      { key: "mimeType", label: "Type", render: v => v ? v.split("/").pop() : "-" },
-      { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
-      { key: "downloadCount", label: "Downloads", render: v => <span className="font-mono">{v||0}</span> },
-    ]}
-    filterDefs={[
-      { key: "category", label: "Category", type: "select", options: ["Contract","Proposal","Invoice","Report","Other"] },
-    ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "category", label: "Category", type: "select", options: ["Contract","Proposal","Invoice","Report","Other"] },{ key: "description", label: "Description" }]}
-  />;
+  const { apiFetch } = useAuth();
+  const [reloadKey, setReloadKey] = useState(0);
+  const [category, setCategory] = useState("Other");
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);
+  const input = useRef(null);
+  const upload = async (files) => {
+    if (!files.length) return;
+    setBusy(true);
+    try {
+      for (const file of files) {
+        const body = new FormData();
+        body.append("file", file);
+        body.append("category", category);
+        await apiFetch("/documents/upload", { method: "POST", body });
+      }
+      setToast({ message: files.length > 1 ? `${files.length} files uploaded` : "File uploaded", type: "success" });
+      setReloadKey(k => k + 1);
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const download = (v, row) => row?.filePath || row?.fileName
+    ? <a href={`${API}/documents/${row.id}/download`} onClick={e => e.stopPropagation()} className="underline text-[#F5A623]">Download</a>
+    : "-";
+  return (
+    <>
+      <ModulePage title="Documents" icon={FolderOpen} endpoint="/documents" reloadKey={reloadKey} canCreate={false}
+        headerActions={<>
+          <Select value={category} onChange={setCategory} options={DOCUMENT_CATEGORIES} className="hidden sm:block w-32" />
+          <Button icon={Upload} size="md" onClick={() => input.current?.click()} disabled={busy} ariaLabel="Upload files">
+            <span className="hidden sm:inline">{busy ? "Uploading..." : "Upload"}</span>
+          </Button>
+          <input ref={input} type="file" multiple className="hidden" onChange={e => { upload([...e.target.files]); e.target.value = ""; }} />
+        </>}
+        columns={[
+          { key: "name", label: "Name" }, { key: "category", label: "Category" },
+          { key: "mimeType", label: "Type", render: v => v ? v.split("/").pop() : "-" },
+          { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
+          { key: "downloadCount", label: "Downloads", render: v => <span className="font-mono">{v||0}</span> },
+          { key: "id", label: "File", render: download },
+        ]}
+        filterDefs={[
+          { key: "category", label: "Category", type: "select", options: DOCUMENT_CATEGORIES },
+        ]}
+        detailFields={[
+          { key: "name", label: "Name" }, { key: "category", label: "Category" },
+          { key: "fileName", label: "File name" }, { key: "description", label: "Description" },
+          { key: "fileSize", label: "Size", render: v => v ? `${(v/1024).toFixed(0)} KB` : "-" },
+          { key: "id", label: "File", render: download },
+        ]}
+        formFields={[{ key: "name", label: "Name", required: true },{ key: "category", label: "Category", type: "select", options: DOCUMENT_CATEGORIES },{ key: "description", label: "Description" }]}
+      />
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    </>
+  );
 }
 // ── Tags ──
 function TagsPage() {
@@ -2638,13 +2861,9 @@ function TagsPage() {
     columns={[
       { key: "name", label: "Tag" },
       { key: "color", label: "Color", render: v => <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded-full" style={{background:v||'#60A5FA'}} />{v||'-'}</span> },
-      { key: "module", label: "Module" },
       { key: "usageCount", label: "Used", render: v => <span className="font-mono">{v||0}</span> },
     ]}
-    filterDefs={[
-      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","all"] },
-    ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "color", label: "Color", type: "select", options: ["blue","green","red","yellow","purple","cyan","orange"] },{ key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","all"] }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "color", label: "Color", type: "select", options: ["blue","green","red","yellow","purple","cyan","orange"] }]}
   />;
 }
 // ── Webhooks ──
@@ -2661,10 +2880,10 @@ function WebhooksPage() {
     detailFields={[
       { key: "name", label: "Name" }, { key: "url", label: "URL" },
       { key: "secret", label: "Secret", render: () => "********" },
-      { key: "active", label: "Active" }, { key: "events", label: "Events" },
+      { key: "active", label: "Active" }, { key: "events", label: "Events", render: v => Array.isArray(v) ? v.join(", ") : (v || "-") },
       { key: "lastTriggered", label: "Last Triggered", render: v => v ? new Date(v).toLocaleString(...fmt()) : "Never" },
     ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "url", label: "URL", required: true },{ key: "secret", label: "Secret" }]}
+    formFields={[{ key: "name", label: "Name", required: true },{ key: "url", label: "URL", required: true },{ key: "events", label: "Events (comma-separated, * for all)", required: true }]}
   />;
 }
 // ── Partners ──
@@ -2711,17 +2930,24 @@ function AssetsPage() {
 }
 // ── Notes ──
 function NotesPage() {
+  // A note is a body filed on a record (module and id). It has no title, and
+  // the form could not say which record, so every create was refused.
   return <ModulePage title="Notes" icon={FileText} endpoint="/notes"
     columns={[
-      { key: "title", label: "Title" }, { key: "parentModule", label: "Module" },
+      { key: "body", label: "Note", render: v => (v || "").split("\n")[0].slice(0, 80) || "-" },
+      { key: "module", label: "Module" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     detailFields={[
-      { key: "title", label: "Title" }, { key: "body", label: "Content" },
-      { key: "parentModule", label: "Module" },
+      { key: "body", label: "Content" }, { key: "module", label: "Module" },
+      { key: "recordId", label: "Record" },
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
-    formFields={[{ key: "title", label: "Title", required: true },{ key: "body", label: "Content", type: "textarea" }]}
+    formFields={[
+      { key: "module", label: "Module", type: "select", options: ["contacts","leads","deals","accounts","cases"] },
+      { key: "recordId", label: "Record ID", required: true },
+      { key: "body", label: "Content", type: "textarea" },
+    ]}
   />;
 }
 // ── Sequences ──
@@ -2734,7 +2960,7 @@ function SequencesPage() {
       { key: "enrolledCount", label: "Enrolled", render: v => <span className="font-mono">{v||0}</span> },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused","Completed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused","Archived"] },
     ]}
     detailFields={[
       { key: "name", label: "Name" }, { key: "status", label: "Status" },
@@ -2755,7 +2981,7 @@ const approvalTitle = (a) => {
 };
 
 function ApprovalsPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, user } = useAuth();
   const [pending, setPending] = useState([]); const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null); const [tab, setTab] = useState('pending');
   const [busy, setBusy] = useState(null);
@@ -2777,7 +3003,7 @@ function ApprovalsPage() {
     setBusy(id);
     try {
       await apiFetch(`/approvals/requests/${id}/${action}`, { method: 'POST', body: {} });
-      setToast({ message: action === 'approve' ? 'Approved' : 'Rejected', type: 'success' });
+      setToast({ message: ({ approve: 'Approved', reject: 'Rejected', recall: 'Recalled' })[action], type: 'success' });
       load();
     } catch (e) { setToast({ message: e.message, type: 'error' }); }
     finally { setBusy(null); }
@@ -2802,7 +3028,7 @@ function ApprovalsPage() {
               <div className="flex items-center gap-2">
                 {tab === 'pending'
                   ? <><Button variant="primary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'approve')}>Approve</Button><Button variant="danger" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'reject')}>Reject</Button></>
-                  : <Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge>}
+                  : <>{a.status === 'Pending' && a.submittedById === user?.id && <Button variant="secondary" size="sm" disabled={busy===a.id} onClick={()=>handleAction(a.id,'recall')}>Recall</Button>}<Badge color={APPROVAL_BADGE[a.status] || 'neutral'}>{a.status}</Badge></>}
               </div>
             </div>
           </div>
@@ -2822,7 +3048,7 @@ function AnalyticsPage() {
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Analytics</h1>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4 mb-6">
         <StatCard label="Conversion Rate" value={`${d.conversionRate||0}%`} icon={TrendingUp} color="success" />
-        <StatCard label="Avg Deal Size" value={`$${((d.avgDealSize||0)/1000).toFixed(0)}K`} icon={DollarSign} color="primary" />
+        <StatCard label="Avg Deal Size" value={money(d.avgDealSize || 0, d.currency || "USD", { notation: "compact" })} icon={DollarSign} color="primary" />
         <StatCard label="Sales Cycle" value={`${d.avgSalesCycle||0}d`} icon={Clock} color="cyan" />
         <StatCard label="Activities/Day" value={d.activitiesPerDay||0} icon={Activity} color="purple" />
       </div>
@@ -2875,14 +3101,14 @@ function ChatterPage() {
 // ── Recycle Bin ──
 function RecycleBinPage() {
   const { apiFetch } = useAuth();
-  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState('contact'); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
+  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState(''); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
   useEffect(()=>{apiFetch('/recycle-bin/stats').then(setStats).catch(()=>{});},[apiFetch]);
   useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?module=${module}&limit=50`).then(d=>setItems(d.data||d||[])).catch(()=>setItems([])).finally(()=>setLoading(false));},[module,apiFetch]);
   const restore = async(id)=>{try{await apiFetch(`/recycle-bin/${id}/restore`,{method:'POST',body:{module}});setToast({message:'Restored',type:'success'});setItems(p=>p.filter(i=>i.id!==id));}catch(e){setToast({message:e.message,type:'error'});}};
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Recycle Bin</h1>
-      {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}s</div></button>))}</div>}
+      {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}</div></button>))}</div>}
       {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title="Empty" subtitle="Deleted items appear here for 30 days" />:(
         <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div><Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button></div>))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
@@ -2891,16 +3117,144 @@ function RecycleBinPage() {
 }
 
 // ── Import ──
+/**
+ * Rows of a CSV file as objects keyed by its header row. Quoted fields may
+ * hold commas, doubled quotes and line breaks (RFC 4180).
+ */
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  const src = String(text).replace(/^﻿/, "");
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"' && src[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && src[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      if (row.some(v => v !== "")) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field);
+  if (row.some(v => v !== "")) rows.push(row);
+  const [header = [], ...body] = rows;
+  return { header: header.map(h => h.trim()), rows: body.map(r => Object.fromEntries(header.map((h, i) => [h.trim(), (r[i] ?? "").trim()]))) };
+}
+
+const IMPORT_BATCH = 500;   // rows per request, well inside the API's 1MB body limit
+
+/**
+ * Import records from a CSV file. This page was a mock: the drop zone had no
+ * file input and Start Import did nothing. Columns are matched to the
+ * module's fields by name ("First Name" or first_name for firstName), the
+ * file is checked first, then imported a batch at a time.
+ */
 function ImportPage() {
+  const { apiFetch } = useAuth();
   const [module, setModule] = useState('contacts');
+  const [meta, setMeta] = useState(null);
+  const [file, setFile] = useState(null);          // { name, header, rows }
+  const [check, setCheck] = useState(null);        // validation totals
+  const [result, setResult] = useState(null);      // import totals
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);
+  const input = useRef(null);
+
+  useEffect(() => { apiFetch('/import/metadata').then(setMeta).catch(() => setMeta(null)); }, [apiFetch]);
+  const fields = meta?.metadata?.[module]?.availableFields || [];
+  const required = meta?.metadata?.[module]?.requiredFields || [];
+
+  // Header -> field, by name ignoring case, spaces and punctuation.
+  const squash = v => String(v).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const mapping = useMemo(() => {
+    const byName = new Map(fields.map(f => [squash(f), f]));
+    return Object.fromEntries((file?.header || []).map(h => [h, byName.get(squash(h)) || null]));
+  }, [file, fields]);
+  const records = useMemo(() => (file?.rows || []).map(r =>
+    Object.fromEntries(Object.entries(r).filter(([h, v]) => mapping[h] && v !== "").map(([h, v]) => [mapping[h], v]))), [file, mapping]);
+  const unmatched = Object.entries(mapping).filter(([, f]) => !f).map(([h]) => h);
+  const missing = required.filter(f => !Object.values(mapping).includes(f));
+
+  const choose = async (picked) => {
+    if (!picked) return;
+    setCheck(null); setResult(null);
+    try {
+      const parsed = parseCsv(await picked.text());
+      if (!parsed.rows.length) throw new Error("The file has a header row but no records");
+      if (parsed.rows.length > 10000) throw new Error("At most 10,000 records per import");
+      setFile({ name: picked.name, ...parsed });
+    } catch (e) { setFile(null); setToast({ message: e.message || "Could not read that file", type: "error" }); }
+  };
+
+  const inBatches = async (path, body, add) => {
+    let total = null;
+    for (let i = 0; i < records.length; i += IMPORT_BATCH) {
+      const d = await apiFetch(path, { method: "POST", body: { module, records: records.slice(i, i + IMPORT_BATCH), ...body } });
+      total = add(total, d, i);
+    }
+    return total;
+  };
+  const validate = async () => {
+    setBusy(true); setResult(null);
+    try {
+      setCheck(await inBatches("/import/validate", {}, (t, d, offset) => ({
+        errorCount: (t?.errorCount || 0) + (d.errorCount || 0),
+        warningCount: (t?.warningCount || 0) + (d.warningCount || 0),
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
+      })));
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+  const run = async () => {
+    setBusy(true);
+    try {
+      setResult(await inBatches("/import/execute", { skipDuplicates: true }, (t, d, offset) => ({
+        created: (t?.created || 0) + (d.created || 0),
+        updated: (t?.updated || 0) + (d.updated || 0),
+        skipped: (t?.skipped || 0) + (d.skipped || 0),
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
+      })));
+    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+  };
+
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Import Data</h1>
-      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 max-w-lg">
-        <Select label="Module" value={module} onChange={setModule} options={['contacts','leads','deals','accounts','cases','products']} />
-        <div className="mt-4 p-6 border-2 border-dashed border-[#182550] rounded-xl text-center"><Upload size={24} className="mx-auto text-[#4A5168] mb-2" /><div className="text-sm text-[#7E8598]">Drag & drop a CSV file</div><div className="text-xs text-[#4A5168] mt-1">or click to browse</div></div>
-        <Button fullWidth className="mt-4">Start Import</Button>
+      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 max-w-lg space-y-4">
+        <Select label="Module" value={module} onChange={v => { setModule(v); setCheck(null); setResult(null); }} options={meta?.modules || ['contacts','leads','accounts','products']} />
+        {required.length > 0 && <p className="text-xs text-[#7E8598]">Required columns: {required.join(", ")}. Other columns: {fields.filter(f => !required.includes(f)).join(", ")}.</p>}
+        <div {...clickable(() => input.current?.click(), "Choose a CSV file")}
+          onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); choose(e.dataTransfer.files?.[0]); }}
+          className="p-6 border-2 border-dashed border-[#182550] rounded-xl text-center cursor-pointer hover:border-[#203060]">
+          <Upload size={24} className="mx-auto text-[#4A5168] mb-2" />
+          <div className="text-sm text-[#7E8598]">{file ? `${file.name}: ${file.rows.length} records` : "Drag & drop a CSV file"}</div>
+          <div className="text-xs text-[#4A5168] mt-1">{file ? "Click to choose another" : "or click to browse"}</div>
+          <input ref={input} type="file" accept=".csv,text/csv" className="hidden" onChange={e => { choose(e.target.files?.[0]); e.target.value = ""; }} />
+        </div>
+        {file && unmatched.length > 0 && <p className="text-xs text-[#FBBF24]">Not imported (no matching field): {unmatched.join(", ")}</p>}
+        {file && missing.length > 0 && <p className="text-xs text-[#F87171]">Missing required column{missing.length > 1 ? "s" : ""}: {missing.join(", ")}</p>}
+        {check && (
+          <div className="text-xs space-y-1">
+            <div className={check.errorCount ? "text-[#F87171]" : "text-[#34D399]"}>{check.errorCount ? `${check.errorCount} problem${check.errorCount > 1 ? "s" : ""} found` : "No problems found"}{check.warningCount ? `, ${check.warningCount} warning${check.warningCount > 1 ? "s" : ""}` : ""}</div>
+            {check.errors.map((e, i) => <div key={i} className="text-[#7E8598]">Row {e.row}: {e.message} ({e.field})</div>)}
+          </div>
+        )}
+        {result && (
+          <div className="text-xs space-y-1">
+            <div className="text-[#34D399]">{result.created} created, {result.updated} updated, {result.skipped} skipped</div>
+            {result.errors.map((e, i) => <div key={i} className="text-[#7E8598]">Row {e.row}: {e.error}</div>)}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Button variant="secondary" fullWidth onClick={validate} disabled={!file || busy || missing.length > 0}>Check file</Button>
+          <Button fullWidth onClick={run} disabled={!file || busy || missing.length > 0 || !check || check.errorCount > 0}>Start Import</Button>
+        </div>
       </div>
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
     </div>
   );
 }
@@ -3307,7 +3661,7 @@ function ProjectsPage() {
           <StatCard label="Active" value={portfolio.activeProjects || 0} icon={ListTree} color="primary" />
           <StatCard label="At Risk" value={portfolio.atRisk || 0} icon={AlertTriangle} color={portfolio.atRisk > 0 ? "danger" : "success"} />
           <StatCard label="Avg Completion" value={`${portfolio.avgCompletion || 0}%`} icon={TrendingUp} color="cyan" />
-          <StatCard label="Budget" value={`$${((portfolio.totalBudget||0)/1000).toFixed(0)}K`} icon={DollarSign} color="purple" />
+          <StatCard label="Budget" value={money(portfolio.totalBudget || 0, portfolio.currency || "USD", { notation: "compact" })} icon={DollarSign} color="purple" />
         </div>
       )}
 
@@ -3618,8 +3972,8 @@ function TeamList({ projectId }) {
       {team.map(r => (
         <div key={r.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm text-[#F0EDE5]">{r.role}</div>
-            <div className="text-xs text-[#4A5168]">{r.openTasks} open tasks | {r.hoursLogged}h logged</div>
+            <div className="text-sm text-[#F0EDE5]">{r.user ? `${r.user.firstName} ${r.user.lastName}` : r.role}</div>
+            <div className="text-xs text-[#4A5168]">{r.user && r.role ? `${r.role} | ` : ""}{r.openTasks} open tasks | {r.hoursLogged}h logged</div>
           </div>
           <Badge color={r.allocationPct > 100 ? 'danger' : 'info'}>{r.allocationPct}%</Badge>
         </div>
@@ -5505,6 +5859,7 @@ function AppShell({ go }) {
     recordId: route.recordId,
     openRecord: (id) => navigate(route.module, id),
     closeRecord: () => navigate(route.module, null),
+    navigate,
   }), [route, navigate]);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);

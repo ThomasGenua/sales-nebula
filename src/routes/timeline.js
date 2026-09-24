@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { auditMiddleware } = require("../middleware/audit");
 const { authenticate, permits } = require('../middleware/auth');
-const { canReach } = require('../middleware/access');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { crudModelFor } = require('../utils/crud');
 const { editableFields } = require('../utils/modelFields');
@@ -26,6 +26,16 @@ async function readableRecord(req, res, module, id) {
   return true;
 }
 
+/**
+ * `where` on a related module's rows, narrowed to the live ones the caller may
+ * see, or null when they may not read that module, and the section is left
+ * out. Reading a record handed over its activities, emails and cases whatever
+ * the caller could see of those modules.
+ */
+async function sectionWhere(req, module, modelName, where) {
+  return permits(req, module, 'read') ? reachableWhere(req, module, modelName, where) : null;
+}
+
 // GET /api/timeline/:module/:recordId - Unified activity timeline for any record
 router.get('/:module/:recordId', async (req, res, next) => {
   try {
@@ -39,27 +49,31 @@ router.get('/:module/:recordId', async (req, res, next) => {
     const timeline = [];
 
     // Live rows only, as the unified and stats routes below ask: deleted
-    // activities, emails, notes and cases came back here.
+    // activities, emails, notes and cases came back here. Activities, emails
+    // and cases only from modules the caller may read, and only the rows they
+    // may see (sectionWhere); a section they may not read is left out.
 
     // Activities
     if (['contacts', 'deals', 'accounts'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : module === 'deals' ? 'dealId' : 'accountId';
-      const activities = await prisma.activity.findMany({
-        where: { [field]: recordId, deletedAt: null, ...cursor },
+      const where = await sectionWhere(req, 'activities', 'activity', { [field]: recordId, deletedAt: null, ...cursor });
+      const activities = where ? await prisma.activity.findMany({
+        where,
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, type: true, status: true, dueDate: true, createdAt: true },
-      });
+      }) : [];
       activities.forEach(a => timeline.push({ ...a, timelineType: 'activity', timelineDate: a.createdAt }));
     }
 
     // Emails
     if (['contacts', 'deals'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : 'dealId';
-      const emails = await prisma.email.findMany({
-        where: { [field]: recordId, deletedAt: null, ...cursor },
+      const where = await sectionWhere(req, 'emails', 'email', { [field]: recordId, deletedAt: null, ...cursor });
+      const emails = where ? await prisma.email.findMany({
+        where,
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, status: true, opened: true, sentAt: true, createdAt: true },
-      });
+      }) : [];
       emails.forEach(e => timeline.push({ ...e, timelineType: 'email', timelineDate: e.sentAt || e.createdAt }));
     }
 
@@ -74,11 +88,12 @@ router.get('/:module/:recordId', async (req, res, next) => {
     // Cases
     if (['contacts', 'accounts'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : 'accountId';
-      const cases = await prisma.case.findMany({
-        where: { [field]: recordId, deletedAt: null, ...cursor },
+      const where = await sectionWhere(req, 'cases', 'case', { [field]: recordId, deletedAt: null, ...cursor });
+      const cases = where ? await prisma.case.findMany({
+        where,
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, status: true, priority: true, caseNumber: true, createdAt: true },
-      });
+      }) : [];
       cases.forEach(c => timeline.push({ ...c, timelineType: 'case', timelineDate: c.createdAt }));
     }
 
@@ -102,9 +117,11 @@ router.get('/:module/:recordId', async (req, res, next) => {
     }
 
     // Chatter posts about this record. A ChatterMention names a user, not a
-    // record, so the post's own recordId is what ties it here.
+    // record; the post names its record as parentModule + parentId, which is
+    // what POST /chatter writes. recordId, asked for alone, nothing writes,
+    // so no post ever showed here.
     const posts = await prisma.chatterPost.findMany({
-      where: { recordId, ...cursor },
+      where: { OR: [{ parentModule: module, parentId: recordId }, { recordModule: module, recordId }], ...cursor },
       orderBy: { createdAt: 'desc' }, take,
       select: { id: true, body: true, createdAt: true },
     });
@@ -125,11 +142,16 @@ router.get('/record/:module/:id/unified', authenticate, async (req, res, next) =
     const { module, id } = req.params;
     if (!(await readableRecord(req, res, module, id))) return;
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId', cases: 'caseId' }[module] || 'parentId';
+    // Activities and emails as the timeline above shows them (sectionWhere).
+    const [activityWhere, emailWhere] = await Promise.all([
+      sectionWhere(req, 'activities', 'activity', { [parentField]: id, deletedAt: null }),
+      sectionWhere(req, 'emails', 'email', { [parentField]: id, deletedAt: null }),
+    ]);
     const [activities, notes, feedItems, emails] = await Promise.all([
-      prisma.activity.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, type: true, status: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
+      activityWhere ? prisma.activity.findMany({ where: activityWhere, select: { id: true, subject: true, type: true, status: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []) : [],
       prisma.note.findMany({ where: { module, recordId: id, deletedAt: null }, select: { id: true, body: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
       prisma.feedItem.findMany({ where: { parentId: id }, select: { id: true, body: true, type: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
-      prisma.email.findMany({ where: { [parentField]: id, deletedAt: null }, select: { id: true, subject: true, status: true, sentAt: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []),
+      emailWhere ? prisma.email.findMany({ where: emailWhere, select: { id: true, subject: true, status: true, sentAt: true, createdAt: true }, take: 20, orderBy: { createdAt: 'desc' } }).catch(() => []) : [],
     ]);
     const timeline = [
       ...activities.map(a => ({ ...a, _type: 'activity', _date: a.createdAt })),
@@ -148,11 +170,16 @@ router.get('/stats/:module/:id', authenticate, async (req, res, next) => {
     const { module, id } = req.params;
     if (!(await readableRecord(req, res, module, id))) return;
     const parentField = { contacts: 'contactId', deals: 'dealId', accounts: 'accountId' }[module] || 'parentId';
+    // Counted as the timeline shows them: a section the caller may not read counts nothing.
+    const [activityWhere, emailWhere] = await Promise.all([
+      sectionWhere(req, 'activities', 'activity', { [parentField]: id, deletedAt: null }),
+      sectionWhere(req, 'emails', 'email', { [parentField]: id, deletedAt: null }),
+    ]);
     const [actCount, noteCount, emailCount, lastActivity] = await Promise.all([
-      prisma.activity.count({ where: { [parentField]: id, deletedAt: null } }).catch(() => 0),
+      activityWhere ? prisma.activity.count({ where: activityWhere }).catch(() => 0) : 0,
       prisma.note.count({ where: { module, recordId: id, deletedAt: null } }).catch(() => 0),
-      prisma.email.count({ where: { [parentField]: id, deletedAt: null } }).catch(() => 0),
-      prisma.activity.findFirst({ where: { [parentField]: id, deletedAt: null }, orderBy: { createdAt: 'desc' } }).catch(() => null),
+      emailWhere ? prisma.email.count({ where: emailWhere }).catch(() => 0) : 0,
+      activityWhere ? prisma.activity.findFirst({ where: activityWhere, orderBy: { createdAt: 'desc' } }).catch(() => null) : null,
     ]);
     res.json({ recordId: id, activities: actCount, notes: noteCount, emails: emailCount, total: actCount + noteCount + emailCount, lastActivityAt: lastActivity?.createdAt });
   } catch (err) { next(err); }
@@ -198,7 +225,7 @@ router.get('/aggregate', authenticate, async (req, res, next) => {
     } else if (ids) {
       where.parentId = requested.id;
     }
-    const events = await prisma.timelineEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit,
+    const events = await prisma.timelineEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: Math.min(parseInt(limit) || 50, 200),
       select: { id: true, type: true, title: true, body: true, parentModule: true, parentId: true, createdAt: true, metadata: true } });
     res.json({ count: events.length, events });
   } catch (err) { next(err); }

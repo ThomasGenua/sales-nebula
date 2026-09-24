@@ -22,9 +22,13 @@ async function fireWebhookEvent(prisma, event, payload) {
       where: { active: true },
     });
 
+    // Records fire by module ('contacts.created') while the event list offers
+    // the singular ('contact.created'), so a subscription picked from that
+    // list never fired. Either name matches.
+    const singular = String(event).replace(/^(\w+?)(ies|s)\./, (m, stem, plural) => `${stem}${plural === 'ies' ? 'y' : ''}.`);
     const matching = webhooks.filter(w => {
       const events = Array.isArray(w.events) ? w.events : [];
-      return events.includes(event) || events.includes('*');
+      return events.includes(event) || events.includes(singular) || events.includes('*');
     });
 
     for (const webhook of matching) {

@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, visibleLinks } = require('../middleware/access');
 const { crudModelFor } = require('../utils/crud');
 const { complete, aiModel, isConfigured } = require('../services/claude');
 const { limiters } = require('../middleware/rateLimit');
@@ -60,19 +60,20 @@ router.post('/deal-coach', limiters.ai, requirePermission('deals', 'read'), asyn
     const { dealId } = req.body;
     if (!dealId) return res.status(400).json({ error: 'dealId required' });
 
-    const deal = await prisma.deal.findFirst({
-      where: await visibleDeals(req, { id: dealId }),
-      include: {
-        account: true,
-        contact: true,
-        activities: { where: { deletedAt: null }, take: 5, orderBy: { date: 'desc' } },
-        emails: { take: 3, orderBy: { createdAt: 'desc' } },
-        cases: { where: { status: { not: 'Closed' }, deletedAt: null } },
-      },
-    });
+    const include = {
+      account: true,
+      contact: true,
+      activities: { where: { deletedAt: null }, take: 5, orderBy: { date: 'desc' } },
+      emails: { where: { deletedAt: null }, take: 3, orderBy: { createdAt: 'desc' } },
+      cases: { where: { status: { notIn: ['Resolved', 'Closed'] }, deletedAt: null } },
+    };
+    const deal = await prisma.deal.findFirst({ where: await visibleDeals(req, { id: String(dealId) }), include });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
+    // Its account, contact, activities and cases as far as the caller may see
+    // them: the deal's links carried them to the model whoever they belonged to.
+    await visibleLinks(req, 'deal', deal, include);
 
-    const context = `Deal: ${deal.name}\nStage: ${deal.stage}\nValue: $${deal.value}\nProbability: ${deal.probability}%\nClose Date: ${deal.closeDate || 'TBD'}\nAccount: ${deal.account?.name || '-'} (${deal.account?.industry || '-'})\nContact: ${deal.contact ? `${deal.contact.firstName} ${deal.contact.lastName}` : '-'}\nRecent Activities: ${deal.activities.map(a => `${a.type}: ${a.subject} [${a.status}]`).join('; ')}\nEmails: ${deal.emails.map(e => `${e.subject} [${e.opened ? 'Opened' : 'Unopened'}]`).join('; ')}\nOpen Cases: ${deal.cases.length}`;
+    const context = `Deal: ${deal.name}\nStage: ${deal.stage}\nValue: $${deal.value}\nProbability: ${deal.probability}%\nClose Date: ${deal.closeDate || 'TBD'}\nAccount: ${deal.account?.name || '-'} (${deal.account?.industry || '-'})\nContact: ${deal.contact?.firstName ? `${deal.contact.firstName} ${deal.contact.lastName}` : '-'}\nRecent Activities: ${deal.activities.map(a => `${a.type}: ${a.subject} [${a.status}]`).join('; ')}\nEmails: ${deal.emails.map(e => `${e.subject} [${e.opened ? 'Opened' : 'Unopened'}]`).join('; ')}\nOpen Cases: ${deal.cases.length}`;
 
     const { text, truncated } = await complete({
       system: 'You are an expert B2B sales coach. Analyze the deal and provide: 1) Health assessment, 2) Top 3 next actions, 3) Key risks, 4) Talking points. Be specific.',

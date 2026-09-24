@@ -184,15 +184,23 @@ module.exports = createCrudRouter('deal', 'deals', {
       try {
         const prisma = req.app.locals.prisma;
         const { productId, name, quantity = 1, price, discount = 0 } = req.body;
+        // A line needs a name and a price; without them (or with numbers sent
+        // as text) the create reached Prisma and answered 500.
+        const qty = Number(quantity);
+        const unitPrice = Number(price);
+        const off = Number(discount) || 0;
+        if (!name || price === undefined || price === null || price === '' || !Number.isFinite(unitPrice) || !Number.isInteger(qty) || qty < 1) {
+          return res.status(400).json({ error: 'name, price and a whole-number quantity are required' });
+        }
         // Only a live product the caller can see. The id was stored as sent,
         // so a deleted or hidden product went on the deal, its name and SKU
         // coming back in the response.
         const linkProblem = await linkRefusal(req, 'dealLineItem', { productId });
         if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-        const total = price * quantity * (1 - discount / 100);
+        const total = unitPrice * qty * (1 - off / 100);
         const count = await prisma.dealLineItem.count({ where: { dealId: req.params.id } });
         const item = await prisma.dealLineItem.create({
-          data: { dealId: req.params.id, productId, name, quantity, price, discount, total, sortOrder: count },
+          data: { dealId: req.params.id, productId, name, quantity: qty, price: unitPrice, discount: off, total, sortOrder: count },
           include: { product: { select: { id: true, name: true, sku: true } } },
         });
 
@@ -227,13 +235,26 @@ module.exports = createCrudRouter('deal', 'deals', {
     router.post('/:id/clone', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const source = await prisma.deal.findUnique({
-          where: { id: req.params.id },
+        // A live deal, as GET /:id answers for. A deleted one was cloned,
+        // deletedAt and all, into a deleted copy.
+        const source = await prisma.deal.findFirst({
+          where: { id: req.params.id, deletedAt: null },
           include: { lineItems: true },
         });
         if (!source) return res.status(404).json({ error: 'Not found' });
 
-        const { id, createdAt, updatedAt, lineItems, stageHistory, ...data } = source;
+        const { id, createdAt, updatedAt, deletedAt, lineItems, stageHistory, ...data } = source;
+        // The copy links only to records the caller can see: it took the
+        // source's account, contact and partner, and its items' products,
+        // unchecked. A hidden link is dropped rather than refusing the clone,
+        // as for an account: the caller did not send it and cannot change it.
+        const seen = new Map();
+        for (const key of Object.keys(data)) {
+          if (await linkRefusal(req, 'deal', { [key]: data[key] }, null, seen)) data[key] = null;
+        }
+        for (const item of lineItems) {
+          if (await linkRefusal(req, 'dealLineItem', { productId: item.productId }, null, seen)) item.productId = null;
+        }
         data.name = `${data.name} (Copy)`;
         data.stage = 'Qualification';
         data.closeDate = new Date(Date.now() + 30 * 86400000); // 30 days out
@@ -273,6 +294,8 @@ module.exports = createCrudRouter('deal', 'deals', {
       try {
         const prisma = req.app.locals.prisma;
         const { competitors } = req.body; // Array of {name, strengths, weaknesses, threat}
+        // Prisma refuses a bare null for the Json column, so that was a 500.
+        if (!Array.isArray(competitors)) return res.status(400).json({ error: 'competitors array required' });
         const deal = await prisma.deal.update({
           where: { id: req.params.id },
           data: { competitors },
@@ -290,6 +313,16 @@ module.exports = createCrudRouter('deal', 'deals', {
           select: { id: true, name: true, stage: true, value: true, currency: true, updatedAt: true, createdAt: true, account: { select: { name: true } } },
         });
 
+        // Days in stage run from the deal's last stage change (its stage
+        // history), or from its creation if it never moved; they ran from its
+        // last edit of any kind, so fixing a typo made a stale deal fresh.
+        const moves = await prisma.dealStageHistory.findMany({
+          where: { dealId: { in: deals.map(d => d.id) } },
+          orderBy: { createdAt: 'desc' },
+          distinct: ['dealId'],
+          select: { dealId: true, createdAt: true },
+        });
+        const movedAt = new Map(moves.map(m => [m.dealId, m.createdAt]));
         const now = Date.now();
         const aging = deals.map(d => ({
           id: d.id,
@@ -298,7 +331,7 @@ module.exports = createCrudRouter('deal', 'deals', {
           stage: d.stage,
           value: d.value,
           currency: d.currency,
-          daysInStage: Math.round((now - d.updatedAt.getTime()) / 86400000),
+          daysInStage: Math.round((now - (movedAt.get(d.id) || d.createdAt).getTime()) / 86400000),
           totalAge: Math.round((now - d.createdAt.getTime()) / 86400000),
         })).sort((a, b) => b.daysInStage - a.daysInStage);
 

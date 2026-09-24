@@ -1,10 +1,19 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
+
+// A path's module -> its permission module, model, and the column a record's
+// stage is kept in.
+const PATH_MODULES = {
+  deals: ['deals', 'deal', 'stage'],
+  leads: ['leads', 'lead', 'status'],
+  cases: ['cases', 'case', 'status'],
+};
 
 // List sales paths
 router.get('/', authenticate, async (req, res, next) => {
@@ -18,7 +27,8 @@ router.get('/', authenticate, async (req, res, next) => {
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
+    // A live path, as the list shows: a deleted one still opened here.
+    const path = await queryWithIncludes(prisma, 'salesPath', 'findFirst', { where: { id: req.params.id, deletedAt: null }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Sales path not found' });
     res.json(path);
   } catch (err) { next(err); }
@@ -76,11 +86,15 @@ router.get('/:module/current/:stage', authenticate, async (req, res, next) => {
 router.post('/:id/stages', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, guidance, fields, successCriteria, order } = req.body;
+    const { name, guidance, fields, successCriteria } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
+    // On a live path: a stage has no relation to hold it to one, so any id
+    // took a stage. Its position is a whole number; text was a 500.
+    const path = await prisma.salesPath.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true } });
+    if (!path) return res.status(404).json({ error: 'Sales path not found' });
     const last = await prisma.salesPathStage.aggregate({ where: { salesPathId: req.params.id }, _max: { position: true } });
     const stage = await prisma.salesPathStage.create({
-      data: { salesPathId: req.params.id, name, guidance, fields: fields || [], successCriteria, position: order || (last._max.position || 0) + 1 },
+      data: { salesPathId: req.params.id, name, guidance, fields: fields || [], successCriteria, position: parseInt(req.body.order) || (last._max.position || 0) + 1 },
     });
     res.status(201).json(stage);
   } catch (err) { next(err); }
@@ -98,7 +112,10 @@ router.get('/:pathId/deal/:dealId', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.pathId }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Path not found' });
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.dealId } });
+    // A deal the caller can see: any deal id answered with its name, stage
+    // and value, to anyone signed in.
+    const deal = permits(req, 'deals', 'read')
+      && await prisma.deal.findFirst({ where: await reachableWhere(req, 'deals', 'deal', { id: String(req.params.dealId) }) });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
     const currentIdx = path.stages.findIndex(s => s.name === deal.stage);
     const stagesWithStatus = path.stages.map((s, i) => ({
@@ -114,6 +131,9 @@ router.post('/:pathId/stages/:stageId/coaching', authenticate, requirePermission
   try {
     const prisma = req.app.locals.prisma;
     const { tips, requiredFields, keyActions, successCriteria } = req.body;
+    // A stage of the path in the URL: any path's stage went by id.
+    const onPath = await prisma.salesPathStage.findFirst({ where: { id: req.params.stageId, salesPathId: req.params.pathId }, select: { id: true } });
+    if (!onPath) return res.status(404).json({ error: 'Stage not found' });
     // A stage's coaching text is its guidance and its required fields are its
     // fields; only what the caller sends is changed.
     const stage = await prisma.salesPathStage.update({
@@ -136,15 +156,20 @@ router.get('/:id/analytics', authenticate, async (req, res, next) => {
     const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
     if (!path) return res.status(404).json({ error: 'Not found' });
     const stageNames = path.stages.map(s => s.name);
+    // The path's own module's records in each stage (a lead's or case's stage
+    // is its status), of those the caller may see: this counted every deal,
+    // whatever the path, other reps' and deleted history included, and ran
+    // won and lost counts it never used.
+    const [module, model, field] = PATH_MODULES[path.module] || PATH_MODULES.deals;
+    const readable = permits(req, module, 'read');
+    const dealWhere = module === 'deals' && readable ? await reachableWhere(req, 'deals', 'deal') : null;
     const stageStats = [];
     for (const stageName of stageNames) {
-      const [count, won, lost] = await Promise.all([
-        prisma.deal.count({ where: { stage: stageName, deletedAt: null } }),
-        prisma.deal.count({ where: { stage: 'Closed Won', deletedAt: null } }),
-        prisma.deal.count({ where: { stage: 'Closed Lost', deletedAt: null } }),
-      ]);
+      const count = readable ? await prisma[model].count({ where: await reachableWhere(req, module, model, { [field]: stageName }) }) : 0;
       // A history row's duration is the days the deal spent in fromStage.
-      const history = await prisma.dealStageHistory.findMany({ where: { fromStage: stageName, duration: { not: null } }, select: { duration: true } });
+      const history = dealWhere
+        ? await prisma.dealStageHistory.findMany({ where: { fromStage: stageName, duration: { not: null }, deal: { is: dealWhere } }, select: { duration: true } })
+        : [];
       const avgDays = history.length ? history.reduce((s, h) => s + h.duration, 0) / history.length : 0;
       stageStats.push({ stage: stageName, activeDeals: count, avgDaysInStage: Math.round(avgDays * 10) / 10 });
     }
@@ -157,9 +182,10 @@ router.put('/:id/reorder', authenticate, requirePermission('admin', 'full'), asy
   try {
     const prisma = req.app.locals.prisma;
     const { stageIds } = req.body;
-    if (!stageIds?.length) return res.status(400).json({ error: 'stageIds array required' });
+    if (!Array.isArray(stageIds) || !stageIds.length) return res.status(400).json({ error: 'stageIds array required' });
+    // Only this path's stages: any stage id was moved, whatever its path.
     for (let i = 0; i < stageIds.length; i++) {
-      await prisma.salesPathStage.update({ where: { id: stageIds[i] }, data: { position: i } });
+      await prisma.salesPathStage.updateMany({ where: { id: String(stageIds[i]), salesPathId: req.params.id }, data: { position: i } });
     }
     const path = await queryWithIncludes(prisma, 'salesPath', 'findUnique', { where: { id: req.params.id }, include: { stages: { orderBy: { position: 'asc' } } } });
     res.json(path);

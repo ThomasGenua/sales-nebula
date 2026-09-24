@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const { authenticate } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
-const { currencyContext, sumInBase, dealTotalInBase } = require('../utils/currency');
+const { visibleLinks } = require('../middleware/access');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = Router();
 router.use(authenticate);
@@ -48,6 +49,12 @@ router.get('/', async (req, res, next) => {
         include: { account: { select: { id: true, name: true } }, owner: { select: { id: true, firstName: true, lastName: true } } },
       }),
     ]);
+    // Their linked contacts, deals and accounts as far as the caller may see
+    // them; the names came back whoever the records belonged to.
+    await Promise.all([
+      visibleLinks(req, 'activity', recentActivities, { contact: true, deal: true }),
+      visibleLinks(req, 'deal', recentDeals, { account: true }),
+    ]);
 
     // Every amount below is in the default currency: each deal's value is
     // converted before anything is added up.
@@ -92,6 +99,9 @@ router.get('/', async (req, res, next) => {
         leads: leadCount,
         accounts: accountCount,
         openDeals: openDeals.length,
+        // The dashboard's deal-outcome chart reads these; Lost was always 0.
+        wonDeals: wonDeals.length,
+        lostDeals: lostDeals.length,
         openCases: casesOpen,
         activitiesThisMonth,
       },
@@ -141,7 +151,9 @@ router.get('/leaderboard', async (req, res, next) => {
       const [wonDeals, openDeals, activities] = await Promise.all([
         prisma.deal.findMany({ where: { ownerId: user.id, stage: 'Closed Won', deletedAt: null }, select: { value: true, currency: true, closeDate: true } }),
         prisma.deal.findMany({ where: { ownerId: user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] }, deletedAt: null }, select: { value: true, currency: true } }),
-        prisma.activity.count({ where: { assignedId: user.id, date: { gte: startOfMonth }, deletedAt: null } }),
+        // A rep's activities are those they own (a create sets the owner) or
+        // are assigned; counting the assignee alone missed almost all of them.
+        prisma.activity.count({ where: { OR: [{ ownerId: user.id }, { assignedId: user.id }], date: { gte: startOfMonth }, deletedAt: null } }),
       ]);
 
       const wonThisMonth = wonDeals.filter(d => d.closeDate && d.closeDate >= startOfMonth);
@@ -185,25 +197,5 @@ router.get('/widgets', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Top performers
-router.get('/leaderboard', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { period = '30' } = req.query;
-    const since = new Date(Date.now() - (+period) * 86400000);
-    const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, firstName: true, lastName: true } });
-    const leaderboard = [];
-    for (const u of users) {
-      const [won, activities] = await Promise.all([
-        // A won deal's closeDate is when it closed; there is no closedAt.
-        dealTotalInBase(prisma, { ownerId: u.id, stage: 'Closed Won', closeDate: { gte: since }, deletedAt: null }),
-        prisma.activity.count({ where: { ownerId: u.id, status: 'Completed', createdAt: { gte: since }, deletedAt: null } }),
-      ]);
-      if (won.count > 0 || activities > 0) {
-        leaderboard.push({ user: u, wonDeals: won.count, wonRevenue: won.value, completedActivities: activities });
-      }
-    }
-    leaderboard.sort((a, b) => b.wonRevenue - a.wonRevenue);
-    res.json(leaderboard.slice(0, 10));
-  } catch (err) { next(err); }
-});
+// A second GET /leaderboard stood here. The one above answers that path, so
+// this one never ran; it is removed rather than left to look live.

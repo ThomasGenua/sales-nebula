@@ -9,6 +9,7 @@ const {
   sendVerificationEmail,
   sendInviteEmail,
   sendWelcomeEmail,
+  appBaseUrl,
 } = require('../utils/mail');
 
 const router = Router();
@@ -20,9 +21,11 @@ const verifyLimiter = createLimiter({ windowMs: 15 * 60 * 1000, max: 20, message
 const VERIFY_TTL_HOURS = 48;
 const INVITE_TTL_DAYS = 7;
 
-function publicOrigin(req) {
-  const raw = process.env.FRONTEND_URL || req.headers.origin || `${req.protocol}://${req.get('host')}`;
-  return String(raw).replace(/\/$/, '');
+// Emailed links go to the configured app only. With FRONTEND_URL unset they
+// took the request's Origin or Host, so whoever signed up chose where a
+// verification link pointed.
+function publicOrigin() {
+  return appBaseUrl();
 }
 
 /** Generate a token and its storage hash. The raw value is shown once. */
@@ -84,9 +87,10 @@ router.post('/', signupLimiter, async (req, res, next) => {
     }
 
     // An existing user or a pending request both return the same response,
-    // so this endpoint cannot be used to enumerate accounts.
+    // so this endpoint cannot be used to enumerate accounts. The status too:
+    // a known address got 202 and a new one 201.
     const existingUser = await prisma.user.findUnique({ where: { email: clean } }).catch(() => null);
-    if (existingUser) return res.status(202).json(genericAccepted(clean));
+    if (existingUser) return res.status(201).json(genericAccepted(clean));
 
     const { raw, hash } = makeToken();
     const expiresAt = new Date(Date.now() + VERIFY_TTL_HOURS * 3600000);
@@ -126,7 +130,7 @@ router.post('/', signupLimiter, async (req, res, next) => {
       });
     }
 
-    const verifyUrl = `${publicOrigin(req)}/verify?token=${raw}`;
+    const verifyUrl = `${publicOrigin()}/verify?token=${raw}`;
 
     await sendVerificationEmail({
       to: clean,
@@ -152,6 +156,9 @@ router.post('/verify', verifyLimiter, async (req, res, next) => {
     const request = await prisma.signupRequest.findFirst({ where: { verifyTokenHash: hashToken(token) } });
     if (!request) return res.status(404).json({ error: 'That verification link is not valid. Request a new one.' });
     if (request.status === 'Converted') return res.status(409).json({ error: 'This request has already been converted to an account.' });
+    // A declined request stays declined: confirming its address put it back
+    // in the review queue.
+    if (request.status === 'Rejected') return res.status(409).json({ error: 'This request is no longer open. Request access again if you still need an account.' });
     if (request.verifiedAt) {
       return res.json({ verified: true, alreadyVerified: true, email: request.email, message: 'Your email is already confirmed. We will be in touch once your account is ready.' });
     }
@@ -193,7 +200,7 @@ router.post('/resend', signupLimiter, async (req, res, next) => {
     });
 
     const payload = genericAccepted(clean);
-    const verifyUrl = `${publicOrigin(req)}/verify?token=${raw}`;
+    const verifyUrl = `${publicOrigin()}/verify?token=${raw}`;
     await sendVerificationEmail({ to: clean, firstName: request.firstName, verifyUrl });
     if (process.env.NODE_ENV !== 'production') {
       payload.devVerifyUrl = verifyUrl;
@@ -308,7 +315,7 @@ router.post('/requests/:id/approve', authenticate, requirePermission('users', 'f
 
     await req.audit({ action: 'update', module: 'signup', recordId: request.id, details: `Signup approved and invite issued: ${request.email}` });
 
-    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
     await sendInviteEmail({
       to: request.email,
       firstName: request.firstName,
@@ -397,7 +404,7 @@ router.post('/invites', authenticate, requirePermission('users', 'full'), auditM
 
     await req.audit({ action: 'create', module: 'signup', recordId: invite.id, details: `Invite sent: ${clean}` });
 
-    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
     await sendInviteEmail({ to: clean, firstName, inviteUrl, message });
     const payload = { id: invite.id, email: invite.email, expiresAt: invite.expiresAt, status: invite.status };
     if (process.env.NODE_ENV !== 'production') payload.devInviteUrl = inviteUrl;
@@ -437,7 +444,7 @@ router.post('/invites/:id/resend', authenticate, requirePermission('users', 'ful
     });
 
     const payload = { resent: true, resendCount: updated.resendCount, expiresAt: updated.expiresAt };
-    const inviteUrl = `${publicOrigin(req)}/accept-invite?token=${raw}`;
+    const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
     await sendInviteEmail({
       to: invite.email,
       firstName: invite.firstName,

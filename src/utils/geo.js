@@ -35,7 +35,11 @@ function isValidPoint(point) {
 /* Accept {lat,lng}, {latitude,longitude} or [lng,lat] GeoJSON order. */
 function toPoint(input) {
   if (Array.isArray(input) && input.length >= 2) {
-    return { lat: Number(input[1]), lng: Number(input[0]) };
+    // Checked like the object forms: a GeoJSON file in a projected CRS
+    // (metres, not degrees) imported as polygons of impossible points.
+    const lat = Number(input[1]);
+    const lng = Number(input[0]);
+    return isValidLatitude(lat) && isValidLongitude(lng) ? { lat, lng } : null;
   }
   if (!input || typeof input !== 'object') return null;
   const lat = input.lat !== undefined ? Number(input.lat) : Number(input.latitude);
