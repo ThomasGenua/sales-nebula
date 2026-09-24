@@ -160,10 +160,12 @@ function createApp(rawPrisma) {
         return res.status(400).json({ error: 'firstName, lastName, and company are required' });
       }
 
-      // Check for duplicate
-      const existing = email ? await prisma.lead.findFirst({ where: { email } }) : null;
+      // Check for duplicate: a live lead only, so a lead in the recycle bin does
+      // not turn the form away; and without its id, which is no business of an
+      // anonymous caller.
+      const existing = email ? await prisma.lead.findFirst({ where: { email, deletedAt: null }, select: { id: true } }) : null;
       if (existing) {
-        return res.status(409).json({ error: 'A lead with this email already exists', leadId: existing.id });
+        return res.status(409).json({ error: 'A lead with this email already exists' });
       }
 
       const lead = await prisma.lead.create({
@@ -345,7 +347,9 @@ function createApp(rawPrisma) {
       await prisma.$queryRaw`SELECT 1`;
       services.database = { status: 'up' };
     } catch (e) {
-      services.database = { status: 'down', error: e.message };
+      // Public endpoint: a connection error names internal hosts, so the
+      // detail stays in development.
+      services.database = { status: 'down', ...(isProd ? {} : { error: e.message }) };
       checks.status = 'degraded';
     }
 
