@@ -227,13 +227,26 @@ module.exports = createCrudRouter('deal', 'deals', {
     router.post('/:id/clone', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const source = await prisma.deal.findUnique({
-          where: { id: req.params.id },
+        // A live deal, as GET /:id answers for. A deleted one was cloned,
+        // deletedAt and all, into a deleted copy.
+        const source = await prisma.deal.findFirst({
+          where: { id: req.params.id, deletedAt: null },
           include: { lineItems: true },
         });
         if (!source) return res.status(404).json({ error: 'Not found' });
 
-        const { id, createdAt, updatedAt, lineItems, stageHistory, ...data } = source;
+        const { id, createdAt, updatedAt, deletedAt, lineItems, stageHistory, ...data } = source;
+        // The copy links only to records the caller can see: it took the
+        // source's account, contact and partner, and its items' products,
+        // unchecked. A hidden link is dropped rather than refusing the clone,
+        // as for an account: the caller did not send it and cannot change it.
+        const seen = new Map();
+        for (const key of Object.keys(data)) {
+          if (await linkRefusal(req, 'deal', { [key]: data[key] }, null, seen)) data[key] = null;
+        }
+        for (const item of lineItems) {
+          if (await linkRefusal(req, 'dealLineItem', { productId: item.productId }, null, seen)) item.productId = null;
+        }
         data.name = `${data.name} (Copy)`;
         data.stage = 'Qualification';
         data.closeDate = new Date(Date.now() + 30 * 86400000); // 30 days out
