@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -56,7 +57,7 @@ router.post('/', authenticate, requirePermission('surveys', 'edit'), auditMiddle
 router.put('/:id', authenticate, requirePermission('surveys', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const survey = await prisma.survey.update({ where: { id: req.params.id }, data: req.body });
+    const survey = await prisma.survey.update({ where: { id: req.params.id }, data: columnsFrom('survey', req.body) });
     res.json(survey);
   } catch (err) { next(err); }
 });
@@ -98,11 +99,14 @@ router.post('/:id/respond', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const survey = await prisma.survey.findUnique({ where: { id: req.params.id }, include: { questions: true } });
     if (!survey || survey.status !== 'Active') return res.status(404).json({ error: 'Survey not available' });
-    const { contactId, answers } = req.body; // answers: [{ questionId, value }]
+    const { answers } = req.body; // answers: [{ questionId, value }]
     if (!answers?.length) return res.status(400).json({ error: 'answers required' });
+    // Not filed on a contact. The link names the survey, not who answers it,
+    // and anyone may post here, so the body's contactId let anyone put
+    // answers on any customer's record.
     const response = await prisma.surveyResponse.create({
       data: {
-        surveyId: req.params.id, contactId: contactId || null, completedAt: new Date(),
+        surveyId: req.params.id, contactId: null, completedAt: new Date(),
         answers: { create: answers.map(a => ({ questionId: a.questionId, value: String(a.value), numericValue: parseFloat(a.value) || null })) },
       },
       include: { answers: true },

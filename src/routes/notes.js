@@ -149,21 +149,6 @@ router.post('/bulk/delete', authenticate, auditMiddleware, async (req, res, next
 // Totals from the module's own table.
 summaryRoute(router, { module: 'notes', model: 'note' });
 
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "notes" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'notes', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});
-
 /**
  * Catch-all record routes, registered last on purpose.
  *
@@ -180,7 +165,8 @@ router.get('/:module/:recordId', async (req, res, next) => {
     const { module, recordId } = req.params;
     if (!(await readableRecord(req, res, module, recordId))) return;
     const notes = await prisma.note.findMany({
-      where: { module, recordId },
+      // Live notes only: ones bulk-deleted (soft) came back with the rest.
+      where: { module, recordId, deletedAt: null },
       orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
     });
 

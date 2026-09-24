@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -191,7 +192,7 @@ router.put('/fields/:id', authenticate, requirePermission('admin', 'edit'), audi
     const existing = await prisma.customFieldDef.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!existing) return res.status(404).json({ error: 'Field not found' });
 
-    const { id, createdAt, module, name, picklist, storage, ...data } = req.body;
+    const { module, name, picklist, storage, ...data } = columnsFrom('customFieldDef', req.body);
 
     // Changing type after data exists would strand values in the wrong column
     if (data.fieldType && data.fieldType !== existing.fieldType) {
@@ -495,8 +496,7 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), auditMid
 router.put('/rules/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
-    const rule = await prisma.validationRule.update({ where: { id: req.params.id }, data });
+    const rule = await prisma.validationRule.update({ where: { id: req.params.id }, data: columnsFrom('validationRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
 });

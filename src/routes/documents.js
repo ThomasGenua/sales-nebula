@@ -1,10 +1,11 @@
 const { Router } = require('express');
+const fs = require('fs');
 const multer = require('multer');
 const path = require('path');
 const { v4: uuid } = require('uuid');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { summaryRoute } = require('../utils/moduleStatus');
 
@@ -37,6 +38,14 @@ router.post('/upload', authenticate, requirePermission('documents', 'edit'), aud
   try {
     const prisma = req.app.locals.prisma;
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    // Only on records the caller can see. The keys were stored as sent, so a
+    // file could be filed on anyone's deal, account or contact. Multer has
+    // already saved it, so a refused upload is removed.
+    const linkProblem = await linkRefusal(req, 'document', { dealId: req.body.dealId, accountId: req.body.accountId, contactId: req.body.contactId });
+    if (linkProblem) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+    }
     const doc = await prisma.document.create({
       data: {
         name: req.body.name || req.file.originalname, fileName: req.file.filename,
@@ -167,18 +176,3 @@ module.exports = router;
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'documents', model: 'document' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "documents" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'documents', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

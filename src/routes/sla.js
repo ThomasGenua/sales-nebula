@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
+const { columnsFrom } = require('../utils/modelFields');
 const {
   DEFAULT_SCHEDULE, DEFAULT_SLA_TARGETS,
   isWithinBusinessHours, businessMinutesBetween, businessHoursBetween,
@@ -112,7 +113,7 @@ router.post('/profiles', authenticate, requirePermission('admin', 'edit'), audit
 router.put('/profiles/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
+    const data = columnsFrom('businessHours', req.body);
     if (data.schedule) {
       data.schedule = normalizeSchedule(data.schedule);
       for (const day of data.schedule) {

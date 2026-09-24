@@ -17,6 +17,7 @@ const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
 const { validateBody } = require('./utils/integrity');
+const { guardNestedWrites } = require('./utils/nestedWriteGuard');
 
 let helmet, hpp, compression;
 try { helmet = require('helmet'); } catch (e) { helmet = null; }
@@ -47,7 +48,10 @@ function inlineScriptHashes(spaDir) {
   }
 }
 
-function createApp(prisma) {
+function createApp(rawPrisma) {
+  // Every query the app makes goes through the guard: no write reaches users,
+  // roles or access settings by way of another table (utils/nestedWriteGuard).
+  const prisma = guardNestedWrites(rawPrisma);
   const app = express();
   const isTest = process.env.NODE_ENV === 'test';
   const isProd = process.env.NODE_ENV === 'production';

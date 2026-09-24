@@ -20,7 +20,7 @@ router.use(authenticate, auditMiddleware);
 const { Prisma } = require('@prisma/client');
 const { permits } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
-const { modelHasField } = require('../utils/modelFields');
+const { modelHasField, columnsFrom } = require('../utils/modelFields');
 
 /**
  * Pick the fields that stand in for a related record's label.
@@ -443,9 +443,14 @@ router.put('/:id', async (req, res, next) => {
     if (!existing) return res.status(404).json({ error: 'Report not found' });
     if (existing.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can edit' });
 
+    // The report's own columns, and still its owner's. The body went to Prisma
+    // whole: `createdBy: { update: { role: … } }` let any user who had made a
+    // report rename their own role to Admin.
+    const data = columnsFrom('report', req.body);
+    delete data.createdById;
     const report = await prisma.report.update({
       where: { id: req.params.id },
-      data: req.body,
+      data,
       include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
     });
     res.json(report);

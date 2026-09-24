@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { canReach, reachableWhere } = require('../middleware/access');
 const { crudModelFor } = require('../utils/crud');
-const { pickModelFields } = require('../utils/modelFields');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -28,15 +28,35 @@ async function reachableIds(req, module, modelName, recordIds, minLevel) {
   return new Set(found.map(r => r.id));
 }
 
+/**
+ * Tag id -> how many live records carrying it the caller can see, in modules
+ * they may read. Usage counted every assignment, so a tag's count told anyone
+ * signed in about records in modules and rows they cannot open.
+ */
+async function visibleUsage(req) {
+  const byModule = new Map(); // module -> assignments
+  for (const a of await req.app.locals.prisma.tagAssignment.findMany({ select: { tagId: true, module: true, recordId: true } })) {
+    if (!byModule.has(a.module)) byModule.set(a.module, []);
+    byModule.get(a.module).push(a);
+  }
+  const counts = new Map();
+  for (const [module, assignments] of byModule) {
+    const modelName = crudModelFor(module);
+    if (!modelName || !permits(req, module, 'read')) continue;
+    const visible = await reachableIds(req, module, modelName, [...new Set(assignments.map(a => a.recordId))], 'Read');
+    for (const a of assignments) if (visible.has(a.recordId)) counts.set(a.tagId, (counts.get(a.tagId) || 0) + 1);
+  }
+  return counts;
+}
+
 // LIST all tags
+// Tag names are for anyone signed in; the usage count is of the records the
+// caller can see (see visibleUsage).
 router.get('/', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const tags = await prisma.tag.findMany({
-      orderBy: { name: 'asc' },
-      include: { _count: { select: { assignments: true } } },
-    });
-    res.json({ data: tags.map(t => ({ ...t, usageCount: t._count.assignments })) });
+    const [tags, usage] = await Promise.all([prisma.tag.findMany({ orderBy: { name: 'asc' } }), visibleUsage(req)]);
+    res.json({ data: tags.map(t => ({ ...t, usageCount: usage.get(t.id) || 0 })) });
   } catch (err) { next(err); }
 });
 
@@ -55,8 +75,7 @@ router.post('/', requirePermission('settings', 'edit'), async (req, res, next) =
 router.put('/:id', requirePermission('settings', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, ...rest } = req.body || {};
-    const tag = await prisma.tag.update({ where: { id: req.params.id }, data: pickModelFields('tag', rest).data });
+    const tag = await prisma.tag.update({ where: { id: req.params.id }, data: columnsFrom('tag', req.body) });
     res.json(tag);
   } catch (err) { next(err); }
 });
@@ -156,15 +175,13 @@ router.get('/search/:module/:tagId', async (req, res, next) => {
 module.exports = router;
 
 // Tag usage stats
+// Counted every tagged record, in every module, for anyone signed in; now the
+// records the caller can see (see visibleUsage).
 router.get('/stats', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const tags = await prisma.tag.findMany({ where: { deletedAt: null } });
-    const stats = [];
-    for (const tag of tags) {
-      const count = await prisma.tagAssignment.count({ where: { tagId: tag.id } }).catch(() => 0);
-      stats.push({ id: tag.id, name: tag.name, color: tag.color, usageCount: count });
-    }
+    const [tags, usage] = await Promise.all([prisma.tag.findMany({ where: { deletedAt: null } }), visibleUsage(req)]);
+    const stats = tags.map(tag => ({ id: tag.id, name: tag.name, color: tag.color, usageCount: usage.get(tag.id) || 0 }));
     stats.sort((a, b) => b.usageCount - a.usageCount);
     res.json(stats);
   } catch (err) { next(err); }

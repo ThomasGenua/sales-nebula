@@ -1,6 +1,8 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { crudModelFor } = require('../utils/crud');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -75,6 +77,10 @@ router.delete('/rules/:id', requirePermission('settings', 'full'), async (req, r
 // ─── RECORD-LEVEL SHARING ───
 
 // Share a specific record with a user
+// Only a live record the caller may change, with an active user, at no more
+// than the caller holds: sharing takes edit on the module and Edit on the
+// record, and granting full takes full on both. This took any module, record,
+// user and level from anyone signed in.
 router.post('/records', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -82,12 +88,24 @@ router.post('/records', async (req, res, next) => {
     if (!module || !recordId || !userId) {
       return res.status(400).json({ error: 'module, recordId, userId required' });
     }
+    const level = String(accessLevel || 'read').toLowerCase();
+    if (!['read', 'edit', 'full'].includes(level)) return res.status(400).json({ error: 'accessLevel must be read, edit or full' });
+    const modelName = typeof module === 'string' ? crudModelFor(module) : null;
+    if (!modelName) return res.status(400).json({ error: `Sharing is not available for ${module}` });
+    if (!permits(req, module, level === 'full' ? 'full' : 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+    const record = await prisma[modelName].findFirst({
+      where: await reachableWhere(req, module, modelName, { id: String(recordId) }, level === 'full' ? 'Full' : 'Edit'),
+      select: { id: true },
+    });
+    if (!record) return res.status(404).json({ error: 'Not found' });
+    const user = await prisma.user.findFirst({ where: { id: String(userId), active: true }, select: { id: true } });
+    if (!user) return res.status(400).json({ error: 'userId does not name an active user' });
 
     const share = await prisma.recordShare.create({
       data: {
-        module, recordId,
-        sharedWithId: userId,
-        accessLevel: accessLevel || 'read',
+        module, recordId: record.id,
+        sharedWithId: user.id,
+        accessLevel: level,
         sharedById: req.userId,
       },
     });

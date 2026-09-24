@@ -1,6 +1,6 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 
 /**
@@ -195,6 +195,10 @@ module.exports = createCrudRouter('activity', 'activities', {
       try {
         const prisma = req.app.locals.prisma;
         const { contactId, dealId, accountId, subject, description, duration, result } = req.body;
+        // Only on records the caller can see. The keys were stored as sent, so
+        // a call could be filed on anyone's deal and its name read back.
+        const linkProblem = await linkRefusal(req, 'activity', { contactId, dealId, accountId });
+        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
         const activity = await prisma.activity.create({
           data: {
             type: 'Call',
@@ -221,6 +225,9 @@ module.exports = createCrudRouter('activity', 'activities', {
       try {
         const prisma = req.app.locals.prisma;
         const { contactId, dealId, accountId, subject, description, duration, date, attendees } = req.body;
+        // Only on records the caller can see, as for log-call.
+        const linkProblem = await linkRefusal(req, 'activity', { contactId, dealId, accountId });
+        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
         const activity = await prisma.activity.create({
           data: {
             type: 'Meeting',

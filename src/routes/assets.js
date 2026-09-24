@@ -1,6 +1,7 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { statusRoutes } = require('../utils/moduleStatus');
 
@@ -56,6 +57,14 @@ router.post('/:id/transfer', authenticate, requirePermission('assets', 'edit'), 
   try {
     const prisma = req.app.locals.prisma;
     const { accountId, contactId } = req.body;
+    // Only to an account and contact the caller can see. Asset keeps both as
+    // plain columns, which linkRefusal cannot check; they were stored as sent,
+    // and the asset's include read back the account's and contact's names.
+    for (const [key, module, model, value] of [['accountId', 'accounts', 'account', accountId], ['contactId', 'contacts', 'contact', contactId]]) {
+      if (!value) continue;
+      const found = permits(req, module, 'read') && await prisma[model].findFirst({ where: await reachableWhere(req, module, model, { id: String(value) }), select: { id: true } });
+      if (!found) return res.status(400).json({ error: `${key} does not name a ${model} you can see`, code: 'LINK_NOT_VISIBLE' });
+    }
     const asset = await prisma.asset.update({
       where: { id: req.params.id },
       data: { ...(accountId && { accountId }), ...(contactId && { contactId }) },
@@ -106,12 +115,15 @@ router.get('/:id/service-history', authenticate, async (req, res, next) => {
 });
 
 // Bulk status update
+// Assets the caller could edit one at a time; this set any asset's status.
 router.post('/bulk/status', authenticate, requirePermission('assets', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const result = await prisma.asset.updateMany({ where: { id: { in: ids } }, data: { status } });
+    if (!Array.isArray(ids) || !ids.length || typeof status !== 'string' || !status) return res.status(400).json({ error: 'ids and status required' });
+    if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
+    const where = await reachableWhere(req, 'assets', 'asset', { id: { in: ids.map(String) } }, 'Edit');
+    const result = await prisma.asset.updateMany({ where, data: { status } });
     res.json({ updated: result.count });
   } catch (err) { next(err); }
 });

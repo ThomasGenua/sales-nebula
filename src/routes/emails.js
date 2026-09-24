@@ -2,6 +2,8 @@ const { Router } = require('express');
 const { sendEmail } = require('../services/mailer');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { linkRefusal } = require('../middleware/access');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -46,7 +48,13 @@ router.get('/:id', requirePermission('emails', 'read'), async (req, res, next) =
 router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const email = await prisma.email.create({ data: { ...req.body, status: 'draft' } });
+    // The email's own columns, linked only to a contact or deal the caller can
+    // see: the body went to Prisma whole, so `deal: { update: … }` rewrote a
+    // deal and, through its owner, reached users and roles.
+    const data = { ...columnsFrom('email', req.body), status: 'draft' };
+    const linkProblem = await linkRefusal(req, 'email', data);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+    const email = await prisma.email.create({ data });
     res.status(201).json(email);
   } catch (err) { next(err); }
 });
@@ -58,6 +66,8 @@ router.post('/send', requirePermission('emails', 'edit'), async (req, res, next)
     // Spreading req.body straight into create let any unknown key 500 the
     // request, and any known one (opened, openedAt, id) be set by the caller.
     const { subject, body, from, to, toEmail, toName, contactId, dealId, templateId } = req.body || {};
+    const linkProblem = await linkRefusal(req, 'email', { contactId, dealId, templateId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const recipient = toEmail || to;
     // Actually hand it to a transport, and record what came back rather than
     // asserting 'sent' regardless.
@@ -119,7 +129,11 @@ router.post('/:id/track-open', async (req, res, next) => {
 router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, ...data } = req.body;
+    const current = await prisma.email.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    const data = columnsFrom('email', req.body);
+    const linkProblem = await linkRefusal(req, 'email', data, current);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const email = await prisma.email.update({ where: { id: req.params.id }, data });
     res.json(email);
   } catch (err) { next(err); }
@@ -161,7 +175,7 @@ router.get('/templates/all', requirePermission('emails', 'read'), async (req, re
 router.post('/templates', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const template = await prisma.emailTemplate.create({ data: req.body });
+    const template = await prisma.emailTemplate.create({ data: columnsFrom('emailTemplate', req.body) });
     res.status(201).json(template);
   } catch (err) { next(err); }
 });
@@ -169,8 +183,7 @@ router.post('/templates', requirePermission('emails', 'edit'), async (req, res, 
 router.put('/templates/:id', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, ...data } = req.body;
-    const template = await prisma.emailTemplate.update({ where: { id: req.params.id }, data });
+    const template = await prisma.emailTemplate.update({ where: { id: req.params.id }, data: columnsFrom('emailTemplate', req.body) });
     res.json(template);
   } catch (err) { next(err); }
 });

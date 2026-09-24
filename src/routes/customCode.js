@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
-const { looksLikeId } = require('../utils/modelFields');
+const { looksLikeId, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -32,7 +32,7 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
 router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const script = await prisma.customCode.update({ where: { id: req.params.id }, data: { ...req.body, version: { increment: 1 } } });
+    const script = await prisma.customCode.update({ where: { id: req.params.id }, data: { ...columnsFrom('customCode', req.body), version: { increment: 1 } } });
     res.json(script);
   } catch (err) { next(err); }
 });
@@ -138,18 +138,3 @@ statusRoutes(router, { module: 'customCode', model: 'customCode' });
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'customCode', model: 'customCode' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "customCode" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'customCode', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

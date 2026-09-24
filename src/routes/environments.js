@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes } = require('../utils/moduleStatus');
-const { looksLikeId } = require('../utils/modelFields');
+const { looksLikeId, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -33,7 +33,7 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
 });
 
 router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const env = await prisma.environment.update({ where: { id: req.params.id }, data: req.body }); res.json(env); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const env = await prisma.environment.update({ where: { id: req.params.id }, data: columnsFrom('environment', req.body) }); res.json(env); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'), async (req, res, next) => {

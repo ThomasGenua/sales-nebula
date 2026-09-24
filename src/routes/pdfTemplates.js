@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
+const { columnsFrom } = require('../utils/modelFields');
 
 const {
   render, buildDocument, buildContext, validateTemplate,
@@ -124,7 +125,7 @@ router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddlewa
 router.put('/:id', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, renders, mergeFields, validation: _v, ...data } = req.body;
+    const data = columnsFrom('pdfTemplate', req.body);
 
     if (data.bodyHtml) {
       const v = validateTemplate(data.bodyHtml);

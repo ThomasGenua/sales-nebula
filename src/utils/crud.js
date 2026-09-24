@@ -4,9 +4,10 @@ const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
 const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
-const { moduleAccess, recordAccess, reachableWhere } = require('../middleware/access');
+const { moduleAccess, recordAccess, reachableWhere, linkRefusal } = require('../middleware/access');
 const {
   pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
+  scalarWhere, scalarOrderBy,
 } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
 const { createNumbered } = require('./numbering');
@@ -18,6 +19,11 @@ const {
 // check a record by module name (the WebSocket's record rooms).
 const crudModels = new Map();
 const crudModelFor = moduleName => crudModels.get(moduleName) || null;
+/** The CRUD module whose records are this model's, or null. */
+const crudModuleFor = modelName => {
+  for (const [module, model] of crudModels) if (model.toLowerCase() === String(modelName).toLowerCase()) return module;
+  return null;
+};
 
 /**
  * Creates a standard CRUD router for a Prisma model.
@@ -100,11 +106,11 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         where = { ...where, ...searchFilter(search) };
       }
 
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value && value !== 'All') {
-          where[key] = value;
-        }
-      });
+      // Filters on the record's own columns, with plain values. Any query key
+      // went into the where clause, relations included, which reached the
+      // columns of related records.
+      const wanted = Object.fromEntries(Object.entries(filters).filter(([, value]) => value && value !== 'All'));
+      where = { ...where, ...scalarWhere(modelName, wanted) };
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
       const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
@@ -116,7 +122,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       const [records, total] = await Promise.all([
         prisma[modelName].findMany({
           where, include,
-          orderBy: sortBy ? { [sortBy]: sortDir } : orderBy,
+          orderBy: scalarOrderBy(modelName, sortBy, sortDir) || orderBy,
           skip, take,
         }),
         prisma[modelName].count({ where }),
@@ -205,6 +211,8 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // keys go too; a router whose records take nested rows (order items)
       // builds them itself, from checked fields, in nestedWrites.
       const { data: pickedData, ignored } = pickModelFields(modelName, data);
+      const linkProblem = await linkRefusal(req, modelName, pickedData);
+      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
       const createData = nestedWrites ? { ...pickedData, ...(await nestedWrites(req, 'create')) } : pickedData;
       const record = numbering
         ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
@@ -286,6 +294,8 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       }
 
       const { data: updateData } = pickModelFields(modelName, data);
+      const linkProblem = await linkRefusal(req, modelName, updateData, oldRecord);
+      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
       const record = await prisma[modelName].update({
         where: { id: req.params.id },
         data: updateData,
@@ -406,6 +416,8 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       const changes = editableFields(modelName, fromClient(data));
       if (!Object.keys(changes).length) return res.status(400).json({ error: 'No fields in data that a bulk update may change' });
+      const linkProblem = await linkRefusal(req, modelName, changes);
+      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
       const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) } }, 'Edit');
       const result = await prisma[modelName].updateMany({ where, data: changes });
@@ -420,4 +432,4 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   return router;
 }
 
-module.exports = { createCrudRouter, crudModelFor };
+module.exports = { createCrudRouter, crudModelFor, crudModuleFor };

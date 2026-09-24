@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields, modelHasField } = require('../utils/modelFields');
 
 const router = Router();
@@ -51,6 +51,9 @@ router.post('/update', async (req, res, next) => {
     if (!Object.keys(data).length) {
       return res.status(400).json({ error: 'updates object required' });
     }
+    // A link set on every record must name one the caller can see.
+    const linkProblem = await linkRefusal(req, model, data);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     const result = await prisma[model].updateMany({
       where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),

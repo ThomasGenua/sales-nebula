@@ -1,5 +1,6 @@
 const { Router } = require('express');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
 
 const router = Router();
 
@@ -27,13 +28,29 @@ function displayName(record) {
     || null;
 }
 
-async function resolveName(prisma, module, recordId) {
+// Modules whose records answer to another module's permission.
+const ACCESS_FOR = { prospects: 'leads', bugs: 'cases' };
+
+/**
+ * The live record, when the caller may read it; null otherwise. Any id's
+ * record was read for anyone signed in, so favouriting or tracking an id, or
+ * /trending for every record anyone had viewed, gave back its name.
+ */
+async function visibleRecord(req, module, recordId) {
   const model = MODEL_FOR[module];
-  if (!model) return null;
+  const access = ACCESS_FOR[module] || module;
+  if (!model || !permits(req, access, 'read')) return null;
   try {
-    const record = await prisma[model].findUnique({ where: { id: recordId } });
-    return displayName(record);
+    // A bug has no row security of its own: cases read sees every live one.
+    const where = module === 'bugs'
+      ? { id: String(recordId), deletedAt: null }
+      : await reachableWhere(req, access, model, { id: String(recordId) });
+    return await req.app.locals.prisma[model].findFirst({ where });
   } catch { return null; }
+}
+
+async function resolveName(req, module, recordId) {
+  return displayName(await visibleRecord(req, module, recordId));
 }
 
 // ── FAVORITES ─────────────────────────────────────────────────────────
@@ -75,7 +92,7 @@ router.post('/', authenticate, async (req, res, next) => {
     const count = await prisma.favorite.count({ where: { userId: req.user.id } });
     if (count >= 300) return res.status(400).json({ error: 'Favorite limit reached (300). Remove some first.' });
 
-    const name = recordName || await resolveName(prisma, module, recordId);
+    const name = recordName || await resolveName(req, module, recordId);
     const last = await prisma.favorite.findFirst({ where: { userId: req.user.id }, orderBy: { sortOrder: 'desc' } });
 
     const favorite = await prisma.favorite.create({
@@ -102,7 +119,7 @@ router.post('/toggle', authenticate, async (req, res, next) => {
       return res.json({ favorited: false, module, recordId });
     }
 
-    const name = recordName || await resolveName(prisma, module, recordId);
+    const name = recordName || await resolveName(req, module, recordId);
     const favorite = await prisma.favorite.create({
       data: { userId: req.user.id, module, recordId, recordName: name, recordUrl: `/${module}/${recordId}` },
     });
@@ -181,7 +198,7 @@ router.post('/track', authenticate, async (req, res, next) => {
     if (!module || !recordId) return res.status(400).json({ error: 'module and recordId required' });
     if (!TRACKED_MODULES.includes(module)) return res.json({ tracked: false, reason: 'module not tracked' });
 
-    const name = recordName || await resolveName(prisma, module, recordId);
+    const name = recordName || await resolveName(req, module, recordId);
     const existing = await prisma.recentlyViewed.findFirst({ where: { userId: req.user.id, module, recordId } });
 
     if (existing) {
@@ -253,9 +270,13 @@ router.get('/trending', authenticate, async (req, res, next) => {
       take: Math.min(parseInt(req.query.limit, 10) || 20, 100),
     });
 
+    // Only records the caller may open. This listed, and named, every record
+    // anyone had viewed; modules with no record model still show unnamed.
     const enriched = [];
     for (const s of stats) {
-      enriched.push({ ...s, recordName: await resolveName(prisma, s.module, s.recordId) });
+      if (!MODEL_FOR[s.module]) { enriched.push({ ...s, recordName: null }); continue; }
+      const record = await visibleRecord(req, s.module, s.recordId);
+      if (record) enriched.push({ ...s, recordName: displayName(record) });
     }
     res.json(enriched);
   } catch (err) { next(err); }

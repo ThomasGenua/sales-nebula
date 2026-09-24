@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
 const { createNumbered, CONTRACT_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = createCrudRouter('contract', 'contracts', {
   include: {
@@ -54,7 +55,9 @@ router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), 
     const { id, createdAt, updatedAt, contractNumber, ...contractData } = original;
     const amendment = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
-        ...contractData, ...req.body,
+        // The amendment's own columns from the body: relation keys were nested
+        // writes into the account and its deals.
+        ...contractData, ...columnsFrom('contract', req.body),
         name: `${original.name} (Amendment)`,
         status: 'Draft', parentContractId: original.id,
         version: (original.version || 1) + 1,
@@ -147,18 +150,3 @@ module.exports = router;
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'contracts', model: 'contract' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "contracts" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'contracts', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

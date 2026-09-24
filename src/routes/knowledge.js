@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -79,7 +80,8 @@ router.get('/slug/:slug', requirePermission('knowledge', 'read'), async (req, re
 router.post('/', requirePermission('knowledge', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const data = { ...req.body, authorId: req.userId };
+    // The article's own columns: relation keys in the body were nested writes.
+    const data = { ...columnsFrom('knowledgeArticle', req.body), authorId: req.userId };
     // Auto-generate slug from title
     if (!data.slug) {
       data.slug = data.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -97,7 +99,8 @@ router.post('/', requirePermission('knowledge', 'edit'), async (req, res, next) 
 router.put('/:id', requirePermission('knowledge', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, author, attachments, related, _count, ...data } = req.body;
+    const data = columnsFrom('knowledgeArticle', req.body);
+    delete data.authorId;
     if (data.status === 'Published' && !data.publishedAt) data.publishedAt = new Date();
     const article = await prisma.knowledgeArticle.update({ where: { id: req.params.id }, data });
     res.json(article);
@@ -181,7 +184,7 @@ router.get('/categories/all', requirePermission('knowledge', 'read'), async (req
 router.post('/categories', requirePermission('knowledge', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const cat = await prisma.knowledgeCategory.create({ data: req.body });
+    const cat = await prisma.knowledgeCategory.create({ data: columnsFrom('knowledgeCategory', req.body) });
     res.status(201).json(cat);
   } catch (err) { next(err); }
 });

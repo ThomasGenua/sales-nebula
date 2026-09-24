@@ -4,6 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -131,7 +132,8 @@ router.put('/config', authenticate, requirePermission('admin', 'full'), auditMid
   try {
     const prisma = req.app.locals.prisma;
     const existing = await prisma.emailToCaseConfig.findFirst();
-    const config = existing ? await prisma.emailToCaseConfig.update({ where: { id: existing.id }, data: req.body }) : await prisma.emailToCaseConfig.create({ data: req.body });
+    const data = columnsFrom('emailToCaseConfig', req.body);
+    const config = existing ? await prisma.emailToCaseConfig.update({ where: { id: existing.id }, data }) : await prisma.emailToCaseConfig.create({ data });
     await req.audit({ action: 'update', module: 'emailToCase', recordId: config.id, details: 'Config updated' });
     res.json(config);
   } catch (err) { next(err); }
@@ -162,18 +164,3 @@ module.exports = router;
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'cases', model: 'case', where: { origin: 'Email' } });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "emailToCase" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'emailToCase', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

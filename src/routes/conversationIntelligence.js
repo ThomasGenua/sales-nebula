@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { canReach } = require('../middleware/access');
+const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { modelHasField } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
@@ -17,6 +17,30 @@ const live = modelHasField('callRecording', 'deletedAt') ? { deletedAt: null } :
  */
 async function reachesDeal(req, dealId, level = 'read') {
   return !!dealId && permits(req, 'deals', level) && canReach(req, 'deals', 'deal', dealId, level === 'edit' ? 'Edit' : 'Read');
+}
+
+// A recording's keys to other modules' records. CallRecording declares no
+// relations, so linkRefusal, which follows the schema's, finds none of them.
+const LINKS = [['dealId', 'deals', 'deal'], ['contactId', 'contacts', 'contact'], ['accountId', 'accounts', 'account']];
+
+/**
+ * Why `data` may not link a recording to the records its keys name, or null:
+ * linkRefusal, then each of LINKS as linkRefusal checks a declared key, a
+ * live record in a module the caller may read that row security shows them.
+ */
+async function recordingLinkRefusal(req, data) {
+  const refusal = await linkRefusal(req, 'callRecording', data);
+  if (refusal) return refusal;
+  for (const [key, module, model] of LINKS) {
+    const value = data[key];
+    if (value === undefined || value === null || value === '') continue;
+    const found = permits(req, module, 'read') && await req.app.locals.prisma[model].findFirst({
+      where: await reachableWhere(req, module, model, { id: String(value) }),
+      select: { id: true },
+    });
+    if (!found) return `${key} does not name a ${module.replace(/s$/, '')} you can see`;
+  }
+  return null;
 }
 
 // Calls and their transcripts belong to whoever made them. These listed,
@@ -47,6 +71,10 @@ router.post('/recordings', authenticate, auditMiddleware, async (req, res, next)
     const prisma = req.app.locals.prisma;
     const { title, duration, dealId, contactId, participants, transcript } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
+    // Its own columns, as the caller's recording, linked only to records they
+    // can see: it could be filed on anyone's deal or contact.
+    const refusal = await recordingLinkRefusal(req, { dealId, contactId });
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     const recording = await prisma.callRecording.create({
       data: { title, duration: duration || 0, dealId, contactId, userId: req.user.id, participants: participants || [], transcription: transcript, status: transcript ? 'Transcribed' : 'Uploaded' },
     });
@@ -150,6 +178,12 @@ router.post('/dialer/call', authenticate, auditMiddleware, async (req, res, next
     const prisma = req.app.locals.prisma;
     const { contactId, phone } = req.body;
     if (!phone && !contactId) return res.status(400).json({ error: 'phone or contactId required' });
+    // A contact it names, whose number it dials and on whom the call is filed,
+    // must be one the caller can see: any contact's number went back to
+    // anyone signed in, by id.
+    if (contactId && !(permits(req, 'contacts', 'read') && await canReach(req, 'contacts', 'contact', contactId))) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
     let phoneNumber = phone;
     if (contactId && !phone) {
       const contact = await prisma.contact.findUnique({ where: { id: contactId }, select: { phone: true } });
@@ -167,18 +201,3 @@ module.exports = router;
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'conversationIntelligence', model: 'callRecording' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "conversationIntelligence" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'conversationIntelligence', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

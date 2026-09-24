@@ -1,22 +1,30 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { canReach } = require('../middleware/access');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { createNumbered, ORDER_NUMBER, QUOTE_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
 
-/** 404 unless the caller can see the quote at :id; these reads took any quote. */
-async function visibleQuote(req, res, next) {
+/**
+ * 404 unless the caller can see (or, with 'Edit', change) the quote at :id.
+ * The reads took any quote, and the writes (approval, discount, clone,
+ * conversion) any quote id with the module permission alone. A quote has no
+ * owner or creator column, so row security reaches it through group grants,
+ * or, while the module is open, as a quote no group holds.
+ */
+const quoteReach = minLevel => async (req, res, next) => {
   try {
-    if (await canReach(req, 'quotes', 'quote', req.params.id)) return next();
+    if (await canReach(req, 'quotes', 'quote', req.params.id, minLevel)) return next();
     res.status(404).json({ error: 'Not found' });
   } catch (err) { next(err); }
-}
+};
+const visibleQuote = quoteReach('Read');
+const editableQuote = quoteReach('Edit');
 
 // Quote approvals
-router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Pending Approval', submittedAt: new Date() } });
@@ -30,7 +38,7 @@ router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'e
 });
 
 // Apply discount to all line items
-router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { discountPercent, discountReason } = req.body;
@@ -52,7 +60,7 @@ router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'ed
 });
 
 // Clone quote
-router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const original = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
@@ -73,7 +81,8 @@ router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), aud
 });
 
 // Convert quote to order
-router.post('/:id/convert-to-order', authenticate, requirePermission('orders', 'edit'), auditMiddleware, async (req, res, next) => {
+// It accepts the quote too, so it is a quote write as well as an order's.
+router.post('/:id/convert-to-order', authenticate, requirePermission('orders', 'edit'), requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const quote = await prisma.quote.findUnique({ where: { id: req.params.id }, include: { lineItems: true } });
@@ -140,14 +149,17 @@ router.get('/:id/preview', authenticate, requirePermission('quotes', 'read'), vi
 });
 
 // Quote analytics
-router.get('/analytics/overview', authenticate, async (req, res, next) => {
+// Over the live quotes the caller can see; this took a session alone and
+// counted and averaged every quote.
+router.get('/analytics/overview', authenticate, requirePermission('quotes', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const where = await reachableWhere(req, 'quotes', 'quote');
     const [total, accepted, avgValue, byStatus] = await Promise.all([
-      prisma.quote.count({ where: { deletedAt: null } }),
-      prisma.quote.count({ where: { status: 'Accepted', deletedAt: null } }),
-      prisma.quote.aggregate({ where: { deletedAt: null }, _avg: { totalAmount: true } }),
-      prisma.quote.groupBy({ by: ['status'], where: { deletedAt: null }, _count: true }),
+      prisma.quote.count({ where }),
+      prisma.quote.count({ where: { AND: [where, { status: 'Accepted' }] } }),
+      prisma.quote.aggregate({ where, _avg: { totalAmount: true } }),
+      prisma.quote.groupBy({ by: ['status'], where, _count: true }),
     ]);
     res.json({ total, accepted, acceptanceRate: total ? Math.round(accepted / total * 100) : 0, avgValue: Math.round(avgValue._avg.totalAmount || 0), byStatus: byStatus.map(s => ({ status: s.status, count: s._count })) });
   } catch (err) { next(err); }
@@ -155,18 +167,3 @@ router.get('/analytics/overview', authenticate, async (req, res, next) => {
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'quotes', model: 'quote' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "quoteExtras" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'quoteExtras', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

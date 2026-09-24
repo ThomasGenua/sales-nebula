@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { columnsFrom } = require('../utils/modelFields');
 const {
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
   applyAutoAssignRules, isAdmin,
@@ -96,7 +97,9 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
 router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, members, records, childGroups, parentGroup, roleLinks, _count, recordsByModule, ...data } = req.body;
+    // The group's own columns; members, records and links change through
+    // their own routes, and relation keys here were nested writes.
+    const data = columnsFrom('securityGroup', req.body);
 
     // Reparenting must not create a loop
     if (data.parentGroupId) {
@@ -375,8 +378,7 @@ router.post('/rules', authenticate, requirePermission('admin', 'full'), auditMid
 router.put('/rules/:ruleId', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
-    const rule = await prisma.securityGroupRule.update({ where: { id: req.params.ruleId }, data });
+    const rule = await prisma.securityGroupRule.update({ where: { id: req.params.ruleId }, data: columnsFrom('securityGroupRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
 });

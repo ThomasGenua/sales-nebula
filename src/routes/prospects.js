@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
-const { editableFields } = require('../utils/modelFields');
+const { editableFields, scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -56,6 +56,75 @@ async function isSuppressed(prisma, email) {
   } catch { return false; }
 }
 
+// ── SUPPRESSION ───────────────────────────────────────────────────────
+// Registered before /:id, which took `suppression` for a prospect id, so the
+// list never answered.
+
+// The list is people's email addresses, so it takes leads read, whose
+// permission prospects answer to, as well as campaigns read.
+router.get('/suppression', authenticate, requirePermission('campaigns', 'read'), requirePermission('leads', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { page = 1, limit = 100, search } = req.query;
+    const where = {};
+    if (search) where.email = { contains: search, mode: 'insensitive' };
+    const [data, total] = await Promise.all([
+      prisma.emailSuppression.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 500), orderBy: { suppressedAt: 'desc' } }),
+      prisma.emailSuppression.count({ where }),
+    ]);
+    res.json({ data, total, page: +page });
+  } catch (err) { next(err); }
+});
+
+router.post('/suppression', authenticate, requirePermission('campaigns', 'edit'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { emails, reason } = req.body;
+    const list = Array.isArray(emails) ? emails : (req.body.email ? [req.body.email] : []);
+    if (!list.length) return res.status(400).json({ error: 'email or emails required' });
+
+    let added = 0;
+    for (const raw of list) {
+      const email = normalizeEmail(raw);
+      // A leading @ suppresses an entire domain
+      if (!email || (!isValidEmail(email) && !email.startsWith('@'))) continue;
+      await prisma.emailSuppression.create({ data: { email, reason: reason || 'Manual', addedById: req.user.id } })
+        .then(() => added++).catch(() => {});
+    }
+
+    // Flag matching prospects so they drop out of future list builds
+    for (const raw of list) {
+      const email = normalizeEmail(raw);
+      if (email && !email.startsWith('@')) {
+        await prisma.prospect.updateMany({ where: { email }, data: { emailOptOut: true } }).catch(() => {});
+      }
+    }
+
+    await req.audit({ action: 'create', module: 'prospects', recordId: 'suppression', details: `${added} addresses suppressed` });
+    res.status(201).json({ added, requested: list.length });
+  } catch (err) { next(err); }
+});
+
+router.delete('/suppression/:id', authenticate, requirePermission('campaigns', 'edit'), async (req, res, next) => {
+  try {
+    await req.app.locals.prisma.emailSuppression.delete({ where: { id: req.params.id } });
+    res.json({ deleted: true });
+  } catch (err) { next(err); }
+});
+
+// A lookup in the same list, as the list is read: it answered for any
+// address to anyone signed in.
+router.post('/suppression/check', authenticate, requirePermission('campaigns', 'read'), requirePermission('leads', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { emails } = req.body;
+    if (!Array.isArray(emails)) return res.status(400).json({ error: 'emails array required' });
+    const result = {};
+    for (const e of emails.slice(0, 1000)) result[e] = await isSuppressed(prisma, e);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // ── PROSPECTS ─────────────────────────────────────────────────────────
 
 router.get('/', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
@@ -80,7 +149,9 @@ router.get('/', authenticate, requirePermission('leads', 'read'), async (req, re
     const visible = await visibleProspects(req, where);
 
     const [data, total] = await Promise.all([
-      prisma.prospect.findMany({ where: visible, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: { [sortBy]: sortDir } }),
+      // Sorted by one of the prospect's own columns: the query string's key
+      // went to orderBy as sent, relation names included.
+      prisma.prospect.findMany({ where: visible, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: scalarOrderBy('prospect', sortBy, sortDir) || { createdAt: 'desc' } }),
       prisma.prospect.count({ where: visible }),
     ]);
     res.json({ data, total, page: +page, limit: +limit });
@@ -112,8 +183,13 @@ router.post('/', authenticate, requirePermission('leads', 'edit'), auditMiddlewa
     if (cleanEmail && !isValidEmail(cleanEmail)) return res.status(400).json({ error: 'email is not a valid address' });
 
     if (cleanEmail) {
-      const dupe = await prisma.prospect.findFirst({ where: { email: cleanEmail, deletedAt: null } });
-      if (dupe) return res.status(409).json({ error: 'A prospect with that email already exists', existingId: dupe.id });
+      const dupe = await prisma.prospect.findFirst({ where: { email: cleanEmail, deletedAt: null }, select: { id: true } });
+      if (dupe) {
+        // Still refused, but the existing prospect's id goes only to a caller
+        // who can see it: the refusal named anyone's prospect to any editor.
+        const seen = await prisma.prospect.findFirst({ where: await visibleProspects(req, { email: cleanEmail }), select: { id: true } });
+        return res.status(409).json({ error: 'A prospect with that email already exists', ...(seen && { existingId: seen.id }) });
+      }
     }
 
     const payload = {
@@ -180,14 +256,21 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
     if (prospects.length > 5000) return res.status(400).json({ error: 'Import limit is 5000 rows per request' });
 
     const imported = [], skipped = [], invalid = [];
+    // A skipped duplicate names its prospect only when the caller can see
+    // one with that address, as POST / does.
+    const visible = await visibleProspects(req);
     for (const raw of prospects) {
       if (!raw.lastName && !raw.email) { invalid.push({ row: raw, reason: 'needs a lastName or an email' }); continue; }
       const email = normalizeEmail(raw.email);
       if (email && !isValidEmail(email)) { invalid.push({ row: raw, reason: 'invalid email' }); continue; }
 
       if (skipDuplicates && email) {
-        const dupe = await prisma.prospect.findFirst({ where: { email, deletedAt: null } });
-        if (dupe) { skipped.push({ email, reason: 'duplicate', existingId: dupe.id }); continue; }
+        const dupe = await prisma.prospect.findFirst({ where: { email, deletedAt: null }, select: { id: true } });
+        if (dupe) {
+          const seen = await prisma.prospect.findFirst({ where: { AND: [visible, { email }] }, select: { id: true } });
+          skipped.push({ email, reason: 'duplicate', ...(seen && { existingId: seen.id }) });
+          continue;
+        }
       }
 
       const payload = {
@@ -467,69 +550,6 @@ router.delete('/lists/:id', authenticate, requirePermission('campaigns', 'full')
   } catch (err) { next(err); }
 });
 
-// ── SUPPRESSION ───────────────────────────────────────────────────────
-
-router.get('/suppression', authenticate, requirePermission('campaigns', 'read'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { page = 1, limit = 100, search } = req.query;
-    const where = {};
-    if (search) where.email = { contains: search, mode: 'insensitive' };
-    const [data, total] = await Promise.all([
-      prisma.emailSuppression.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 500), orderBy: { suppressedAt: 'desc' } }),
-      prisma.emailSuppression.count({ where }),
-    ]);
-    res.json({ data, total, page: +page });
-  } catch (err) { next(err); }
-});
-
-router.post('/suppression', authenticate, requirePermission('campaigns', 'edit'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { emails, reason } = req.body;
-    const list = Array.isArray(emails) ? emails : (req.body.email ? [req.body.email] : []);
-    if (!list.length) return res.status(400).json({ error: 'email or emails required' });
-
-    let added = 0;
-    for (const raw of list) {
-      const email = normalizeEmail(raw);
-      // A leading @ suppresses an entire domain
-      if (!email || (!isValidEmail(email) && !email.startsWith('@'))) continue;
-      await prisma.emailSuppression.create({ data: { email, reason: reason || 'Manual', addedById: req.user.id } })
-        .then(() => added++).catch(() => {});
-    }
-
-    // Flag matching prospects so they drop out of future list builds
-    for (const raw of list) {
-      const email = normalizeEmail(raw);
-      if (email && !email.startsWith('@')) {
-        await prisma.prospect.updateMany({ where: { email }, data: { emailOptOut: true } }).catch(() => {});
-      }
-    }
-
-    await req.audit({ action: 'create', module: 'prospects', recordId: 'suppression', details: `${added} addresses suppressed` });
-    res.status(201).json({ added, requested: list.length });
-  } catch (err) { next(err); }
-});
-
-router.delete('/suppression/:id', authenticate, requirePermission('campaigns', 'edit'), async (req, res, next) => {
-  try {
-    await req.app.locals.prisma.emailSuppression.delete({ where: { id: req.params.id } });
-    res.json({ deleted: true });
-  } catch (err) { next(err); }
-});
-
-router.post('/suppression/check', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { emails } = req.body;
-    if (!Array.isArray(emails)) return res.status(400).json({ error: 'emails array required' });
-    const result = {};
-    for (const e of emails.slice(0, 1000)) result[e] = await isSuppressed(prisma, e);
-    res.json(result);
-  } catch (err) { next(err); }
-});
-
 // ── ANALYTICS ─────────────────────────────────────────────────────────
 
 router.get('/analytics/summary', authenticate, requirePermission('leads', 'read'), async (req, res, next) => {
@@ -560,11 +580,12 @@ router.get('/analytics/summary', authenticate, requirePermission('leads', 'read'
   } catch (err) { next(err); }
 });
 
-// Recompute scores after a scoring model change
+// Recompute scores after a scoring model change, on the prospects the caller
+// may change: it rewrote every prospect's score for anyone with leads edit.
 router.post('/rescore', authenticate, requirePermission('leads', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const prospects = await prisma.prospect.findMany({ where: { deletedAt: null }, take: 20000 });
+    const prospects = await prisma.prospect.findMany({ where: await visibleProspects(req, { deletedAt: null }, 'Edit'), take: 20000 });
     let updated = 0;
     for (const p of prospects) {
       const score = scoreProspect(p);

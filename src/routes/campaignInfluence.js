@@ -1,5 +1,6 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
 const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
@@ -36,8 +37,18 @@ router.post('/', requirePermission('campaigns', 'edit'), async (req, res, next) 
   try {
     const prisma = req.app.locals.prisma;
     const { campaignId, dealId, model, influence, contactId, isPrimary, touchDate } = req.body;
-    const deal = await prisma.deal.findUnique({ where: { id: dealId } });
-    const revenue = deal ? (deal.value * (influence || 0) / 100) : 0;
+    if (!campaignId || !dealId) return res.status(400).json({ error: 'campaignId and dealId required' });
+    // A campaign the caller can edit, credited with a deal and contact they
+    // can see. CampaignInfluence keeps all three as plain columns, which
+    // linkRefusal cannot check; they were taken as sent, and the reply's
+    // revenue gave away the value of any deal.
+    const campaign = await prisma.campaign.findFirst({ where: await reachableWhere(req, 'campaigns', 'campaign', { id: String(campaignId) }, 'Edit'), select: { id: true } });
+    if (!campaign) return res.status(404).json({ error: 'Not found' });
+    const deal = permits(req, 'deals', 'read') && await prisma.deal.findFirst({ where: await reachableWhere(req, 'deals', 'deal', { id: String(dealId) }) });
+    if (!deal) return res.status(400).json({ error: 'dealId does not name a deal you can see', code: 'LINK_NOT_VISIBLE' });
+    const contact = !contactId || (permits(req, 'contacts', 'read') && await prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }), select: { id: true } }));
+    if (!contact) return res.status(400).json({ error: 'contactId does not name a contact you can see', code: 'LINK_NOT_VISIBLE' });
+    const revenue = deal.value * (influence || 0) / 100;
 
     const ci = await prisma.campaignInfluence.upsert({
       where: { campaignId_dealId_model: { campaignId, dealId, model: model || 'FirstTouch' } },

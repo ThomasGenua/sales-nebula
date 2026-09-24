@@ -3,6 +3,7 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
+const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -11,6 +12,13 @@ const OPEN_STATUSES = ['New', 'Assigned', 'Confirmed', 'InProgress', 'Fixed'];
 const SEVERITIES = ['Blocker', 'Critical', 'Major', 'Minor', 'Trivial'];
 const PRIORITIES = ['Urgent', 'High', 'Medium', 'Low'];
 const TYPES = ['Defect', 'Feature', 'Enhancement', 'Task', 'Regression'];
+
+// Bug columns an update never takes from a request: the number is assigned,
+// the reporter is whoever filed it, and deleting takes cases full.
+const SERVER_FIELDS = ['bugNumber', 'reportedById', 'deletedAt'];
+
+/** A live bug, which cases read lets anyone see (as GET /:id); null otherwise. */
+const liveBug = (prisma, id) => prisma.bug.findFirst({ where: { id: String(id), deletedAt: null }, select: { id: true } });
 
 /** Sequential bug number, scoped to the whole table. */
 async function nextBugNumber(prisma) {
@@ -53,7 +61,9 @@ router.get('/', authenticate, requirePermission('cases', 'read'), async (req, re
     if (component) where.component = component;
 
     const [data, total] = await Promise.all([
-      prisma.bug.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: { [sortBy]: sortDir } }),
+      // A sort names one of the bug's own columns; a relation name here sorted
+      // by, and so probed, the related rows.
+      prisma.bug.findMany({ where, skip: (+page - 1) * +limit, take: Math.min(+limit, 200), orderBy: scalarOrderBy('bug', sortBy, sortDir) || { createdAt: 'desc' } }),
       prisma.bug.count({ where }),
     ]);
     res.json({ data, total, page: +page, limit: +limit });
@@ -143,7 +153,11 @@ router.put('/:id', authenticate, requirePermission('cases', 'edit'), auditMiddle
     const existing = await prisma.bug.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!existing) return res.status(404).json({ error: 'Bug not found' });
 
-    const { id, createdAt, bugNumber, comments, watchers, history, duplicates, linkedCases, isWatching, ...data } = req.body;
+    // The bug's own columns: the rest of the body went to Prisma whole, so a
+    // relation key was a nested write into other rows (a release, the parent
+    // bug, its sub-bugs).
+    const data = columnsFrom('bug', req.body);
+    for (const key of SERVER_FIELDS) delete data[key];
 
     if (data.status && !STATUSES.includes(data.status)) return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
     if (data.severity && !SEVERITIES.includes(data.severity)) return res.status(400).json({ error: `Invalid severity` });
@@ -191,7 +205,10 @@ router.post('/bulk', authenticate, requirePermission('cases', 'edit'), auditMidd
     if (changes.status && !STATUSES.includes(changes.status)) return res.status(400).json({ error: 'Invalid status' });
     if (changes.severity && !SEVERITIES.includes(changes.severity)) return res.status(400).json({ error: 'Invalid severity' });
 
-    const data = { ...changes };
+    // As for one bug: changes went to updateMany whole.
+    const data = columnsFrom('bug', changes);
+    for (const key of SERVER_FIELDS) delete data[key];
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'changes names no bug field a bulk update may set' });
     if (changes.status === 'Fixed') data.fixedAt = new Date();
     if (['Closed', 'Rejected'].includes(changes.status)) data.closedAt = new Date();
 
@@ -203,13 +220,15 @@ router.post('/bulk', authenticate, requirePermission('cases', 'edit'), auditMidd
 
 // ── COMMENTS AND WATCHERS ─────────────────────────────────────────────
 
-router.post('/:id/comments', authenticate, async (req, res, next) => {
+// Commenting is working a bug, so cases edit; watching needs only to see it,
+// so cases read. Both took a session alone, and watching any id at all.
+router.post('/:id/comments', authenticate, requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { body, isInternal } = req.body;
     if (!body || !String(body).trim()) return res.status(400).json({ error: 'body required' });
 
-    const bug = await prisma.bug.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    const bug = await liveBug(prisma, req.params.id);
     if (!bug) return res.status(404).json({ error: 'Bug not found' });
 
     const comment = await prisma.bugComment.create({
@@ -220,26 +239,29 @@ router.post('/:id/comments', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.delete('/comments/:commentId', authenticate, async (req, res, next) => {
+router.delete('/comments/:commentId', authenticate, requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const comment = await prisma.bugComment.findUnique({ where: { id: req.params.commentId } });
-    if (!comment) return res.status(404).json({ error: 'Comment not found' });
-    if (comment.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Not your comment' });
+    if (!comment || !(await liveBug(prisma, comment.bugId))) return res.status(404).json({ error: 'Comment not found' });
+    // req.user.role is the Role record, never the string 'admin', so no admin matched.
+    if (comment.userId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Not your comment' });
     await prisma.bugComment.delete({ where: { id: comment.id } });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
 
-router.post('/:id/watch', authenticate, async (req, res, next) => {
+router.post('/:id/watch', authenticate, requirePermission('cases', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const existing = await prisma.bugWatcher.findFirst({ where: { bugId: req.params.id, userId: req.user.id } });
+    const bug = await liveBug(prisma, req.params.id);
+    if (!bug) return res.status(404).json({ error: 'Bug not found' });
+    const existing = await prisma.bugWatcher.findFirst({ where: { bugId: bug.id, userId: req.user.id } });
     if (existing) {
       await prisma.bugWatcher.delete({ where: { id: existing.id } });
       return res.json({ watching: false });
     }
-    await prisma.bugWatcher.create({ data: { bugId: req.params.id, userId: req.user.id } });
+    await prisma.bugWatcher.create({ data: { bugId: bug.id, userId: req.user.id } });
     res.json({ watching: true });
   } catch (err) { next(err); }
 });
@@ -292,7 +314,8 @@ router.post('/releases', authenticate, requirePermission('admin', 'edit'), audit
 router.put('/releases/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, bugsFixed, bugsOutstanding, ...data } = req.body;
+    // The release's own columns: the rest of the body went to Prisma whole.
+    const data = columnsFrom('release', req.body);
     if (data.releaseDate) data.releaseDate = new Date(data.releaseDate);
     if (data.status === 'Released' && !data.actualReleaseDate) data.actualReleaseDate = new Date();
     res.json(await prisma.release.update({ where: { id: req.params.id }, data }));

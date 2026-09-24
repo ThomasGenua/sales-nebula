@@ -4,7 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { encrypt, decrypt } = require('../utils/secretBox');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
-const { pickModelFields } = require('../utils/modelFields');
+const { columnsFrom } = require('../utils/modelFields');
 const {
   ingestMessages, recordPoll,
   normalizeSubject, extractCaseRef, stripQuotedReply,
@@ -103,7 +103,7 @@ router.post('/accounts', authenticate, requirePermission('admin', 'full'), audit
 router.put('/accounts/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, passwordSet, messageCount, recentPolls, ...data } = req.body;
+    const data = columnsFrom('inboundEmailAccount', req.body);
     // Only re-encrypt when a new password was actually supplied
     if (data.password) data.password = encrypt(data.password);
     else delete data.password;
@@ -396,6 +396,21 @@ router.post('/messages/:id/ignore', authenticate, requirePermission('cases', 'ed
 
 // ── ROUTING RULES ─────────────────────────────────────────────────────
 
+/**
+ * Why a rule may not name this mailbox or assignee, or null. Both were taken
+ * as sent: an unknown mailbox failed the insert with a 500, and an unknown or
+ * customer portal account became the owner of every case the rule routed.
+ */
+async function ruleTargetProblem(prisma, { accountId, assignToId }) {
+  if (accountId && !(await prisma.inboundEmailAccount.findFirst({ where: { id: String(accountId), deletedAt: null }, select: { id: true } }))) {
+    return 'accountId does not name an inbound email account';
+  }
+  if (assignToId && !(await prisma.user.findFirst({ where: { id: String(assignToId), active: true, isPortalUser: false }, select: { id: true } }))) {
+    return 'assignToId does not name an active user';
+  }
+  return null;
+}
+
 router.get('/rules', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -420,10 +435,13 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), async (r
       if (!validOps.includes(c.operator)) return res.status(400).json({ error: `condition operator must be one of: ${validOps.join(', ')}` });
       if (c.operator === 'matches') { try { new RegExp(c.value); } catch { return res.status(400).json({ error: `Invalid regular expression: ${c.value}` }); } }
     }
+    // assignToUserId is the name this endpoint has always taken; the column is assignToId.
+    const assignee = assignToId ?? assignToUserId;
+    const problem = await ruleTargetProblem(prisma, { accountId, assignToId: assignee });
+    if (problem) return res.status(400).json({ error: problem });
 
     const rule = await prisma.inboundRoutingRule.create({
-      // assignToUserId is the name this endpoint has always taken; the column is assignToId.
-      data: { name, accountId: accountId || null, conditions, assignToId: assignToId ?? assignToUserId, setPriority, setType, setStatus, priority: priority ?? 0, active: active !== false },
+      data: { name, accountId: accountId || null, conditions, assignToId: assignee, setPriority, setType, setStatus, priority: priority ?? 0, active: active !== false },
     });
     res.status(201).json(rule);
   } catch (err) { next(err); }
@@ -432,8 +450,11 @@ router.post('/rules', authenticate, requirePermission('admin', 'edit'), async (r
 router.put('/rules/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, updatedAt, assignToUserId, ...body } = req.body;
-    const { data } = pickModelFields('inboundRoutingRule', { ...body, ...(assignToUserId !== undefined && body.assignToId === undefined && { assignToId: assignToUserId }) });
+    const { assignToUserId, assignToId } = req.body;
+    const data = columnsFrom('inboundRoutingRule', { ...req.body, ...(assignToUserId !== undefined && assignToId === undefined && { assignToId: assignToUserId }) });
+    // A mailbox and assignee that exist, as on create.
+    const problem = await ruleTargetProblem(prisma, data);
+    if (problem) return res.status(400).json({ error: problem });
     res.json(await prisma.inboundRoutingRule.update({ where: { id: req.params.id }, data }));
   } catch (err) { next(err); }
 });
@@ -450,8 +471,11 @@ router.post('/rules/test', authenticate, requirePermission('admin', 'read'), asy
   try {
     const prisma = req.app.locals.prisma;
     const { subject = '', from = '', body = '', to = '', accountId } = req.body;
+    // A mailbox that exists, and an id rather than a filter object.
+    const problem = await ruleTargetProblem(prisma, { accountId });
+    if (problem) return res.status(400).json({ error: problem });
     const where = { active: true };
-    if (accountId) where.accountId = accountId;
+    if (accountId) where.accountId = String(accountId);
     const rules = await prisma.inboundRoutingRule.findMany({ where, orderBy: { priority: 'asc' } });
 
     const haystack = { subject: subject.toLowerCase(), from: from.toLowerCase(), body: body.toLowerCase(), to: to.toLowerCase() };

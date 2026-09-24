@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields, scalarWhere, scalarSelect, modelHasField } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 const router = Router();
@@ -47,9 +47,17 @@ router.post('/insert', async (req, res, next) => {
     if (!Array.isArray(records) || records.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
     const prisma = req.app.locals.prisma;
     const results = { success: 0, failed: 0, errors: [] };
+    const seen = new Map();
     // Process in chunks of 500
     for (let i = 0; i < records.length; i += 500) {
-      const chunk = records.slice(i, i + 500).map(r => ownedByCaller(model, writable(model, r), req));
+      // A row linked to a record the caller cannot see fails on its own.
+      const chunk = [];
+      for (const [j, r] of records.slice(i, i + 500).entries()) {
+        const data = ownedByCaller(model, writable(model, r), req);
+        const refusal = await linkRefusal(req, model, data, null, seen);
+        if (refusal) { results.failed++; results.errors.push({ index: i + j, error: refusal }); } else chunk.push(data);
+      }
+      if (!chunk.length) continue;
       try {
         const created = await prisma[model].createMany({ data: chunk, skipDuplicates: true });
         results.success += created.count;
@@ -71,14 +79,17 @@ router.post('/update', async (req, res, next) => {
     if (!Array.isArray(records) || records.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
     const prisma = req.app.locals.prisma;
     const results = { success: 0, failed: 0, errors: [] };
+    const seen = new Map();
     for (const record of records) {
       try {
         const id = record?.id ? String(record.id) : null;
-        const { count } = id
-          ? await prisma[model].updateMany({ where: await reachable(req, module, model, { id }, 'Edit'), data: writable(model, record) })
-          : { count: 0 };
-        if (count) results.success++;
-        else { results.failed++; results.errors.push({ id, error: 'Not found' }); }
+        const current = id ? await prisma[model].findFirst({ where: await reachable(req, module, model, { id }, 'Edit') }) : null;
+        if (!current) { results.failed++; results.errors.push({ id, error: 'Not found' }); continue; }
+        const data = writable(model, record);
+        const refusal = await linkRefusal(req, model, data, current, seen);
+        if (refusal) { results.failed++; results.errors.push({ id, error: refusal }); continue; }
+        await prisma[model].update({ where: { id: current.id }, data });
+        results.success++;
       } catch (e) { results.failed++; results.errors.push({ id: record?.id, error: e.message }); }
     }
     res.json({ operation: 'update', module, ...results, total: records.length });
@@ -90,14 +101,18 @@ async function upsertAll(req, module, model, records, matchField) {
   const prisma = req.app.locals.prisma;
   const results = { created: 0, updated: 0, failed: 0, errors: [] };
   const matchable = matchField && modelHasField(model, matchField) && !PROTECTED.includes(matchField) ? matchField : null;
+  const seen = new Map();
   for (const record of records) {
     try {
       const value = matchable ? record?.[matchable] : undefined;
       const existing = value !== undefined && value !== null
-        ? await prisma[model].findFirst({ where: await reachable(req, module, model, { [matchable]: value }, 'Edit'), select: { id: true } })
+        ? await prisma[model].findFirst({ where: await reachable(req, module, model, { [matchable]: value }, 'Edit') })
         : null;
-      if (existing) { await prisma[model].update({ where: { id: existing.id }, data: writable(model, record) }); results.updated++; }
-      else { await prisma[model].create({ data: ownedByCaller(model, writable(model, record), req) }); results.created++; }
+      const data = existing ? writable(model, record) : ownedByCaller(model, writable(model, record), req);
+      const refusal = await linkRefusal(req, model, data, existing, seen);
+      if (refusal) { results.failed++; results.errors.push({ record: matchable ? record?.[matchable] : null, error: refusal }); continue; }
+      if (existing) { await prisma[model].update({ where: { id: existing.id }, data }); results.updated++; }
+      else { await prisma[model].create({ data }); results.created++; }
     } catch (e) { results.failed++; results.errors.push({ record: matchable ? record?.[matchable] : null, error: e.message }); }
   }
   return results;
@@ -173,18 +188,3 @@ router.get('/jobs/:jobId', authenticate, async (req, res, next) => {
 
 // Totals from the module's own table.
 summaryRoute(router, { module: 'bulk', model: 'bulkJob' });
-
-// Bulk status update
-router.post('/bulk/status', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ids, status } = req.body;
-    if (!ids?.length || !status) return res.status(400).json({ error: 'ids and status required' });
-    const updated = await Promise.all(ids.slice(0, 100).map(async (id) => {
-      try { return await prisma.$executeRaw`UPDATE "bulkApi" SET status = ${status} WHERE id = ${id}`; }
-      catch (e) { return null; }
-    }));
-    await req.audit({ action: 'bulk_update', module: 'bulkApi', details: `Bulk status update: ${ids.length} records to ${status}` });
-    res.json({ updated: updated.filter(Boolean).length, requested: ids.length });
-  } catch (err) { next(err); }
-});

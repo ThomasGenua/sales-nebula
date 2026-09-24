@@ -1,7 +1,8 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { reachableWhere } = require('../middleware/access');
+const { crudModelFor } = require('../utils/crud');
 const { complete, aiModel, isConfigured } = require('../services/claude');
 const { limiters } = require('../middleware/rateLimit');
 const { currencyContext } = require('../utils/currency');
@@ -14,6 +15,28 @@ async function visibleDeals(req, where = {}) {
   const prisma = req.app.locals.prisma;
   const filter = await buildAccessFilter(prisma, req.user, 'deals', { modelName: 'deal' });
   return applyAccessFilter({ ...where, deletedAt: null }, filter);
+}
+
+/**
+ * The predictions on records the caller may read: the module's read
+ * permission, and a live record within reach. A prediction names its record
+ * by module and recordId, so a list spans modules and is filtered here.
+ */
+async function readablePredictions(req, predictions) {
+  const prisma = req.app.locals.prisma;
+  const byModule = new Map(); // module -> record ids
+  for (const p of predictions) {
+    if (!byModule.has(p.module)) byModule.set(p.module, new Set());
+    byModule.get(p.module).add(p.recordId);
+  }
+  const readable = new Set();
+  for (const [module, ids] of byModule) {
+    const modelName = crudModelFor(module);
+    if (!modelName || !permits(req, module, 'read')) continue;
+    const rows = await prisma[modelName].findMany({ where: await reachableWhere(req, module, modelName, { id: { in: [...ids] } }), select: { id: true } });
+    rows.forEach(r => readable.add(`${module}:${r.id}`));
+  }
+  return predictions.filter(p => readable.has(`${p.module}:${p.recordId}`));
 }
 
 // POST /api/ai/chat - General AI with CRM context
@@ -86,14 +109,22 @@ router.post('/pipeline-forecast', limiters.ai, requirePermission('deals', 'read'
 module.exports = router;
 
 // Prediction history
+// Returned the stored predictions on any record, in any module, for anyone
+// signed in; now only those on records the caller may read.
 router.get('/predictions/history', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, limit = 20 } = req.query;
     const where = {};
-    if (module) where.module = module;
-    const predictions = await prisma.aiPrediction.findMany({ where, orderBy: { createdAt: 'desc' }, take: +limit }).catch(() => []);
-    res.json(predictions);
+    if (module) {
+      if (!crudModelFor(module)) return res.status(400).json({ error: `Predictions are not available for ${module}` });
+      if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+      where.module = module;
+    }
+    const take = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+    // Read with room to spare, since rows on records out of reach drop out.
+    const predictions = await prisma.aiPrediction.findMany({ where, orderBy: { createdAt: 'desc' }, take: take * 5 }).catch(() => []);
+    res.json((await readablePredictions(req, predictions)).slice(0, take));
   } catch (err) { next(err); }
 });
 

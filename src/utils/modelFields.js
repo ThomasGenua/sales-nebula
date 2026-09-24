@@ -20,7 +20,9 @@ function pickModelFields(modelName, data = {}) {
   const model = Prisma.dmmf.datamodel.models.find(
     m => m.name.toLowerCase() === String(modelName).toLowerCase()
   );
-  if (!model) return { data, ignored: [] };
+  // A name that is not a model keeps nothing: handing the data back whole
+  // would let a misspelt model name pass a request body straight to a write.
+  if (!model) return { data: {}, ignored: Object.keys(data || {}) };
 
   const byName = new Map(model.fields.map(f => [f.name, f]));
   const kept = {};
@@ -69,6 +71,19 @@ function editableFields(modelName, data) {
   const { data: picked } = pickModelFields(modelName, data || {});
   for (const key of PROTECTED_FIELDS) delete picked[key];
   return picked;
+}
+
+/**
+ * A request body as the model's own columns, less its id and timestamps, for
+ * routes that passed the body to a write whole. A relation key in it was a
+ * nested write into another table (an email's `deal: { update: … }` rewrote
+ * a deal the caller could not open), and `id` renamed the row.
+ */
+function columnsFrom(modelName, body) {
+  const source = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const { data } = pickModelFields(modelName, source);
+  for (const key of ['id', 'createdAt', 'updatedAt']) delete data[key];
+  return data;
 }
 
 /** Why an automated update may not set `field` to `value` on a model, or null. */
@@ -124,6 +139,17 @@ function scalarWhere(modelName, where) {
     if (Object.keys(condition).length) out[key] = condition;
   }
   return out;
+}
+
+/**
+ * A caller's sort as a Prisma `orderBy` on one of the model's own scalar
+ * columns, or null. A relation name here sorted by the related record's
+ * columns, which a caller should not be able to reach.
+ */
+function scalarOrderBy(modelName, field, direction) {
+  const model = findModel(modelName);
+  const column = model?.fields.find(f => f.name === field && f.kind !== 'object');
+  return column ? { [column.name]: direction === 'asc' ? 'asc' : 'desc' } : null;
 }
 
 /**
@@ -290,6 +316,6 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
 }
 
 module.exports = {
-  pickModelFields, lineItemFields, plainFieldProblem, editableFields, scalarWhere, scalarSelect,
+  pickModelFields, lineItemFields, plainFieldProblem, editableFields, columnsFrom, scalarWhere, scalarSelect, scalarOrderBy,
   modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
 };

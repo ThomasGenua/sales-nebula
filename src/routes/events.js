@@ -1,6 +1,8 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
-const { queryWithIncludes } = require('../utils/modelFields');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { queryWithIncludes, columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -62,18 +64,23 @@ router.get('/history', requirePermission('admin', 'read'), async (req, res, next
 
 // ─── SUBSCRIPTIONS CRUD ───
 // Each row carries a webhook's endpoint and HMAC secret; this took a session alone.
+// The list masks the secret, as webhooks.js does: admin read is a sales rep's
+// level, and it handed them every subscription's signing key.
 router.get('/subscriptions', requirePermission('admin', 'read'), async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.eventSubscription.findMany() }); }
-  catch (err) { next(err); }
+  try {
+    const subs = await req.app.locals.prisma.eventSubscription.findMany();
+    res.json({ data: subs.map(s => ({ ...s, secret: s.secret ? '****' : null })) });
+  } catch (err) { next(err); }
 });
 
+// The subscription's own columns: the body went to Prisma whole.
 router.post('/subscriptions', requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.eventSubscription.create({ data: req.body })); }
+  try { res.status(201).json(await req.app.locals.prisma.eventSubscription.create({ data: columnsFrom('eventSubscription', req.body) })); }
   catch (err) { next(err); }
 });
 
 router.put('/subscriptions/:id', requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.eventSubscription.update({ where: { id: req.params.id }, data: req.body })); }
+  try { res.json(await req.app.locals.prisma.eventSubscription.update({ where: { id: req.params.id }, data: columnsFrom('eventSubscription', req.body) })); }
   catch (err) { next(err); }
 });
 
@@ -84,48 +91,97 @@ router.delete('/subscriptions/:id', requirePermission('admin', 'full'), async (r
 
 module.exports = router;
 
+// ─── EVENTS ───
+// Calendar entries (Event), under the activities permission as the calendar's
+// are (calendar.js). These took a session and any event id: anyone signed in
+// listed every event, read any event's attendees, invited people to, copied
+// and set reminders on events not theirs, and answered anyone's invitation.
+
+/** Events the caller may see (theirs, ones they made or attend) or, with edit, change; an admin, any. */
+function eventScope(req, edit = false) {
+  if (isAdmin(req.user)) return {};
+  const mine = [{ ownerId: req.user.id }, { createdById: req.user.id }];
+  return { OR: edit ? mine : [...mine, { attendees: { some: { userId: req.user.id } } }] };
+}
+
+/** The live event at `id` in the caller's reach (edit: theirs to change), or null once it has answered 404. */
+async function findEvent(req, res, id, edit = false) {
+  const event = await req.app.locals.prisma.event.findFirst({ where: { AND: [{ id: String(id), deletedAt: null }, eventScope(req, edit)] } });
+  if (!event) res.status(404).json({ error: 'Not found' });
+  return event;
+}
+
+const idList = value => (Array.isArray(value) ? value.map(String) : []);
+
+/**
+ * Why these contacts or leads may not be added as attendees, or null: each
+ * must be a live record the caller can see, since their names and emails come
+ * back with the event. EventAttendee declares no relation for linkRefusal()
+ * to follow.
+ */
+async function attendeeRefusal(req, key, module, modelName, ids) {
+  const wanted = [...new Set(ids)];
+  if (!wanted.length) return null;
+  const seen = permits(req, module, 'read')
+    ? await req.app.locals.prisma[modelName].count({ where: await reachableWhere(req, module, modelName, { id: { in: wanted } }) })
+    : 0;
+  return seen === wanted.length ? null : `${key} names a ${modelName} you cannot see`;
+}
+
 // Event attendees management
-router.post('/:id/attendees', authenticate, async (req, res, next) => {
+router.post('/:id/attendees', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { contactIds, leadIds, userIds } = req.body;
-    const event = await prisma.event.findUnique({ where: { id: req.params.id } });
-    if (!event) return res.status(404).json({ error: 'Not found' });
+    const event = await findEvent(req, res, req.params.id, true);
+    if (!event) return;
+    const hidden = await attendeeRefusal(req, 'contactIds', 'contacts', 'contact', idList(contactIds))
+      || await attendeeRefusal(req, 'leadIds', 'leads', 'lead', idList(leadIds));
+    if (hidden) return res.status(400).json({ error: hidden, code: 'LINK_NOT_VISIBLE' });
     const attendees = [];
-    for (const cId of (contactIds || [])) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, contactId: cId, status: 'Invited' } }).catch(() => null)); }
-    for (const lId of (leadIds || [])) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, leadId: lId, status: 'Invited' } }).catch(() => null)); }
-    for (const uId of (userIds || [])) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, userId: uId, status: 'Accepted' } }).catch(() => null)); }
+    for (const cId of idList(contactIds)) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, contactId: cId, status: 'Invited' } }).catch(() => null)); }
+    for (const lId of idList(leadIds)) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, leadId: lId, status: 'Invited' } }).catch(() => null)); }
+    for (const uId of idList(userIds)) { attendees.push(await prisma.eventAttendee.create({ data: { eventId: event.id, userId: uId, status: 'Accepted' } }).catch(() => null)); }
     res.json({ added: attendees.filter(Boolean).length });
   } catch (err) { next(err); }
 });
 
-router.get('/:id/attendees', authenticate, async (req, res, next) => {
+router.get('/:id/attendees', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await findEvent(req, res, req.params.id))) return;
     const attendees = await queryWithIncludes(prisma, 'eventAttendee', 'findMany', { where: { eventId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } } });
     res.json(attendees);
   } catch (err) { next(err); }
 });
 
 // RSVP
-router.put('/:eventId/attendees/:attendeeId/rsvp', authenticate, async (req, res, next) => {
+// Your own invitation, or any on an event you may change. This answered for
+// anyone by attendee id, whether or not the attendee was on :eventId.
+router.put('/:eventId/attendees/:attendeeId/rsvp', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { status } = req.body;
     if (!['Accepted', 'Declined', 'Tentative'].includes(status)) return res.status(400).json({ error: 'status must be Accepted, Declined, or Tentative' });
-    const att = await prisma.eventAttendee.update({ where: { id: req.params.attendeeId }, data: { status, respondedAt: new Date() } });
+    const attendee = await prisma.eventAttendee.findFirst({ where: { id: req.params.attendeeId, eventId: req.params.eventId } });
+    if (!attendee) return res.status(404).json({ error: 'Not found' });
+    const own = attendee.userId === req.user.id;
+    if (!(await findEvent(req, res, attendee.eventId, !own))) return;
+    if (!own && !permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for activities' });
+    const att = await prisma.eventAttendee.update({ where: { id: attendee.id }, data: { status, respondedAt: new Date() } });
     res.json(att);
   } catch (err) { next(err); }
 });
 
 // Recurring events
-router.post('/:id/recurrence', authenticate, async (req, res, next) => {
+// Copies of an event the caller may change, kept to the same people.
+router.post('/:id/recurrence', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { frequency, interval, count, endDate } = req.body;
     if (!frequency || !['daily', 'weekly', 'monthly'].includes(frequency)) return res.status(400).json({ error: 'frequency required (daily/weekly/monthly)' });
-    const parent = await prisma.event.findUnique({ where: { id: req.params.id } });
-    if (!parent) return res.status(404).json({ error: 'Not found' });
+    const parent = await findEvent(req, res, req.params.id, true);
+    if (!parent) return;
     const created = [];
     const intervalMs = { daily: 86400000, weekly: 604800000, monthly: 2592000000 }[frequency] * (interval || 1);
     const maxCount = Math.min(count || 12, 52);
@@ -134,7 +190,7 @@ router.post('/:id/recurrence', authenticate, async (req, res, next) => {
       startTime += intervalMs;
       if (endDate && startTime > new Date(endDate).getTime()) break;
       const dur = parent.endDate ? new Date(parent.endDate) - new Date(parent.startDate) : 3600000;
-      const ev = await prisma.event.create({ data: { name: parent.name, description: parent.description, location: parent.location, startDate: new Date(startTime), endDate: new Date(startTime + dur), type: parent.type, ownerId: parent.ownerId, recurrenceParentId: parent.id } });
+      const ev = await prisma.event.create({ data: { name: parent.name, description: parent.description, location: parent.location, startDate: new Date(startTime), endDate: new Date(startTime + dur), type: parent.type, ownerId: parent.ownerId, createdById: parent.createdById, recurrenceParentId: parent.id } });
       created.push(ev.id);
     }
     res.json({ parentId: parent.id, createdEvents: created.length, eventIds: created });
@@ -142,12 +198,13 @@ router.post('/:id/recurrence', authenticate, async (req, res, next) => {
 });
 
 // Calendar view
-router.get('/calendar/range', authenticate, async (req, res, next) => {
+// The events the caller may see; this listed everyone's.
+router.get('/calendar/range', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end dates required' });
-    const events = await queryWithIncludes(prisma, 'event', 'findMany', { where: { startDate: { gte: new Date(start) }, endDate: { lte: new Date(end) }, deletedAt: null }, orderBy: { startDate: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
+    const events = await queryWithIncludes(prisma, 'event', 'findMany', { where: { startDate: { gte: new Date(start) }, endDate: { lte: new Date(end) }, deletedAt: null, ...eventScope(req) }, orderBy: { startDate: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
     const grouped = {};
     events.forEach(e => { const day = new Date(e.startDate).toISOString().split('T')[0]; (grouped[day] = grouped[day] || []).push(e); });
     res.json({ range: { start, end }, totalEvents: events.length, byDate: grouped });
@@ -155,12 +212,13 @@ router.get('/calendar/range', authenticate, async (req, res, next) => {
 });
 
 // Event reminders
-router.post('/:id/reminder', authenticate, async (req, res, next) => {
+// The reminder is the event's own, so it is for those who may change it.
+router.post('/:id/reminder', authenticate, requirePermission('activities', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { minutesBefore } = req.body;
-    const event = await prisma.event.findUnique({ where: { id: req.params.id } });
-    if (!event) return res.status(404).json({ error: 'Not found' });
+    const event = await findEvent(req, res, req.params.id, true);
+    if (!event) return;
     const reminderTime = new Date(new Date(event.startDate).getTime() - (minutesBefore || 15) * 60000);
     await prisma.event.update({ where: { id: req.params.id }, data: { reminderMinutes: minutesBefore || 15, reminderAt: reminderTime } });
     res.json({ eventId: event.id, reminderAt: reminderTime, minutesBefore: minutesBefore || 15 });

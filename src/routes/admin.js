@@ -5,6 +5,7 @@ const { invalidateCurrencyCache } = require('../utils/currency');
 const { hashApiKey } = require('../utils/apiKeys');
 const { permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
+const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -61,8 +62,7 @@ router.post('/custom-fields', requirePermission('settings', 'full'), async (req,
 router.put('/custom-fields/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { id, createdAt, ...data } = req.body;
-    const field = await prisma.customField.update({ where: { id: req.params.id }, data });
+    const field = await prisma.customField.update({ where: { id: req.params.id }, data: columnsFrom('customField', req.body) });
     res.json(field);
   } catch (err) { next(err); }
 });
@@ -201,7 +201,7 @@ router.get('/scoring-rules', requirePermission('settings', 'read'), async (req, 
 router.post('/scoring-rules', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.leadScoringRule.create({ data: req.body });
+    const rule = await prisma.leadScoringRule.create({ data: columnsFrom('leadScoringRule', req.body) });
     res.status(201).json(rule);
   } catch (err) { next(err); }
 });
@@ -209,7 +209,7 @@ router.post('/scoring-rules', requirePermission('settings', 'full'), async (req,
 router.put('/scoring-rules/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.leadScoringRule.update({ where: { id: req.params.id }, data: req.body });
+    const rule = await prisma.leadScoringRule.update({ where: { id: req.params.id }, data: columnsFrom('leadScoringRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
 });
@@ -266,7 +266,7 @@ router.get('/assignment-rules', requirePermission('settings', 'read'), async (re
 router.post('/assignment-rules', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.assignmentRule.create({ data: req.body });
+    const rule = await prisma.assignmentRule.create({ data: columnsFrom('assignmentRule', req.body) });
     res.status(201).json(rule);
   } catch (err) { next(err); }
 });
@@ -274,7 +274,7 @@ router.post('/assignment-rules', requirePermission('settings', 'full'), async (r
 router.put('/assignment-rules/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rule = await prisma.assignmentRule.update({ where: { id: req.params.id }, data: req.body });
+    const rule = await prisma.assignmentRule.update({ where: { id: req.params.id }, data: columnsFrom('assignmentRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
 });
@@ -300,7 +300,7 @@ router.get('/sla-policies', requirePermission('settings', 'read'), async (req, r
 router.post('/sla-policies', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const policy = await prisma.slaPolicy.create({ data: req.body });
+    const policy = await prisma.slaPolicy.create({ data: columnsFrom('slaPolicy', req.body) });
     res.status(201).json(policy);
   } catch (err) { next(err); }
 });
@@ -308,7 +308,7 @@ router.post('/sla-policies', requirePermission('settings', 'full'), async (req, 
 router.put('/sla-policies/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const policy = await prisma.slaPolicy.update({ where: { id: req.params.id }, data: req.body });
+    const policy = await prisma.slaPolicy.update({ where: { id: req.params.id }, data: columnsFrom('slaPolicy', req.body) });
     res.json(policy);
   } catch (err) { next(err); }
 });
