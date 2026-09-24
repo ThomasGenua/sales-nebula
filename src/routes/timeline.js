@@ -4,6 +4,7 @@ const { authenticate, permits } = require('../middleware/auth');
 const { canReach } = require('../middleware/access');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { crudModelFor } = require('../utils/crud');
+const { editableFields } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
@@ -37,11 +38,14 @@ router.get('/:module/:recordId', async (req, res, next) => {
 
     const timeline = [];
 
+    // Live rows only, as the unified and stats routes below ask: deleted
+    // activities, emails, notes and cases came back here.
+
     // Activities
     if (['contacts', 'deals', 'accounts'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : module === 'deals' ? 'dealId' : 'accountId';
       const activities = await prisma.activity.findMany({
-        where: { [field]: recordId, ...cursor },
+        where: { [field]: recordId, deletedAt: null, ...cursor },
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, type: true, status: true, dueDate: true, createdAt: true },
       });
@@ -52,7 +56,7 @@ router.get('/:module/:recordId', async (req, res, next) => {
     if (['contacts', 'deals'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : 'dealId';
       const emails = await prisma.email.findMany({
-        where: { [field]: recordId, ...cursor },
+        where: { [field]: recordId, deletedAt: null, ...cursor },
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, status: true, opened: true, sentAt: true, createdAt: true },
       });
@@ -61,7 +65,7 @@ router.get('/:module/:recordId', async (req, res, next) => {
 
     // Notes
     const notes = await prisma.note.findMany({
-      where: { module, recordId, ...cursor },
+      where: { module, recordId, deletedAt: null, ...cursor },
       orderBy: { createdAt: 'desc' }, take,
       select: { id: true, body: true, createdAt: true },
     });
@@ -71,7 +75,7 @@ router.get('/:module/:recordId', async (req, res, next) => {
     if (['contacts', 'accounts'].includes(module)) {
       const field = module === 'contacts' ? 'contactId' : 'accountId';
       const cases = await prisma.case.findMany({
-        where: { [field]: recordId, ...cursor },
+        where: { [field]: recordId, deletedAt: null, ...cursor },
         orderBy: { createdAt: 'desc' }, take,
         select: { id: true, subject: true, status: true, priority: true, caseNumber: true, createdAt: true },
       });
@@ -201,16 +205,23 @@ router.get('/aggregate', authenticate, async (req, res, next) => {
 });
 
 // Bulk create timeline events
+// Each event of the model's own columns, less its id and timestamps, written
+// by the caller, on a record they may read. The raw objects went to Prisma
+// on any record id. One that fails refuses the batch before any is written,
+// so a client never has to work out which of its events went in.
 router.post('/bulk', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { events } = req.body;
-    if (!events?.length) return res.status(400).json({ error: 'events array required' });
-    const created = [];
+    if (!Array.isArray(events) || !events.length) return res.status(400).json({ error: 'events array required' });
+    const rows = [];
     for (const ev of events.slice(0, 100)) {
-      const e = await prisma.timelineEvent.create({ data: { ...ev, userId: req.user.id } });
-      created.push(e);
+      const data = { ...editableFields('timelineEvent', ev), userId: req.user.id };
+      if (!data.parentModule || !data.parentId || !data.type) return res.status(400).json({ error: 'Each event needs parentModule, parentId and type' });
+      if (!(await readableRecord(req, res, data.parentModule, data.parentId))) return;
+      rows.push(data);
     }
+    const created = await prisma.$transaction(rows.map(data => prisma.timelineEvent.create({ data })));
     res.status(201).json({ created: created.length, events: created });
   } catch (err) { next(err); }
 });

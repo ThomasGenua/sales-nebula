@@ -165,7 +165,8 @@ router.get('/:module/:recordId', async (req, res, next) => {
     const { module, recordId } = req.params;
     if (!(await readableRecord(req, res, module, recordId))) return;
     const notes = await prisma.note.findMany({
-      where: { module, recordId },
+      // Live notes only: ones bulk-deleted (soft) came back with the rest.
+      where: { module, recordId, deletedAt: null },
       orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
     });
 
