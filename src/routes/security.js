@@ -8,6 +8,7 @@ const { limiters } = require('../middleware/rateLimit');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../middleware/auth');
 const { queryWithIncludes, pickModelFields, columnsFrom } = require('../utils/modelFields');
+const { encrypt } = require('../utils/secretBox');
 const { statusRoutes } = require('../utils/moduleStatus');
 const router = Router();
 
@@ -76,11 +77,16 @@ router.get('/mfa/devices', authenticate, async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.mfaDevice.findMany({ where: { userId: req.userId }, select: { id: true, type: true, verified: true, lastUsedAt: true, createdAt: true } }) }); }
   catch (err) { next(err); }
 });
-router.post('/mfa/enroll', authenticate, limiters.auth, async (req, res, next) => {
+// Per user (limiters.account), not the per-address sign-in counter.
+router.post('/mfa/enroll', authenticate, limiters.account, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     if (!(await passwordConfirmed(req))) return passwordRequired(res);
     const { type = 'totp' } = req.body;
+    // Only an authenticator app can work: no SMS or email code is ever sent.
+    // Any other type was "verified" with whatever code was typed, and from
+    // then on sign-in asked for a code that never arrived.
+    if (type !== 'totp') return res.status(400).json({ error: 'Only authenticator-app (totp) devices are supported' });
     // crypto's Buffer has no 'base32' encoding, so the previous call threw
     // "Unknown encoding: base32" and enrolment never once succeeded.
     const secret = type === 'totp' ? generateSecret() : null;
@@ -96,13 +102,16 @@ router.post('/mfa/enroll', authenticate, limiters.auth, async (req, res, next) =
     res.status(201).json(response);
   } catch (err) { next(err); }
 });
-router.post('/mfa/verify', authenticate, async (req, res, next) => {
+// Rate limited: a six-digit code can be guessed, given enough tries.
+router.post('/mfa/verify', authenticate, limiters.account, async (req, res, next) => {
   try {
     const { deviceId, code } = req.body;
     const device = await req.app.locals.prisma.mfaDevice.findUnique({ where: { id: deviceId } });
     if (!device || device.userId !== req.userId) return res.status(404).json({ error: 'Device not found' });
     // This used to accept any six digits, so 000000 enrolled a device and the
-    // "verified" flag meant nothing. Now the code has to match the secret.
+    // "verified" flag meant nothing. Now the code has to match the secret, and
+    // a device with no secret to match (not totp) cannot be verified at all.
+    if (device.type !== 'totp') return res.status(400).json({ error: 'Only authenticator-app (totp) devices can be verified' });
     if (device.type === 'totp') {
       if (!verifyTotp(device.secret, code)) {
         return res.status(400).json({ error: 'Incorrect code' });
@@ -117,7 +126,8 @@ router.post('/mfa/verify', authenticate, async (req, res, next) => {
  * hands back, rather than a userId from the body: the old version let anyone
  * mint challenges for any account they could name.
  */
-router.post('/mfa/challenge', async (req, res, next) => {
+// Before sign-in, per address; each call writes a row.
+router.post('/mfa/challenge', limiters.auth, async (req, res, next) => {
   try {
     const { mfaToken, deviceId } = req.body || {};
     let decoded;
@@ -148,7 +158,7 @@ router.post('/mfa/challenge', async (req, res, next) => {
 });
 // Only the caller's own device. This deleted any account's device by id, so
 // anyone signed in could strip an administrator's second factor.
-router.delete('/mfa/devices/:id', authenticate, limiters.auth, async (req, res, next) => {
+router.delete('/mfa/devices/:id', authenticate, limiters.account, async (req, res, next) => {
   try {
     if (!(await passwordConfirmed(req))) return passwordRequired(res);
     const { count } = await req.app.locals.prisma.mfaDevice.deleteMany({ where: { id: req.params.id, userId: req.userId } });
@@ -172,7 +182,9 @@ router.post('/encryption/rotate-key', authenticate, requirePermission('admin', '
     const prisma = req.app.locals.prisma;
     const latest = await prisma.encryptionKey.findFirst({ orderBy: { version: 'desc' } });
     const newVersion = (latest?.version || 0) + 1;
-    const keyMaterial = crypto.randomBytes(32).toString('hex');
+    // Sealed with the server's secret (utils/secretBox), as the column says it
+    // is: the raw key sat in the database in the clear.
+    const keyMaterial = encrypt(crypto.randomBytes(32).toString('hex'));
     const key = await prisma.encryptionKey.create({ data: { version: newVersion, keyMaterial, status: 'Active' } });
     if (latest) await prisma.encryptionKey.update({ where: { id: latest.id }, data: { status: 'Archived', archivedAt: new Date() } });
     res.json({ version: key.version, status: key.status });

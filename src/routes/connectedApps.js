@@ -1,6 +1,5 @@
 const { Router } = require('express');
 const { v4: uuid } = require('uuid');
-const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes } = require('../utils/moduleStatus');
@@ -270,16 +269,12 @@ router.post('/:id/revoke', authenticate, requirePermission('admin', 'full'), asy
 });
 
 // Refresh app token
-// Any signed-in user could do this before, and the token was stored in the
-// clear. It now takes the same admin rights as revoking the app.
-router.post('/:id/refresh-token', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const newToken = crypto.randomBytes(32).toString('hex');
-    const apiTokenHash = crypto.createHash('sha256').update(newToken).digest('hex');
-    await prisma.connectedApp.update({ where: { id: req.params.id }, data: { apiTokenHash, tokenRefreshedAt: new Date() } });
-    res.json({ message: 'Token refreshed', token: newToken });
-  } catch (err) { next(err); }
+// Gone: it minted a token nothing accepts (apiTokenHash is read nowhere). An
+// app gets its tokens from the OAuth token endpoint, with a user's consent.
+router.post('/:id/refresh-token', authenticate, requirePermission('admin', 'full'), (req, res) => {
+  res.status(410).json({
+    error: 'App tokens are not issued here. An app gets access and refresh tokens from POST /api/connected-apps/oauth/token.',
+  });
 });
 
 // Record count, health and summary, answered from the module's own table.
@@ -292,12 +287,16 @@ router.get('/:id/analytics', authenticate, requirePermission('admin', 'read'), a
     const app = await prisma.connectedApp.findUnique({ where: { id: req.params.id } });
     if (!app) return res.status(404).json({ error: 'Not found' });
     const thirtyDays = new Date(Date.now() - 30 * 86400000);
-    const apiCalls = await prisma.auditLog.count({ where: { module: 'connectedApps', recordId: req.params.id, createdAt: { gte: thirtyDays } } });
-    const errors = await prisma.auditLog.count({ where: { module: 'connectedApps', recordId: req.params.id, action: 'error', createdAt: { gte: thirtyDays } } });
-    const lastEvent = await prisma.connectedAppLog.findFirst({ where: { connectedAppId: app.id }, orderBy: { createdAt: 'desc' } });
+    // What is recorded: grants, and the app's log of tokens issued. API calls
+    // are not counted anywhere; "apiCalls" counted authorize and revoke audit
+    // entries, and "errors" an action nothing writes.
+    const [activeGrants, tokensIssuedLast30d, lastEvent] = await Promise.all([
+      prisma.oAuthToken.count({ where: { appId: app.id, refreshExpiresAt: { gt: new Date() } } }),
+      prisma.connectedAppLog.count({ where: { connectedAppId: app.id, action: 'token_issued', createdAt: { gte: thirtyDays } } }),
+      prisma.connectedAppLog.findFirst({ where: { connectedAppId: app.id }, orderBy: { createdAt: 'desc' } }),
+    ]);
     res.json({
-      appId: app.id, name: app.name, apiCallsLast30d: apiCalls, errorsLast30d: errors,
-      errorRate: apiCalls > 0 ? ((errors / apiCalls) * 100).toFixed(2) + '%' : '0%',
+      appId: app.id, name: app.name, activeGrants, tokensIssuedLast30d,
       status: app.active && !app.revokedAt ? 'active' : 'inactive',
       lastUsed: lastEvent?.createdAt || null,
     });

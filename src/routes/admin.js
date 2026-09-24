@@ -12,10 +12,15 @@ router.use(authenticate, auditMiddleware);
 
 // ─── ADMIN CONFIG ───
 
+// Each user's preferences live here too, as user_prefs:<id>, and belong to
+// /api/users/me/preferences: settings read returned everyone's, and settings
+// edit could rewrite them.
+const USER_PREFS = 'user_prefs:';
+
 router.get('/config', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const configs = await prisma.adminConfig.findMany();
+    const configs = await prisma.adminConfig.findMany({ where: { NOT: { key: { startsWith: USER_PREFS } } } });
     const obj = {};
     configs.forEach(c => { obj[c.key] = c.value; });
     res.json(obj);
@@ -26,6 +31,9 @@ router.put('/config', requirePermission('settings', 'edit'), async (req, res, ne
   try {
     const prisma = req.app.locals.prisma;
     const entries = Object.entries(req.body);
+    if (entries.some(([key]) => key.startsWith(USER_PREFS))) {
+      return res.status(400).json({ error: 'user_prefs:* keys are personal preferences; each user sets their own at /api/users/me/preferences' });
+    }
     for (const [key, value] of entries) {
       await prisma.adminConfig.upsert({
         where: { key },
@@ -51,6 +59,8 @@ router.post('/custom-fields', requirePermission('settings', 'full'), async (req,
   try {
     const prisma = req.app.locals.prisma;
     const { name, module, type, options, required } = req.body;
+    // Without a name the key below threw, a 500; without a module the create did.
+    if (typeof name !== 'string' || !name.trim() || !module) return res.status(400).json({ error: 'name and module are required' });
     const fieldKey = `cf_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
     const field = await prisma.customField.create({
       data: { name, module, type, options, required: required || false, fieldKey },
@@ -129,11 +139,13 @@ router.post('/notifications/mark-read', async (req, res, next) => {
 router.get('/stats', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Records in the recycle bin are not counted (users and workflows have no deletedAt).
+    const live = { where: { deletedAt: null } };
     const [contacts, leads, deals, accounts, activities, cases, products, quotes, invoices, users, workflows, emails, campaigns, documents] = await Promise.all([
-      prisma.contact.count(), prisma.lead.count(), prisma.deal.count(), prisma.account.count(),
-      prisma.activity.count(), prisma.case.count(), prisma.product.count(), prisma.quote.count(),
-      prisma.invoice.count(), prisma.user.count(), prisma.workflow.count(), prisma.email.count(),
-      prisma.campaign.count(), prisma.document.count(),
+      prisma.contact.count(live), prisma.lead.count(live), prisma.deal.count(live), prisma.account.count(live),
+      prisma.activity.count(live), prisma.case.count(live), prisma.product.count(live), prisma.quote.count(live),
+      prisma.invoice.count(live), prisma.user.count(), prisma.workflow.count(), prisma.email.count(live),
+      prisma.campaign.count(live), prisma.document.count(live),
     ]);
     res.json({ contacts, leads, deals, accounts, activities, cases, products, quotes, invoices, users, workflows, emails, campaigns, documents });
   } catch (err) { next(err); }

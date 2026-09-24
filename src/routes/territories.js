@@ -3,7 +3,8 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { linkRefusal, moduleAccess, reachableWhere } = require('../middleware/access');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
-const { editableFields } = require('../utils/modelFields');
+const { editableFields, scalarOrderBy } = require('../utils/modelFields');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = Router();
 
@@ -23,7 +24,7 @@ async function visibleBook(req, accountIds) {
     ? await prisma.account.count({ where: await reachableWhere(req, 'accounts', 'account', { id: { in: accountIds } }) })
     : 0;
   const deals = accountIds.length && permits(req, 'deals', 'read')
-    ? await prisma.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { accountId: { in: accountIds } }), select: { stage: true, value: true } })
+    ? await prisma.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { accountId: { in: accountIds } }), select: { stage: true, value: true, currency: true } })
     : [];
   return { accountCount, deals };
 }
@@ -32,12 +33,16 @@ async function visibleBook(req, accountIds) {
 router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { page = 1, limit = 50, search, modelId } = req.query;
+    const { page = 1, limit = 50, search, modelId, type, sortBy, sortDir } = req.query;
     const where = { deletedAt: null };
     if (search) where.name = { contains: search, mode: 'insensitive' };
     if (modelId) where.modelId = modelId;
+    // The Territories page filters by type and sorts by column; both were
+    // ignored, so the list came back unfiltered and always by name.
+    if (typeof type === 'string' && type) where.type = type;
+    const orderBy = scalarOrderBy('territory', sortBy, sortDir) || { name: 'asc' };
     const [data, total] = await Promise.all([
-      prisma.territory.findMany({ where, orderBy: { name: 'asc' }, take: +limit, skip: (+page - 1) * +limit, include: { parent: { select: { id: true, name: true } } } }),
+      prisma.territory.findMany({ where, orderBy, take: +limit, skip: (+page - 1) * +limit, include: { parent: { select: { id: true, name: true } } } }),
       prisma.territory.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
@@ -49,7 +54,9 @@ router.post('/', authenticate, requirePermission('territories', 'edit'), auditMi
     const prisma = req.app.locals.prisma;
     const { name, parentId, type, description, rules } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const t = await prisma.territory.create({ data: { name, parentId, type: type || 'Geographic', description, rules } });
+    // No type means the schema's default (Sales, as the seeded territories
+    // have), not 'Geographic', which nothing else uses.
+    const t = await prisma.territory.create({ data: { name, parentId, type: type || undefined, description, rules } });
     await req.audit({ action: 'create', module: 'territories', recordId: t.id });
     res.status(201).json(t);
   } catch (err) { next(err); }
@@ -143,10 +150,12 @@ router.get('/:id/performance', authenticate, async (req, res, next) => {
     const { accountCount, deals } = await visibleBook(req, accounts.map(a => a.accountId));
     const won = deals.filter(d => d.stage === 'Closed Won');
     const pipeline = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
+    // Money in the default currency: deal values were added across currencies.
+    const ctx = await currencyContext(prisma);
     res.json({
-      territoryId: req.params.id, accountCount, totalDeals: deals.length,
-      wonDeals: won.length, wonRevenue: won.reduce((s, d) => s + (parseFloat(d.value) || 0), 0),
-      pipelineDeals: pipeline.length, pipelineValue: pipeline.reduce((s, d) => s + (parseFloat(d.value) || 0), 0),
+      territoryId: req.params.id, currency: ctx.base, accountCount, totalDeals: deals.length,
+      wonDeals: won.length, wonRevenue: sumInBase(won, ctx),
+      pipelineDeals: pipeline.length, pipelineValue: sumInBase(pipeline, ctx),
       winRate: deals.length ? ((won.length / deals.length) * 100).toFixed(1) : 0,
     });
   } catch (err) { next(err); }
@@ -226,11 +235,14 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
     const { accountCount, deals } = await visibleBook(req, accountIds);
     const won = deals.filter(d => d.stage === 'Closed Won');
     const open = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
-    const sum = rows => rows.reduce((t, d) => t + (parseFloat(d.value) || 0), 0);
+    // Money in the default currency: deal values were added across currencies.
+    const ctx = await currencyContext(prisma);
+    const sum = rows => sumInBase(rows, ctx);
 
     res.json({
       territoryId: territory.id,
       name: territory.name,
+      currency: ctx.base,
       accountCount,
       memberCount: members,
       dealCount: deals.length,
@@ -246,8 +258,9 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
 /* Registered last: "/:id" is one segment, the same shape as /hierarchy,
    /models and /count, and while it sat at the top it answered those as
    territory lookups. */
+// A deleted territory is not found, and its deleted children are left out.
 router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findUnique({ where: { id: req.params.id }, include: { parent: true, children: true } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { parent: true, children: { where: { deletedAt: null } } } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
 });
 
 module.exports = router;
