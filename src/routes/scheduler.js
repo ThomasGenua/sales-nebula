@@ -1,11 +1,35 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { queryWithIncludes, editableFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
 const { isAdmin } = require('../middleware/rowSecurity');
 
 const router = Router();
+
+// An appointment keeps contactId and accountId as plain columns, which
+// linkRefusal cannot check, so linkProblem below checks them the same way.
+const LINKS = { contactId: ['contacts', 'contact'], accountId: ['accounts', 'account'] };
+
+/**
+ * Why `data` may not file an appointment on the records it names, or null.
+ * They were stored as sent, so a meeting could sit on anyone's contact or
+ * account, and the list's contact include read back the contact's name. A
+ * key that keeps its value in `current` is not a new link.
+ */
+async function linkProblem(req, data, current = {}) {
+  for (const [key, [module, model]] of Object.entries(LINKS)) {
+    const value = data[key];
+    if (value === undefined || value === null || value === '' || value === current[key]) continue;
+    const found = permits(req, module, 'read') && await req.app.locals.prisma[model].findFirst({
+      where: await reachableWhere(req, module, model, { id: String(value) }),
+      select: { id: true },
+    });
+    if (!found) return `${key} does not name a ${model} you can see`;
+  }
+  return null;
+}
 
 /**
  * The appointments a user may see and change: those they host (assignedToId)
@@ -43,6 +67,9 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { subject, startTime, endTime, contactId, accountId, type, location, notes } = req.body;
     if (!subject || !startTime || !endTime) return res.status(400).json({ error: 'subject, startTime, endTime required' });
+    // Only on a contact and account the caller can see (see linkProblem).
+    const refusal = await linkProblem(req, { contactId, accountId });
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     // Conflict check
     const conflicts = await prisma.appointment.findMany({
       where: {
@@ -68,11 +95,14 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
 router.put('/:id', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const found = await prisma.appointment.findFirst({ where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) }, select: { id: true } });
+    const found = await prisma.appointment.findFirst({ where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) }, select: { id: true, contactId: true, accountId: true } });
     if (!found) return res.status(404).json({ error: 'Appointment not found' });
     // Its own columns, not whose it is: the body went to Prisma whole.
     const data = editableFields('appointment', req.body);
     delete data.assignedToId;
+    // And a new contact or account only one the caller can see, as on create.
+    const refusal = await linkProblem(req, data, found);
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     const apt = await prisma.appointment.update({ where: { id: found.id }, data });
     res.json(apt);
   } catch (err) { next(err); }

@@ -1,6 +1,7 @@
 const { Router } = require('express');
-const { authenticate, requirePermission, hasPermission, validatePassword } = require('../middleware/auth');
+const { authenticate, requirePermission, hasPermission, permits, validatePassword } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { columnsFrom } = require('../utils/modelFields');
 
@@ -67,7 +68,11 @@ router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMid
     const bcrypt = require('bcryptjs');
     const { contactId, password } = req.body;
     if (!contactId || !password) return res.status(400).json({ error: 'contactId and password required' });
-    const contact = await prisma.contact.findUnique({ where: { id: contactId } });
+    // A live contact the caller can see. Any contact id, deleted or hidden
+    // from the caller, opened a login on it, with the contact's name, email
+    // and cases behind it.
+    if (!permits(req, 'contacts', 'read')) return res.status(403).json({ error: 'Insufficient permissions for contacts' });
+    const contact = await prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }) });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
     if (!contact.email) return res.status(400).json({ error: 'Contact has no email address' });
     const existing = await prisma.user.findUnique({ where: { email: contact.email } });

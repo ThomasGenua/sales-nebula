@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
@@ -56,11 +57,15 @@ router.post('/:id/certifications', authenticate, requirePermission('partners', '
 });
 
 // Deal registration
-router.post('/:id/register-deal', authenticate, requirePermission('partners', 'edit'), auditMiddleware, async (req, res, next) => {
+// It creates a deal, so it takes deals edit, on an account the caller can
+// see: partners edit alone filed a deal on any account id.
+router.post('/:id/register-deal', authenticate, requirePermission('partners', 'edit'), requirePermission('deals', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { dealName, value, currency, accountId, notes } = req.body;
     if (!dealName) return res.status(400).json({ error: 'dealName required' });
+    const linkProblem = await linkRefusal(req, 'deal', { accountId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const deal = await prisma.deal.create({
       data: {
         name: `[Partner] ${dealName}`, value: value || 0, currency: await resolveDealCurrency(prisma, currency), stage: 'Qualification',

@@ -1,8 +1,25 @@
 const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
-const { requirePermission, authenticate } = require('../middleware/auth');
+const { requirePermission, authenticate, permits } = require('../middleware/auth');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
+
+/**
+ * Why the caller may not add the people `ids` name under `key` (contactId or
+ * leadId) to a campaign, or null. CampaignMember keeps both as plain columns,
+ * which linkRefusal cannot check, so this checks them the same way.
+ */
+async function memberRefusal(req, key, ids) {
+  if (!ids.length) return null;
+  const [module, model] = key === 'contactId' ? ['contacts', 'contact'] : ['leads', 'lead'];
+  const found = permits(req, module, 'read') ? await req.app.locals.prisma[model].findMany({
+    where: await reachableWhere(req, module, model, { id: { in: ids.map(String) } }),
+    select: { id: true },
+  }) : [];
+  const visible = new Set(found.map(r => r.id));
+  return ids.every(id => visible.has(String(id))) ? null : `${key} does not name a ${model} you can see`;
+}
 
 const router = createCrudRouter('campaign', 'campaigns', {
   include: { recipients: { include: { contact: { select: { id: true, firstName: true, lastName: true } }, lead: { select: { id: true, firstName: true, lastName: true } } } }, targetLists: true },
@@ -66,10 +83,19 @@ const router = createCrudRouter('campaign', 'campaigns', {
       try {
         const prisma = req.app.locals.prisma;
         const { contactIds = [], leadIds = [] } = req.body;
+        if (!Array.isArray(contactIds) || !Array.isArray(leadIds)) return res.status(400).json({ error: 'contactIds and leadIds must be arrays' });
         const data = [
           ...contactIds.map(id => ({ campaignId: req.params.id, contactId: id })),
           ...leadIds.map(id => ({ campaignId: req.params.id, leadId: id })),
         ];
+        // Only people the caller can see, checked before any is added: the
+        // ids were stored as sent, and the recipient list reads back their
+        // names and emails.
+        const seen = new Map();
+        for (const { contactId, leadId } of data) {
+          const linkProblem = await linkRefusal(req, 'campaignRecipient', { contactId, leadId }, null, seen);
+          if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+        }
         await prisma.campaignRecipient.createMany({ data });
         res.json({ success: true, added: data.length });
       } catch (err) { next(err); }
@@ -120,13 +146,21 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
 router.post('/:id/members', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { contactIds, leadIds, status } = req.body;
+    const { status } = req.body;
+    const contactIds = req.body.contactIds || [];
+    const leadIds = req.body.leadIds || [];
+    if (!Array.isArray(contactIds) || !Array.isArray(leadIds)) return res.status(400).json({ error: 'contactIds and leadIds must be arrays' });
+    // Only people the caller can see, checked before any is added: the ids
+    // were stored as sent, and the member list reads back their names and
+    // emails.
+    const refusal = await memberRefusal(req, 'contactId', contactIds) || await memberRefusal(req, 'leadId', leadIds);
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
     const added = [];
-    for (const cId of (contactIds || [])) {
+    for (const cId of contactIds) {
       const existing = await prisma.campaignMember.findFirst({ where: { campaignId: req.params.id, contactId: cId } });
       if (!existing) { added.push(await prisma.campaignMember.create({ data: { campaignId: req.params.id, contactId: cId, status: status || 'Sent' } })); }
     }
-    for (const lId of (leadIds || [])) {
+    for (const lId of leadIds) {
       const existing = await prisma.campaignMember.findFirst({ where: { campaignId: req.params.id, leadId: lId } });
       if (!existing) { added.push(await prisma.campaignMember.create({ data: { campaignId: req.params.id, leadId: lId, status: status || 'Sent' } })); }
     }

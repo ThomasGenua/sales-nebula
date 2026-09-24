@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { pickModelFields, looksLikeId } = require('../utils/modelFields');
+const { reachableWhere } = require('../middleware/access');
+const { columnsFrom, looksLikeId } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -49,8 +50,8 @@ router.put('/:id', authenticate, idParam, requirePermission('admin', 'edit'), au
   try {
     const prisma = req.app.locals.prisma;
     // Only the macro's own editable columns; not its id, author or counters.
-    const { id, createdById, createdAt, updatedAt, executionCount, lastExecutedAt, ...body } = req.body;
-    const { data } = pickModelFields('macro', body);
+    const data = columnsFrom('macro', req.body);
+    for (const key of ['createdById', 'executionCount', 'lastExecutedAt']) delete data[key];
     const m = await prisma.macro.update({ where: { id: req.params.id }, data });
     res.json(m);
   } catch (err) { next(err); }
@@ -71,6 +72,10 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
     const delegate = MACRO_MODELS[macro.module];
     if (!delegate) return res.status(400).json({ error: `Macros cannot run on ${macro.module}` });
     if (!(await mayEditModule(req, res, macro.module))) return;
+    // A live record the caller could edit themselves. This ran on any id in
+    // the module, other reps' records included.
+    const record = await prisma[delegate].findFirst({ where: await reachableWhere(req, macro.module, delegate, { id: String(recordId) }, 'Edit'), select: { id: true } });
+    if (!record) return res.status(404).json({ error: 'Not found' });
     const results = [];
     for (const action of macro.actions) {
       try {
@@ -102,14 +107,21 @@ router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res,
     const macro = await prisma.macro.findUnique({ where: { id: req.params.id } });
     if (!macro) return res.status(404).json({ error: 'Macro not found' });
     const { recordIds } = req.body;
-    if (!recordIds?.length) return res.status(400).json({ error: 'recordIds required' });
+    if (!Array.isArray(recordIds) || !recordIds.length) return res.status(400).json({ error: 'recordIds required' });
     const delegate = MACRO_MODELS[macro.module];
     if (!delegate) return res.status(400).json({ error: `Macros cannot run on ${macro.module}` });
     if (!(await mayEditModule(req, res, macro.module))) return;
+    // Only live records the caller could edit one at a time; any other id
+    // fails, as one that names nothing does. This ran on any id in the module.
+    const editable = new Set((await prisma[delegate].findMany({
+      where: await reachableWhere(req, macro.module, delegate, { id: { in: recordIds.map(String) } }, 'Edit'),
+      select: { id: true },
+    })).map(r => r.id));
     let successCount = 0;
     for (const recordId of recordIds) {
       let status = 'Success';
       try {
+        if (!editable.has(String(recordId))) throw new Error('Not found');
         for (const action of macro.actions) {
           if (action.type === 'updateField') {
             await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });

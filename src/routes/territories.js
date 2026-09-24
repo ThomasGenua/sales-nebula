@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { linkRefusal } = require('../middleware/access');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 const { columnsFrom } = require('../utils/modelFields');
 
@@ -82,7 +83,14 @@ router.post('/:id/assign', authenticate, requirePermission('territories', 'edit'
   try {
     const prisma = req.app.locals.prisma;
     const { accountIds } = req.body;
-    if (!accountIds?.length) return res.status(400).json({ error: 'accountIds required' });
+    if (!Array.isArray(accountIds) || !accountIds.length) return res.status(400).json({ error: 'accountIds required' });
+    // Only accounts the caller can see, checked before any is assigned: the
+    // ids were stored as sent.
+    const seen = new Map();
+    for (const accountId of accountIds) {
+      const linkProblem = await linkRefusal(req, 'territoryAccount', { accountId }, null, seen);
+      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+    }
     // Account has no territoryId column; membership is the TerritoryAccount table.
     const result = { count: 0 };
     for (const accountId of accountIds) {
@@ -144,10 +152,17 @@ router.post('/:id/accounts', authenticate, requirePermission('territories', 'edi
   try {
     const prisma = req.app.locals.prisma;
     const ids = req.body.accountIds || (req.body.accountId ? [req.body.accountId] : []);
-    if (!ids.length) return res.status(400).json({ error: 'accountId or accountIds required' });
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'accountId or accountIds required' });
 
     const territory = await prisma.territory.findUnique({ where: { id: req.params.id }, select: { id: true } });
     if (!territory) return res.status(404).json({ error: 'Territory not found' });
+
+    // Only accounts the caller can see, as for /:id/assign.
+    const seen = new Map();
+    for (const accountId of ids) {
+      const linkProblem = await linkRefusal(req, 'territoryAccount', { accountId }, null, seen);
+      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
+    }
 
     const assigned = [];
     for (const accountId of ids) {

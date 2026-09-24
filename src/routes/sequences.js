@@ -1,10 +1,35 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
+
+// An enrollment keeps contactId and leadId as plain columns, which
+// linkRefusal cannot check, so the routes below check them themselves.
+const PEOPLE = { contactId: ['contacts', 'contact'], leadId: ['leads', 'lead'] };
+
+/** Why the caller may not enroll the people `ids` name under `key`, or null. */
+async function enrollRefusal(req, key, ids) {
+  if (!ids.length) return null;
+  const [module, model] = PEOPLE[key];
+  const found = permits(req, module, 'read') ? await req.app.locals.prisma[model].findMany({
+    where: await reachableWhere(req, module, model, { id: { in: ids.map(String) } }),
+    select: { id: true },
+  }) : [];
+  const visible = new Set(found.map(r => r.id));
+  return ids.every(id => visible.has(String(id))) ? null : `${key} does not name a ${model} you can see`;
+}
+
+/** Whether the caller may see the person `id` names; sends the 403 or 404 itself when not. */
+async function mayReachPerson(req, res, key, id) {
+  const [module, model] = PEOPLE[key];
+  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
+  if (!(await canReach(req, module, model, id))) { res.status(404).json({ error: 'Not found' }); return false; }
+  return true;
+}
 
 // LIST sequences
 router.get('/', requirePermission('emails', 'read'), async (req, res, next) => {
@@ -106,13 +131,19 @@ router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res,
   try {
     const prisma = req.app.locals.prisma;
     const { contactIds = [], leadIds = [] } = req.body;
-    if (contactIds.length === 0 && leadIds.length === 0) {
+    if (!Array.isArray(contactIds) || !Array.isArray(leadIds) || (contactIds.length === 0 && leadIds.length === 0)) {
       return res.status(400).json({ error: 'At least one contactId or leadId required' });
     }
 
     const sequence = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
     if (!sequence) return res.status(404).json({ error: 'Not found' });
     if (sequence.status !== 'Active') return res.status(400).json({ error: 'Sequence must be active to enroll' });
+
+    // Only live people the caller can see, checked before any is enrolled.
+    // The ids were enrolled as sent, so a sequence would email contacts and
+    // leads hidden from the caller.
+    const refusal = await enrollRefusal(req, 'contactId', contactIds) || await enrollRefusal(req, 'leadId', leadIds);
+    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
 
     const steps = typeof sequence.steps === 'string' ? JSON.parse(sequence.steps) : sequence.steps;
     const firstDelay = steps[0]?.delayDays || 0;
@@ -146,24 +177,32 @@ router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res,
 });
 
 // POST /:id/unenroll - Remove enrollment
+// Only this sequence's enrollments, of people the caller can see. This took
+// an enrollment id from any sequence, and anyone's contact or lead id.
 router.post('/:id/unenroll', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { enrollmentId, contactId, leadId, reason } = req.body;
 
     if (enrollmentId) {
+      const enrollment = await prisma.emailSequenceEnrollment.findFirst({ where: { id: String(enrollmentId), sequenceId: req.params.id } });
+      if (!enrollment) return res.status(404).json({ error: 'Not found' });
+      if (enrollment.contactId && !(await mayReachPerson(req, res, 'contactId', enrollment.contactId))) return;
+      if (enrollment.leadId && !(await mayReachPerson(req, res, 'leadId', enrollment.leadId))) return;
       await prisma.emailSequenceEnrollment.update({
-        where: { id: enrollmentId },
+        where: { id: enrollment.id },
         data: { status: reason || 'Opted Out' },
       });
     } else if (contactId) {
+      if (!(await mayReachPerson(req, res, 'contactId', contactId))) return;
       await prisma.emailSequenceEnrollment.updateMany({
-        where: { sequenceId: req.params.id, contactId, status: 'Active' },
+        where: { sequenceId: req.params.id, contactId: String(contactId), status: 'Active' },
         data: { status: reason || 'Opted Out' },
       });
     } else if (leadId) {
+      if (!(await mayReachPerson(req, res, 'leadId', leadId))) return;
       await prisma.emailSequenceEnrollment.updateMany({
-        where: { sequenceId: req.params.id, leadId, status: 'Active' },
+        where: { sequenceId: req.params.id, leadId: String(leadId), status: 'Active' },
         data: { status: reason || 'Opted Out' },
       });
     }
