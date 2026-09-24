@@ -26,15 +26,16 @@ async function includeFor(req) {
 /**
  * A forecast's commit, best case, pipeline and closed from the deals
  * `dealWhere` (reachableWhere) admits: its items, loaded on those deals only,
- * and those deals closed won in its period, as POST counts them. The rollups
- * reported the stored totals, summed from every deal, so anyone with deals
- * read learned what deals they could not open were worth.
+ * and its owner's deals closed won in its period, as POST and the
+ * recalculation job count them. The rollups reported the stored totals,
+ * summed from every deal, so anyone with deals read learned what deals they
+ * could not open were worth.
  */
 async function figuresFor(prisma, forecast, dealWhere, ctx) {
   const amount = i => (i.overrideAmount != null ? i.overrideAmount : i.amount);
   const sum = keep => forecast.items.filter(i => keep(i.category)).reduce((s, i) => s + amount(i), 0);
   const closedDeals = await prisma.deal.findMany({
-    where: { AND: [dealWhere, { stage: 'Closed Won', closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd } }] },
+    where: { AND: [dealWhere, { ownerId: forecast.userId, stage: 'Closed Won', closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd } }] },
     select: { value: true, currency: true },
   });
   return {
@@ -52,28 +53,37 @@ async function managesUser(req, userId) {
 }
 
 /**
+ * `where`, narrowed to the forecasts the caller may see: their own, those of
+ * users in roles below theirs (managesUser), and every one for an admin.
+ * Anyone with deals read listed and opened every forecast, quota and owner
+ * included.
+ */
+async function visibleForecastWhere(req, where = {}) {
+  if (isAdmin(req.user)) return where;
+  const userIds = [req.userId, ...(await subordinateUserIds(req.app.locals.prisma, req.user))];
+  return { AND: [where, { userId: { in: userIds } }] };
+}
+
+/**
  * A forecast is changed by its owner (userId), a manager above them or an
- * admin, and approved only by a manager or an admin, never its owner.
+ * admin, and approved (or reopened: `action` names which) only by a manager
+ * or an admin, never its owner.
  * deals:edit, which every rep holds, was the only check, so a rep could
  * approve their own forecast and edit or delete a colleague's.
  * Its owner changes it only while it is Open: they went on editing it once
  * submitted, even after it was approved. A manager or an admin still may.
  */
-function forecastAccess({ approve = false } = {}) {
+function forecastAccess({ approve = false, action = 'approve' } = {}) {
   return async (req, res, next) => {
     try {
       const forecast = await req.app.locals.prisma.forecast.findUnique({ where: { id: req.params.id }, select: { userId: true, status: true, quotaAmount: true } });
       if (!forecast) return res.status(404).json({ error: 'Not found' });
       const isOwner = forecast.userId === req.userId;
-      if (approve && isOwner) return res.status(403).json({ error: 'You cannot approve your own forecast' });
+      if (approve && isOwner) return res.status(403).json({ error: `You cannot ${action} your own forecast` });
       const manages = await managesUser(req, forecast.userId);
-      if (!isOwner && !manages) {
-        return res.status(403).json({
-          error: approve
-            ? 'Only a manager of the forecast owner or an admin can approve it'
-            : 'Only the forecast owner, their manager or an admin can change it',
-        });
-      }
+      // Anyone else cannot see it (visibleForecastWhere), so it is not found,
+      // as on GET: a 403 here confirmed that a colleague's forecast existed.
+      if (!isOwner && !manages) return res.status(404).json({ error: 'Not found' });
       if (!manages && forecast.status !== 'Open') {
         return res.status(409).json({ error: `This forecast is ${forecast.status}: until it is reopened, only a manager of its owner or an admin can change it` });
       }
@@ -84,8 +94,8 @@ function forecastAccess({ approve = false } = {}) {
 }
 
 // What PUT may change. The body went to Prisma whole, so a caller could hand
-// a forecast to someone else or mark it Approved. Status moves through submit
-// and approve; the totals are summed from the items.
+// a forecast to someone else or mark it Approved. Status moves through submit,
+// approve and reopen; the totals are summed from the items.
 const EDITABLE_FIELDS = ['name', 'period', 'periodStart', 'periodEnd', 'quotaAmount', 'territoryId', 'notes'];
 
 // LIST forecasts
@@ -97,7 +107,8 @@ router.get('/', requirePermission('deals', 'read'), async (req, res, next) => {
     if (period) where.period = period;
     if (userId) where.userId = userId;
     if (status) where.status = status;
-    const forecasts = await prisma.forecast.findMany({ where, include: await includeFor(req), orderBy: { periodStart: 'desc' } });
+    // The filters narrow the forecasts the caller may see, not every one.
+    const forecasts = await prisma.forecast.findMany({ where: await visibleForecastWhere(req, where), include: await includeFor(req), orderBy: { periodStart: 'desc' } });
     res.json({ data: forecasts });
   } catch (err) { next(err); }
 });
@@ -106,7 +117,8 @@ router.get('/', requirePermission('deals', 'read'), async (req, res, next) => {
 router.get('/:id', requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const forecast = await prisma.forecast.findUnique({ where: { id: req.params.id }, include: await includeFor(req) });
+    // One the caller may not see is not found: any id opened any forecast.
+    const forecast = await prisma.forecast.findFirst({ where: await visibleForecastWhere(req, { id: req.params.id }), include: await includeFor(req) });
     if (!forecast) return res.status(404).json({ error: 'Not found' });
     res.json(forecast);
   } catch (err) { next(err); }
@@ -132,14 +144,16 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
       return res.status(403).json({ error: 'Only a manager of the forecast owner or an admin can set its quota' });
     }
 
-    // Get open deals closing in this period, of those the caller can see: a
-    // forecast was built from every deal, and its items showed them.
+    // A forecast is its owner's: their open deals closing in the period, of
+    // those the caller can see. Every deal the creator could see went in
+    // unless the body named an owner, so under open sharing a rep's forecast
+    // carried the whole org's pipeline. `userId` says whose forecast it is.
     const deals = await prisma.deal.findMany({
       where: await reachableWhere(req, 'deals', 'deal', {
+        ownerId: forecastUserId,
         stage: { notIn: ['Closed Won', 'Closed Lost'] },
         closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) },
         deletedAt: null,
-        ...(req.body.ownerId ? { ownerId: req.body.ownerId } : {}),
       }),
     });
 
@@ -160,9 +174,10 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
     const bestCase = items.filter(i => i.category === 'Best Case' || i.category === 'Commit').reduce((s, i) => s + i.amount, 0);
     const pipeline = items.reduce((s, i) => s + i.amount, 0);
 
-    // Get already closed deals in period, likewise
+    // And its owner's deals already closed won in the period, as the
+    // recalculation job and the rollups (figuresFor) count them.
     const closedDeals = await prisma.deal.findMany({
-      where: await reachableWhere(req, 'deals', 'deal', { stage: 'Closed Won', closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) }, deletedAt: null }),
+      where: await reachableWhere(req, 'deals', 'deal', { ownerId: forecastUserId, stage: 'Closed Won', closeDate: { gte: new Date(periodStart), lte: new Date(periodEnd) }, deletedAt: null }),
     });
     const closed = sumInBase(closedDeals, ctx);
 
@@ -228,8 +243,8 @@ router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), forecastAcc
       include: { deal: true },
     });
 
-    // Recalculate forecast totals
-    const allItems = await prisma.forecastItem.findMany({ where: { forecastId: req.params.id } });
+    // Recalculate forecast totals, from items on live deals as the job does
+    const allItems = await prisma.forecastItem.findMany({ where: { forecastId: req.params.id, deal: { is: { deletedAt: null } } } });
     const getAmt = (i) => i.overrideAmount != null ? i.overrideAmount : i.amount;
     const commit = allItems.filter(i => i.category === 'Commit').reduce((s, i) => s + getAmt(i), 0);
     const bestCase = allItems.filter(i => ['Commit', 'Best Case'].includes(i.category)).reduce((s, i) => s + getAmt(i), 0);
@@ -260,7 +275,21 @@ router.post('/:id/approve', requirePermission('deals', 'edit'), forecastAccess({
   } catch (err) { next(err); }
 });
 
-// GET rollup summary (manager view across all reps)
+// REOPEN forecast
+// Its owner is locked out once it leaves Open, and nothing set it back. A
+// manager of its owner or an admin reopens it, never its owner. Forecast has
+// no column for who reopened it: the audit entry records them.
+router.post('/:id/reopen', requirePermission('deals', 'edit'), forecastAccess({ approve: true, action: 'reopen' }), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    if (req.forecast.status === 'Open') return res.status(409).json({ error: 'This forecast is already Open' });
+    const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data: { status: 'Open' }, include: await includeFor(req) });
+    await req.audit({ action: 'update', module: 'forecasts', recordId: forecast.id, details: `Forecast reopened (was ${req.forecast.status})` });
+    res.json(forecast);
+  } catch (err) { next(err); }
+});
+
+// GET rollup summary (manager view across their reps)
 // Registered before /:id/rollup, which took `stats` for a forecast id, so this
 // never answered.
 router.get('/stats/rollup', requirePermission('deals', 'read'), async (req, res, next) => {
@@ -273,8 +302,10 @@ router.get('/stats/rollup', requirePermission('deals', 'read'), async (req, res,
     // so a manager counts a report's deals where row security shows them.
     const dealWhere = await reachableWhere(req, 'deals', 'deal');
     const ctx = await currencyContext(prisma);
+    // The caller's forecasts and their reports': every rep's quota and
+    // figures went to anyone with deals read.
     const found = await prisma.forecast.findMany({
-      where,
+      where: await visibleForecastWhere(req, where),
       include: {
         user: { select: { id: true, firstName: true, lastName: true } },
         territory: { select: { id: true, name: true } },
@@ -312,10 +343,11 @@ router.get('/stats/rollup', requirePermission('deals', 'read'), async (req, res,
 router.get('/:id/rollup', requirePermission('deals', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    // Items on deals the caller can see only, and figures from those deals.
+    // Items on deals the caller can see only, and figures from those deals,
+    // of a forecast the caller may see: any id answered.
     const dealWhere = await reachableWhere(req, 'deals', 'deal');
-    const forecast = await prisma.forecast.findUnique({
-      where: { id: req.params.id },
+    const forecast = await prisma.forecast.findFirst({
+      where: await visibleForecastWhere(req, { id: req.params.id }),
       include: { items: { where: { deal: { is: dealWhere } }, include: { deal: { select: { id: true, name: true, stage: true, value: true, probability: true, closeDate: true, account: { select: { name: true } } } } } } },
     });
     if (!forecast) return res.status(404).json({ error: 'Not found' });

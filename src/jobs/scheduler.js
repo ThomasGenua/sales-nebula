@@ -223,10 +223,20 @@ const handlers = {
     return { updated: overdue.count };
   },
 
+  /**
+   * Refresh Open forecasts' stored totals: from each one's items on live
+   * deals, and from its owner's live deals closed won in its period, all in
+   * the default currency, as the forecast routes count them. `closed` was the
+   * whole org's closed won for the period, deleted deals included, in mixed
+   * currencies, and an item took its deal's value unconverted. No request
+   * here, so no row security: the forecast's owner decides.
+   */
   async recalcForecasts() {
+    const { currencyContext, sumInBase } = require('../utils/currency');
+    const ctx = await currencyContext(prisma);
     const forecasts = await prisma.forecast.findMany({
       where: { status: 'Open' },
-      include: { items: { include: { deal: true } } },
+      include: { items: { where: { deal: { is: { deletedAt: null } } }, include: { deal: true } } },
     });
 
     for (const forecast of forecasts) {
@@ -234,25 +244,25 @@ const handlers = {
         if (item.deal && item.overrideAmount == null) {
           await prisma.forecastItem.update({
             where: { id: item.id },
-            data: { amount: item.deal.value, probability: item.deal.probability },
+            data: { amount: ctx.toBase(item.deal.value, item.deal.currency), probability: item.deal.probability },
           });
         }
       }
 
-      const items = await prisma.forecastItem.findMany({ where: { forecastId: forecast.id } });
+      const items = await prisma.forecastItem.findMany({ where: { forecastId: forecast.id, deal: { is: { deletedAt: null } } } });
       const getAmt = (i) => i.overrideAmount != null ? i.overrideAmount : i.amount;
       const commit = items.filter(i => i.category === 'Commit').reduce((s, i) => s + getAmt(i), 0);
       const bestCase = items.filter(i => ['Commit', 'Best Case'].includes(i.category)).reduce((s, i) => s + getAmt(i), 0);
       const pipeline = items.filter(i => i.category !== 'Omitted').reduce((s, i) => s + getAmt(i), 0);
 
-      const closed = await prisma.deal.aggregate({
-        where: { stage: 'Closed Won', closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd } },
-        _sum: { value: true },
+      const closedDeals = await prisma.deal.findMany({
+        where: { ownerId: forecast.userId, stage: 'Closed Won', closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd }, deletedAt: null },
+        select: { value: true, currency: true },
       });
 
       await prisma.forecast.update({
         where: { id: forecast.id },
-        data: { commit, bestCase, pipeline, closed: closed._sum.value || 0 },
+        data: { commit, bestCase, pipeline, closed: sumInBase(closedDeals, ctx) },
       });
     }
     return { recalculated: forecasts.length };

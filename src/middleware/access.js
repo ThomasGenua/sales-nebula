@@ -97,6 +97,49 @@ async function linkRefusal(req, modelName, data, current = null, seen = new Map(
   return null;
 }
 
+/**
+ * Linked records in a response, as far as the caller may see them. A route's
+ * include carried a linked record's fields (a deal's account name and
+ * industry, an account's contacts) whether or not the caller could open that
+ * record: a link made before links were checked, or by someone who could see
+ * it, handed them over. A linked record the caller cannot see keeps only its
+ * id; one in an included list drops out of the list. Tables outside the
+ * record modules (a campaign's recipients) are looked into for their links.
+ */
+async function visibleLinks(req, modelName, records, include, depth = 0) {
+  const rows = (Array.isArray(records) ? records : [records]).filter(r => r && typeof r === 'object');
+  const model = Prisma.dmmf.datamodel.models.find(m => m.name.toLowerCase() === String(modelName).toLowerCase());
+  if (!rows.length || !model || !include || typeof include !== 'object' || depth > 3) return records;
+  for (const [key, spec] of Object.entries(include)) {
+    if (!spec) continue;
+    const field = model.fields.find(f => f.name === key && f.kind === 'object');
+    // A declared relation's model, or the one a manual include names.
+    const target = field ? field.type.charAt(0).toLowerCase() + field.type.slice(1) : key;
+    const module = moduleOf(target);
+    if (module) {
+      const ids = new Set();
+      for (const row of rows) for (const linked of [].concat(row[key] || [])) if (linked?.id) ids.add(linked.id);
+      if (!ids.size) continue;
+      const visible = new Set(permits(req, module, 'read')
+        ? (await req.app.locals.prisma[target].findMany({
+          where: await reachableWhere(req, module, target, { id: { in: [...ids] } }),
+          select: { id: true },
+        })).map(r => r.id)
+        : []);
+      for (const row of rows) {
+        const linked = row[key];
+        if (Array.isArray(linked)) row[key] = linked.filter(l => visible.has(l?.id));
+        else if (linked?.id && !visible.has(linked.id)) row[key] = { id: linked.id };
+      }
+    } else if (field && typeof spec === 'object' && (spec.include || spec.select)) {
+      const nested = Object.fromEntries(Object.entries(spec.include || spec.select).filter(([, v]) => v && typeof v === 'object'));
+      const children = rows.flatMap(r => [].concat(r[key] || []));
+      if (Object.keys(nested).length && children.length) await visibleLinks(req, field.type, children, nested, depth + 1);
+    }
+  }
+  return records;
+}
+
 // Record modules with routers of their own, outside the CRUD router.
 const OWN_ROUTER_MODULES = { quote: 'quotes', invoice: 'invoices' };
 
@@ -123,4 +166,4 @@ function linkKeys(model) {
   return keys;
 }
 
-module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere, linkRefusal };
+module.exports = { SAFE_METHODS, moduleAccess, recordAccess, canReach, reachableWhere, linkRefusal, visibleLinks };
