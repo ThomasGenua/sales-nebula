@@ -140,6 +140,17 @@ function scalarWhere(modelName, where) {
 }
 
 /**
+ * A caller's sort as a Prisma `orderBy` on one of the model's own scalar
+ * columns, or null. A relation name here sorted by the related record's
+ * columns, which a caller should not be able to reach.
+ */
+function scalarOrderBy(modelName, field, direction) {
+  const model = findModel(modelName);
+  const column = model?.fields.find(f => f.name === field && f.kind !== 'object');
+  return column ? { [column.name]: direction === 'asc' ? 'asc' : 'desc' } : null;
+}
+
+/**
  * A caller's choice of columns as a Prisma `select`: the model's own scalar
  * fields only (id always). A relation in `select` returned the related rows,
  * so `{ owner: { select: { password: true } } }` read password hashes. Takes
@@ -303,6 +314,6 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
 }
 
 module.exports = {
-  pickModelFields, lineItemFields, plainFieldProblem, editableFields, columnsFrom, scalarWhere, scalarSelect,
+  pickModelFields, lineItemFields, plainFieldProblem, editableFields, columnsFrom, scalarWhere, scalarSelect, scalarOrderBy,
   modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
 };

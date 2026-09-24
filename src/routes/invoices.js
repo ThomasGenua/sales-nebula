@@ -1,12 +1,25 @@
 const { Router } = require('express');
-const { pickModelFields, lineItemFields } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields, scalarOrderBy } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { recordAccess, reachableWhere, canReach, linkRefusal } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { createNumbered, INVOICE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
+// An invoice named in the path must be one row security lets the caller see,
+// or change for a write; these took any invoice id with the module permission.
+router.param('id', recordAccess('invoices', 'invoice'));
+
+/** Why an invoice's links may not be written, or null: its account and contact, and its quote. */
+async function invoiceLinkProblem(req, data, current = null) {
+  const problem = await linkRefusal(req, 'invoice', data, current);
+  if (problem) return problem;
+  const quoteChanged = data.quoteId && (!current || current.quoteId !== data.quoteId);
+  if (quoteChanged && !(await canReach(req, 'quotes', 'quote', data.quoteId))) return 'quoteId does not name a quote you can see';
+  return null;
+}
 
 const include = {
   items: { include: { product: { select: { id: true, name: true } } } },
@@ -24,8 +37,10 @@ router.get('/', requirePermission('invoices', 'read'), async (req, res, next) =>
     let where = {};
     if (status && status !== 'All') where.status = status;
     if (search) where.number = { contains: search, mode: 'insensitive' };
+    // Invoices the caller may see, sorted on one of an invoice's own columns.
+    where = await reachableWhere(req, 'invoices', 'invoice', where);
     const [invoices, total] = await Promise.all([
-      prisma.invoice.findMany({ where, include, orderBy: sortBy ? { [sortBy]: sortDir } : { createdAt: 'desc' }, skip, take }),
+      prisma.invoice.findMany({ where, include, orderBy: scalarOrderBy('invoice', sortBy, sortDir) || { createdAt: 'desc' }, skip, take }),
       prisma.invoice.count({ where }),
     ]);
     res.json({ data: invoices, meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) } });
@@ -48,6 +63,8 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
     // Same reason as the shared CRUD router: one stray key (an "amount" that the
     // model spells subtotal/total) made Prisma reject the entire input.
     const { data } = pickModelFields('invoice', rest);
+    const linkProblem = await invoiceLinkProblem(req, data);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     // Each line cut down to an invoice item's columns; they went in as sent.
     const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
       data: { ...data, items: { create: Array.isArray(items) ? items.map(i => lineItemFields(i, { discount: false })) : [] } },
@@ -64,6 +81,10 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
     const { items, id, createdAt, updatedAt, ...rest } = req.body || {};
     // Real columns only, and no nested writes: the body went to Prisma whole.
     const { data } = pickModelFields('invoice', rest);
+    const current = await prisma.invoice.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    const linkProblem = await invoiceLinkProblem(req, data, current);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const lines = Array.isArray(items) ? items.map(i => lineItemFields(i, { discount: false })) : null;
     const writes = [];
     if (lines) writes.push(prisma.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } }));
@@ -94,6 +115,7 @@ router.post('/:id/pay', requirePermission('invoices', 'edit'), async (req, res, 
 router.delete('/:id', requirePermission('invoices', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await canReach(req, 'invoices', 'invoice', req.params.id, 'Full'))) return res.status(404).json({ error: 'Not found' });
     await prisma.invoice.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -103,7 +125,8 @@ router.delete('/:id', requirePermission('invoices', 'full'), async (req, res, ne
 router.get('/stats/summary', requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const invoices = await prisma.invoice.findMany({ include: { items: true } });
+    // Over the invoices the caller may see.
+    const invoices = await prisma.invoice.findMany({ where: await reachableWhere(req, 'invoices', 'invoice'), include: { items: true } });
     const calcTotal = (inv) => {
       const sub = inv.items.reduce((s, i) => s + (i.price * i.quantity * (1 - i.discount / 100)), 0);
       return sub + sub * (inv.tax || 0) / 100;

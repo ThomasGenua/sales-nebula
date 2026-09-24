@@ -1,12 +1,16 @@
 const { Router } = require('express');
-const { pickModelFields, lineItemFields } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields, scalarOrderBy } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
+const { recordAccess, reachableWhere, canReach, linkRefusal } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { createNumbered, QUOTE_NUMBER, INVOICE_NUMBER } = require('../utils/numbering');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
+// A quote named in the path must be one row security lets the caller see, or
+// change for a write; these took any quote id with the module permission alone.
+router.param('id', recordAccess('quotes', 'quote'));
 
 const include = {
   items: { include: { product: { select: { id: true, name: true, sku: true } } } },
@@ -24,8 +28,10 @@ router.get('/', requirePermission('quotes', 'read'), async (req, res, next) => {
     let where = {};
     if (status && status !== 'All') where.status = status;
     if (search) where.number = { contains: search, mode: 'insensitive' };
+    // Quotes the caller may see, sorted on one of a quote's own columns.
+    where = await reachableWhere(req, 'quotes', 'quote', where);
     const [quotes, total] = await Promise.all([
-      prisma.quote.findMany({ where, include, orderBy: sortBy ? { [sortBy]: sortDir } : { createdAt: 'desc' }, skip, take }),
+      prisma.quote.findMany({ where, include, orderBy: scalarOrderBy('quote', sortBy, sortDir) || { createdAt: 'desc' }, skip, take }),
       prisma.quote.count({ where }),
     ]);
     res.json({ data: quotes, meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) } });
@@ -48,6 +54,8 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
     // Same as invoices: keep only real columns and coerce date-only strings,
     // so a plain "2026-12-31" from a date input does not 500 the create.
     const { data } = pickModelFields('quote', rest);
+    const linkProblem = await linkRefusal(req, 'quote', data);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
     // The items were written with name and price, which quote items do not
     // have, so a quote with lines never saved.
@@ -69,6 +77,10 @@ router.put('/:id', requirePermission('quotes', 'edit'), async (req, res, next) =
     const { items, id, createdAt, updatedAt, ...rest } = req.body || {};
     // Real columns only, and no nested writes: the body went to Prisma whole.
     const { data } = pickModelFields('quote', rest);
+    const current = await prisma.quote.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ error: 'Not found' });
+    const linkProblem = await linkRefusal(req, 'quote', data, current);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const lines = Array.isArray(items) ? items.map(i => lineItemFields(i)) : null;
 
     // Replace the items and update the quote together.
@@ -125,6 +137,7 @@ router.post('/:id/create-invoice', requirePermission('invoices', 'edit'), async 
 router.delete('/:id', requirePermission('quotes', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!(await canReach(req, 'quotes', 'quote', req.params.id, 'Full'))) return res.status(404).json({ error: 'Not found' });
     await prisma.quote.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }

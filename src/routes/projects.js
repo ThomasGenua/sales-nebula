@@ -3,7 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { moduleAccess, recordAccess, reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
-const { editableFields } = require('../utils/modelFields');
+const { editableFields, scalarOrderBy } = require('../utils/modelFields');
 const {
   calculateCriticalPath, wouldCreateCycle, assignWbsCodes,
   rollUpProgress, buildGanttRows, addDays, diffDays,
@@ -97,7 +97,7 @@ router.get('/', authenticate, async (req, res, next) => {
     const [data, total] = await Promise.all([
       prisma.project.findMany({
         where: visible, skip: (+page - 1) * +limit, take: +limit,
-        orderBy: { [sortBy]: sortDir },
+        orderBy: scalarOrderBy('project', sortBy, sortDir) || { createdAt: 'desc' },
         include: { _count: { select: { tasks: true, milestones: true, resources: true } } },
       }),
       prisma.project.count({ where: visible }),

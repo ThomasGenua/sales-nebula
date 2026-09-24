@@ -7,6 +7,7 @@ const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 const { moduleAccess, recordAccess, reachableWhere, linkRefusal } = require('../middleware/access');
 const {
   pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
+  scalarWhere, scalarOrderBy,
 } = require('./modelFields');
 const { runWorkflowsSafely } = require('../services/workflowEngine');
 const { createNumbered } = require('./numbering');
@@ -105,11 +106,11 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         where = { ...where, ...searchFilter(search) };
       }
 
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value && value !== 'All') {
-          where[key] = value;
-        }
-      });
+      // Filters on the record's own columns, with plain values. Any query key
+      // went into the where clause, relations included, which reached the
+      // columns of related records.
+      const wanted = Object.fromEntries(Object.entries(filters).filter(([, value]) => value && value !== 'All'));
+      where = { ...where, ...scalarWhere(modelName, wanted) };
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
       const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
@@ -121,7 +122,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       const [records, total] = await Promise.all([
         prisma[modelName].findMany({
           where, include,
-          orderBy: sortBy ? { [sortBy]: sortDir } : orderBy,
+          orderBy: scalarOrderBy(modelName, sortBy, sortDir) || orderBy,
           skip, take,
         }),
         prisma[modelName].count({ where }),
