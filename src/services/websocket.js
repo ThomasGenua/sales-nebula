@@ -81,7 +81,9 @@ function initWebSocket(server, prisma) {
 
   io = new Server(server, {
     cors: {
-      origin: process.env.FRONTEND_URL || 'http://localhost:7544',
+      // FRONTEND_URL may list several origins, comma-separated, as the API's
+      // CORS setting reads it; taken whole, a list matched no origin.
+      origin: (process.env.FRONTEND_URL || 'http://localhost:7544').split(',').map(o => o.trim()).filter(Boolean),
       methods: ['GET', 'POST'],
       credentials: true,
     },

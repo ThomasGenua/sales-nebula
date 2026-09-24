@@ -3,7 +3,7 @@
  * 
  * Security: Helmet, CORS lockdown, input sanitization, HPP, per-route body limits
  * Operational: Structured logging, Prometheus metrics, real health checks
- * Data: Validation constraints on write routes
+ * Data: write routes check their own fields and the org's validation rules
  */
 
 const express = require('express');
@@ -16,7 +16,6 @@ const { limiters } = require('./middleware/rateLimit');
 const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
-const { validateBody } = require('./utils/integrity');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
 
 let helmet, hpp, compression;
@@ -239,7 +238,7 @@ function createApp(rawPrisma) {
     res.end(pixel);
   });
 
-  // ─── PROTECTED ROUTES (with validation constraints on write paths) ───
+  // ─── PROTECTED ROUTES ───
   app.use('/api/contacts', require('./routes/contacts'));
   app.use('/api/leads', require('./routes/leads'));
   app.use('/api/deals', require('./routes/deals'));

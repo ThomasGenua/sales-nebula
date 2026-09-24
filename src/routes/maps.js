@@ -216,8 +216,11 @@ router.get('/markers', authenticate, async (req, res, next) => {
     const markers = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: Math.min(+limit, 5000) }));
 
     if (cluster === 'true') {
-      const precision = precisionForZoom(parseInt(zoom, 10) || 10);
-      const clusters = clusterByGeohash(markers.map(m => ({ ...m, lat: m.latitude, lng: m.longitude })), precision);
+      // clusterByGeohash takes the zoom and converts it itself; handed the
+      // precision, it converted twice and clustered far coarser than asked.
+      const zoomLevel = parseInt(zoom, 10) || 10;
+      const precision = precisionForZoom(zoomLevel);
+      const clusters = clusterByGeohash(markers.map(m => ({ ...m, lat: m.latitude, lng: m.longitude })), zoomLevel);
       return res.json({ clustered: true, precision, totalMarkers: markers.length, clusters });
     }
 
@@ -338,12 +341,13 @@ router.get('/nearby', authenticate, async (req, res, next) => {
 
     const candidates = await reachableMarkers(req, await prisma.mapMarker.findMany({ where, take: 5000 }));
     const origin = { lat: +lat, lng: +lng };
-    const within = findWithinRadius(origin, candidates.map(c => ({ ...c, lat: c.latitude, lng: c.longitude })), radius)
-      .slice(0, Math.min(+limit, 200))
+    // Results carry distanceKm; reading `distance` threw whenever anything
+    // was in range. findWithinRadius stops at 100 unless told otherwise.
+    const within = findWithinRadius(origin, candidates.map(c => ({ ...c, lat: c.latitude, lng: c.longitude })), radius, { limit: Math.min(+limit || 50, 200) })
       .map(m => ({
         module: m.module, recordId: m.recordId, label: m.label, sublabel: m.sublabel,
         latitude: m.latitude, longitude: m.longitude,
-        distanceKm: +m.distance.toFixed(2),
+        distanceKm: m.distanceKm,
         bearing: compassDirection(bearing(origin, { lat: m.latitude, lng: m.longitude })),
       }));
 
@@ -356,8 +360,11 @@ router.post('/route', authenticate, async (req, res, next) => {
   try {
     const { start, stops, returnToStart } = req.body;
     if (!Array.isArray(stops) || stops.length < 2) return res.status(400).json({ error: 'At least two stops required' });
+    // The optimizer's passes grow with the cube of the stops.
+    if (stops.length > 100) return res.status(400).json({ error: 'At most 100 stops per route' });
     for (const s of stops) {
-      if (!isValidPoint({ lat: +s.lat ?? +s.latitude, lng: +s.lng ?? +s.longitude })) {
+      // +undefined is NaN, not null, so `+s.lat ?? +s.latitude` never fell back.
+      if (!isValidPoint({ lat: +(s.lat ?? s.latitude), lng: +(s.lng ?? s.longitude) })) {
         return res.status(400).json({ error: `Invalid coordinates on stop: ${s.label || s.id || 'unknown'}` });
       }
     }

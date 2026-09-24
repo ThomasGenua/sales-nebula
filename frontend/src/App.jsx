@@ -200,7 +200,8 @@ function AuthProvider({ children }) {
 
     // skipRefresh: a stale refresh token from a previous session must not be
     // spent trying to rescue a wrong password.
-    const d = await apiFetch("/auth/login", { method: "POST", body: { email, password }, skipRefresh: true, headers: COOKIE_SESSION });
+    // Trimmed: autofill often leaves a trailing space, which the API refuses as an invalid address.
+    const d = await apiFetch("/auth/login", { method: "POST", body: { email: email.trim(), password }, skipRefresh: true, headers: COOKIE_SESSION });
 
     // A verified MFA device means no session yet. The caller collects a code
     // and finishes at /auth/mfa/verify.
@@ -1403,7 +1404,7 @@ function CasesPage() {
     ]}
     formFields={[
       { key: "subject", label: "Subject", required: true },
-      { key: "status", label: "Status", type: "select", options: ["New","Open","Pending","Escalated","Closed"] },
+      { key: "status", label: "Status", type: "select", options: ["New","Open","Pending","Escalated","Resolved","Closed"] },
       { key: "priority", label: "Priority", type: "select", options: ["Low","Medium","High","Critical"] },
       { key: "origin", label: "Origin", type: "select", options: ["Phone","Email","Web","Chat","Social"] },
       { key: "type", label: "Type", type: "select", options: ["Question","Problem","Feature Request","Bug"] },
