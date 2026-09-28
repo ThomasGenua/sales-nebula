@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes } = require('../utils/modelFields');
-const { moduleAccess, recordAccess } = require('../middleware/access');
+const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 
 const router = Router();
 
@@ -20,7 +20,8 @@ router.get('/:id/contact-roles', authenticate, async (req, res, next) => {
       where: { dealId: req.params.id },
       include: { contact: { select: { id: true, firstName: true, lastName: true, email: true, title: true, phone: true } } },
     });
-    res.json(roles);
+    // A contact the caller cannot open keeps only its id, as on a deal's own include.
+    res.json(await visibleLinks(req, 'dealContactRole', roles, { contact: true }));
   } catch (err) { next(err); }
 });
 
@@ -29,6 +30,10 @@ router.post('/:id/contact-roles', authenticate, requirePermission('deals', 'edit
     const prisma = req.app.locals.prisma;
     const { contactId, role, isPrimary } = req.body;
     if (!contactId || !role) return res.status(400).json({ error: 'contactId and role required' });
+    // A live contact the caller can see: the id was stored as sent, and the
+    // list above read back its name, email and phone.
+    const linkProblem = await linkRefusal(req, 'dealContactRole', { contactId });
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     if (isPrimary) await prisma.dealContactRole.updateMany({ where: { dealId: req.params.id }, data: { isPrimary: false } });
     const dcr = await prisma.dealContactRole.create({ data: { dealId: req.params.id, contactId, role, isPrimary: isPrimary || false } });
     res.status(201).json(dcr);
@@ -82,7 +87,7 @@ router.get('/:id/stage-history', authenticate, async (req, res, next) => {
 router.get('/:id/health', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
     let score = 50;
     const factors = [];
@@ -91,7 +96,7 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     // Has value
     if (parseFloat(deal.value) > 0) { score += 10; factors.push('Has monetary value'); }
     // Has activities recently
-    const recentActivities = await prisma.activity.count({ where: { dealId: req.params.id, createdAt: { gte: new Date(Date.now() - 7 * 86400000) } } });
+    const recentActivities = await prisma.activity.count({ where: { dealId: req.params.id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 7 * 86400000) } } });
     if (recentActivities > 0) { score += 15; factors.push(`${recentActivities} activities in last 7 days`); } else { score -= 15; factors.push('No recent activity'); }
     // Has contact roles
     const contactRoles = await prisma.dealContactRole.count({ where: { dealId: req.params.id } });
@@ -106,16 +111,17 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
 router.get('/:id/similar', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!deal) return res.status(404).json({ error: 'Deal not found' });
+    // Only deals the caller can see: this listed any rep's deals, value and all.
     const similar = await prisma.deal.findMany({
-      where: {
-        id: { not: deal.id }, deletedAt: null,
+      where: await reachableWhere(req, 'deals', 'deal', {
+        id: { not: deal.id },
         OR: [
           ...(deal.accountId ? [{ accountId: deal.accountId }] : []),
           { stage: deal.stage },
         ],
-      },
+      }),
       take: 10, orderBy: { createdAt: 'desc' },
       select: { id: true, name: true, stage: true, value: true, probability: true, closeDate: true },
     });
@@ -126,20 +132,20 @@ router.get('/:id/similar', authenticate, async (req, res, next) => {
 module.exports = router;
 
 // Deal competitors
-router.get('/:id/competitors', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const competitors = await prisma.dealCompetitor.findMany({ where: { dealId: req.params.id } }).catch(() => []);
-    res.json(competitors);
-  } catch (err) { next(err); }
-});
-
+// A deal's competitors are the list on the deal itself, which GET and PUT
+// /:id/competitors in deals.js read and replace; this adds one to it. It
+// wrote DealCompetitor rows instead, and its GET here, registered behind the
+// deals router's, never answered, so a competitor added here was never seen.
 router.post('/:id/competitors', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, strengths, weaknesses, position } = req.body;
+    const { name, strengths, weaknesses, position, threat } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const comp = await prisma.dealCompetitor.create({ data: { dealId: req.params.id, name, strengths, weaknesses, position } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { competitors: true } });
+    if (!deal) return res.status(404).json({ error: 'Not found' });
+    const comp = Object.fromEntries(Object.entries({ name, strengths, weaknesses, position, threat }).filter(([, v]) => v !== undefined));
+    const competitors = [...(Array.isArray(deal.competitors) ? deal.competitors : []), comp];
+    await prisma.deal.update({ where: { id: req.params.id }, data: { competitors } });
     res.status(201).json(comp);
   } catch (err) { next(err); }
 });
@@ -148,7 +154,7 @@ router.post('/:id/competitors', authenticate, async (req, res, next) => {
 router.get('/:id/analysis', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.id }, include: { activities: { where: { deletedAt: null } }, contactRoles: { select: { role: true } } } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { activities: { where: { deletedAt: null } }, contactRoles: { select: { role: true } } } });
     if (!deal) return res.status(404).json({ error: 'Not found' });
     const daysInPipeline = deal.createdAt ? Math.floor((Date.now() - new Date(deal.createdAt)) / 86400000) : 0;
     res.json({ dealId: deal.id, stage: deal.stage, daysInPipeline, activityCount: deal.activities?.length || 0, contactRoles: deal.contactRoles?.length || 0, hasDecisionMaker: (deal.contactRoles || []).some(c => c.role === 'Decision Maker'), recommendedActions: daysInPipeline > 60 ? ['Schedule follow-up','Engage executive sponsor'] : ['Continue nurturing'] });
@@ -159,9 +165,9 @@ router.get('/:id/analysis', authenticate, async (req, res, next) => {
 router.get('/:id/win-analysis', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const deal = await prisma.deal.findUnique({ where: { id: req.params.id } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!deal) return res.status(404).json({ error: 'Not found' });
-    const activities = await prisma.activity.count({ where: { dealId: deal.id, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } } });
+    const activities = await prisma.activity.count({ where: { dealId: deal.id, deletedAt: null, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } } });
     const contacts = await prisma.dealContactRole.count({ where: { dealId: deal.id } }).catch(() => 0);
     const daysSinceUpdate = Math.floor((Date.now() - new Date(deal.updatedAt)) / 86400000);
     const factors = {

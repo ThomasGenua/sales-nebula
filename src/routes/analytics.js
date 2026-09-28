@@ -3,8 +3,8 @@ const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
-const { pickModelFields, scalarWhere, scalarSelect } = require('../utils/modelFields');
-const { dealTotalInBase } = require('../utils/currency');
+const { pickModelFields, scalarWhere, scalarSelect, modelHasField } = require('../utils/modelFields');
+const { dealTotalInBase, currencyContext, sumInBase } = require('../utils/currency');
 const router = Router();
 router.use(authenticate);
 
@@ -14,6 +14,41 @@ const dmmfModel = name => Prisma.dmmf.datamodel.models.find(m => m.name.toLowerC
 
 /** Where a saved item belongs to the caller, unless they are an administrator. */
 const ownedBy = (req, id) => (isAdmin(req.user) ? { id } : { id, createdById: req.userId });
+
+// Headline figures for the Analytics page, which asked for this route when
+// there was none. Over the live records the caller may see in each module (one
+// they cannot read counts as empty): lead conversion, the average won deal in
+// the default currency, days from a won deal's creation to its close, and
+// activities per day over the last 30 days.
+router.get('/overview', requirePermission('reports', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const since = new Date(Date.now() - 30 * 86400000);
+    const readable = (module, model, where) => (permits(req, module, 'read') ? reachableWhere(req, module, model, where) : null);
+    const [leadsWhere, convertedWhere, wonWhere, activitiesWhere, ctx] = await Promise.all([
+      readable('leads', 'lead', {}),
+      readable('leads', 'lead', { status: 'Converted' }),
+      readable('deals', 'deal', { stage: 'Closed Won' }),
+      readable('activities', 'activity', { date: { gte: since, lte: new Date() } }),
+      currencyContext(prisma),
+    ]);
+    const [leads, converted, won, activities] = await Promise.all([
+      leadsWhere ? prisma.lead.count({ where: leadsWhere }) : 0,
+      convertedWhere ? prisma.lead.count({ where: convertedWhere }) : 0,
+      wonWhere ? prisma.deal.findMany({ where: wonWhere, select: { value: true, currency: true, createdAt: true, closeDate: true } }) : [],
+      activitiesWhere ? prisma.activity.count({ where: activitiesWhere }) : 0,
+    ]);
+    // A won deal's closeDate is when it closed.
+    const cycles = won.filter(d => d.closeDate).map(d => Math.max(0, (d.closeDate - d.createdAt) / 86400000));
+    res.json({
+      currency: ctx.base,
+      conversionRate: leads ? Math.round((converted / leads) * 100) : 0,
+      avgDealSize: won.length ? Math.round(sumInBase(won, ctx) / won.length) : 0,
+      avgSalesCycle: cycles.length ? Math.round(cycles.reduce((s, c) => s + c, 0) / cycles.length) : 0,
+      activitiesPerDay: Math.round((activities / 30) * 10) / 10,
+    });
+  } catch (err) { next(err); }
+});
 
 // Datasets
 router.get('/datasets', requirePermission('reports', 'read'), async (req, res, next) => {
@@ -34,7 +69,8 @@ router.post('/datasets/:id/refresh', requirePermission('reports', 'edit'), async
     for (const mod of ds.sourceModules) {
       const MODEL_MAP = { contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account', cases: 'case', activities: 'activity', products: 'product' };
       const model = MODEL_MAP[mod];
-      if (model && prisma[model]) { totalRows += await prisma[model].count(); }
+      // Live rows; deleted ones were counted too.
+      if (model && prisma[model]) { totalRows += await prisma[model].count(modelHasField(model, 'deletedAt') ? { where: { deletedAt: null } } : undefined); }
     }
     await prisma.analyticsDataset.update({ where: { id: ds.id }, data: { lastRefreshed: new Date(), rowCount: totalRows } });
     res.json({ refreshed: true, rowCount: totalRows });
@@ -42,8 +78,13 @@ router.post('/datasets/:id/refresh', requirePermission('reports', 'edit'), async
 });
 
 // Dashboards
+// The caller's own dashboards and public ones, as for saved reports: every
+// private dashboard was listed to anyone who could read reports.
 router.get('/dashboards', requirePermission('reports', 'read'), async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.analyticsDashboard.findMany({ orderBy: { updatedAt: 'desc' } }) }); }
+  try {
+    const where = isAdmin(req.user) ? {} : { OR: [{ createdById: req.userId }, { isPublic: true }] };
+    res.json({ data: await req.app.locals.prisma.analyticsDashboard.findMany({ where, orderBy: { updatedAt: 'desc' } }) });
+  }
   catch (err) { next(err); }
 });
 router.post('/dashboards', requirePermission('reports', 'edit'), async (req, res, next) => {
@@ -161,17 +202,21 @@ router.get('/funnel', authenticate, requirePermission('reports', 'read'), async 
 router.get('/cohort', authenticate, requirePermission('reports', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { months = 6 } = req.query;
+    const months = Math.min(parseInt(req.query.months, 10) || 6, 36);
     const cohorts = [];
-    for (let i = 0; i < +months; i++) {
-      const start = new Date(); start.setMonth(start.getMonth() - i); start.setDate(1); start.setHours(0,0,0,0);
+    for (let i = 0; i < months; i++) {
+      // Day 1 before stepping back: from the 29th to the 31st the step
+      // overflowed into the next month, so one month came out twice and
+      // another never.
+      const start = new Date(); start.setDate(1); start.setMonth(start.getMonth() - i); start.setHours(0,0,0,0);
       const end = new Date(start); end.setMonth(end.getMonth() + 1);
       const [created, converted, won] = await Promise.all([
         prisma.lead.count({ where: { createdAt: { gte: start, lt: end }, deletedAt: null } }),
         prisma.lead.count({ where: { createdAt: { gte: start, lt: end }, convertedAt: { not: null }, deletedAt: null } }),
         prisma.deal.count({ where: { createdAt: { gte: start, lt: end }, stage: 'Closed Won', deletedAt: null } }),
       ]);
-      cohorts.push({ month: start.toISOString().substring(0, 7), leadsCreated: created, converted, dealsWon: won, conversionRate: created ? Math.round((converted / created) * 100) : 0 });
+      // The local month, as the bounds are; in UTC it read a month early east of Greenwich.
+      cohorts.push({ month: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`, leadsCreated: created, converted, dealsWon: won, conversionRate: created ? Math.round((converted / created) * 100) : 0 });
     }
     res.json(cohorts.reverse());
   } catch (err) { next(err); }

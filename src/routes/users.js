@@ -21,6 +21,29 @@ router.get('/', requirePermission('users', 'read'), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/users/online - Active users (based on recent activity)
+// Registered after /:id, which took "online" for a user id and answered 404,
+// so this never ran. It now comes first, behind the users: read that lookup
+// asked for.
+router.get('/online', requirePermission('users', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    // Consider users "online" if they created an audit log entry in last 15 minutes
+    const threshold = new Date(Date.now() - 15 * 60 * 1000);
+    const recentLogs = await prisma.auditLog.findMany({
+      where: { createdAt: { gte: threshold } },
+      select: { userId: true },
+      distinct: ['userId'],
+    });
+    const onlineIds = recentLogs.map(l => l.userId).filter(Boolean);
+    const users = await prisma.user.findMany({
+      where: { id: { in: onlineIds }, active: true },
+      select: { id: true, firstName: true, lastName: true, avatar: true },
+    });
+    res.json({ data: users, count: users.length });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id', requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -64,6 +87,19 @@ const passwordProblem = password => {
   return valid ? null : errors.join('. ');
 };
 
+// Addresses are stored lowercased, as signup, invites and the profile page
+// store them; this route kept the case typed, which sign-in then had to match.
+const normalEmail = email => String(email).trim().toLowerCase();
+
+/**
+ * Whether another account already has this address, in any case. (SQLite, the
+ * development fallback, cannot ask; the unique index still refuses an exact copy.)
+ */
+const emailTaken = (prisma, email, exceptId) => prisma.user.findFirst({
+  where: { email: { equals: email, mode: 'insensitive' }, ...(exceptId && { NOT: { id: exceptId } }) },
+  select: { id: true },
+}).catch(() => null);
+
 router.post('/', requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -73,13 +109,15 @@ router.post('/', requirePermission('users', 'full'), async (req, res, next) => {
     if (weak) return res.status(400).json({ error: weak });
     const refusal = await roleGrantRefusal(prisma, req.user, roleId);
     if (refusal) return res.status(refusal === 'Role not found' ? 400 : 403).json({ error: refusal });
+    const address = normalEmail(email);
+    if (await emailTaken(prisma, address)) return res.status(409).json({ error: 'A user already exists with that email' });
 
     const hash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
-      data: { email, password: hash, firstName, lastName, roleId, active: active !== false },
+      data: { email: address, password: hash, firstName, lastName, roleId, active: active !== false },
       include: { role: true },
     });
-    await req.audit({ action: 'create', module: 'users', recordId: user.id, details: `Created user ${email}` });
+    await req.audit({ action: 'create', module: 'users', recordId: user.id, details: `Created user ${address}` });
     const { password: _, ...safeUser } = user;
     res.status(201).json(safeUser);
   } catch (err) { next(err); }
@@ -97,6 +135,10 @@ router.put('/:id', requirePermission('users', 'full'), async (req, res, next) =>
     const data = {};
     for (const key of ['email', 'firstName', 'lastName', 'avatar', 'timezone', 'locale']) {
       if (b[key] !== undefined) data[key] = b[key];
+    }
+    if (typeof data.email === 'string') {
+      data.email = normalEmail(data.email);
+      if (await emailTaken(prisma, data.email, req.params.id)) return res.status(409).json({ error: 'A user already exists with that email' });
     }
     if (b.active !== undefined) data.active = !!b.active;
     if (b.roleId !== undefined) {
@@ -126,7 +168,14 @@ router.delete('/:id', requirePermission('users', 'full'), async (req, res, next)
     if (req.params.id === req.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
     const { status, error } = await manageableUser(req, req.params.id);
     if (error) return res.status(status).json({ error });
-    await prisma.user.delete({ where: { id: req.params.id } });
+    // Anyone who has signed in is referenced by their history (the audit log
+    // at least), which the database will not orphan: that was a 500.
+    try {
+      await prisma.user.delete({ where: { id: req.params.id } });
+    } catch (err) {
+      if (err.code !== 'P2003') throw err;
+      return res.status(409).json({ error: 'This user has history in the system and cannot be deleted. Deactivate the account instead.', code: 'USER_HAS_HISTORY' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -223,27 +272,6 @@ router.delete('/roles/:id', requirePermission('roles', 'full'), async (req, res,
 });
 
 // GET /api/users/me/preferences
-// GET /api/users/online - Active users (based on recent activity)
-router.get('/online', async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    // Consider users "online" if they created an audit log entry in last 15 minutes
-    const threshold = new Date(Date.now() - 15 * 60 * 1000);
-    const recentLogs = await prisma.auditLog.findMany({
-      where: { createdAt: { gte: threshold } },
-      select: { userId: true },
-      distinct: ['userId'],
-    });
-    const onlineIds = recentLogs.map(l => l.userId).filter(Boolean);
-    const users = await prisma.user.findMany({
-      where: { id: { in: onlineIds }, active: true },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    });
-    res.json({ data: users, count: users.length });
-  } catch (err) { next(err); }
-});
-
-// GET /api/users/me/preferences
 router.get('/me/preferences', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -286,18 +314,19 @@ router.put('/me/preferences', async (req, res, next) => {
 router.get('/me/activity', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // Live records only: deleted deals, activities and leads were listed as work to do.
     const [myDeals, myActivities, myLeads, myNotifications] = await Promise.all([
       prisma.deal.findMany({
-        where: { ownerId: req.userId, stage: { notIn: ['Closed Won', 'Closed Lost'] } },
+        where: { ownerId: req.userId, deletedAt: null, stage: { notIn: ['Closed Won', 'Closed Lost'] } },
         orderBy: { updatedAt: 'desc' }, take: 10,
         select: { id: true, name: true, stage: true, value: true, closeDate: true, account: { select: { name: true } } },
       }),
       prisma.activity.findMany({
-        where: { assignedId: req.userId, status: { not: 'Completed' } },
+        where: { assignedId: req.userId, deletedAt: null, status: { not: 'Completed' } },
         orderBy: { date: 'asc' }, take: 10,
       }),
       prisma.lead.findMany({
-        where: { assignedId: req.userId, status: { notIn: ['Converted', 'Unqualified'] } },
+        where: { assignedId: req.userId, deletedAt: null, status: { notIn: ['Converted', 'Unqualified'] } },
         orderBy: { updatedAt: 'desc' }, take: 10,
         select: { id: true, firstName: true, lastName: true, company: true, status: true, score: true },
       }),

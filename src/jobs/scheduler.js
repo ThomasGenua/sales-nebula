@@ -11,6 +11,7 @@
 
 const { logger } = require('../services/logger');
 const graphMailbox = require('../services/graphMailbox');
+const { notify } = require('../services/notify');
 
 let Queue, cron;
 try { Queue = require('bull'); } catch (e) { Queue = null; }
@@ -84,9 +85,41 @@ async function withRetry(jobName, fn, maxRetries = 3) {
 /** A scheduled rule sweeps its whole module; do not let one run the table. */
 const SCHEDULED_WORKFLOW_LIMIT = 500;
 
+/**
+ * Whether a reminder's user may still see its event, by the rule of
+ * visibleEventWhere in routes/calendar: its owner or an invitee (an edited
+ * occurrence through its series), or an admin for an event not marked
+ * private. Taken off the event, or with it deleted, they were still sent its
+ * title, which is also a reminder's default message.
+ */
+async function eventStillVisible(reminder) {
+  const { isAdmin } = require('../middleware/rowSecurity');
+  const user = await prisma.user.findUnique({ where: { id: reminder.userId }, include: { role: true } });
+  if (!user?.active) return false;
+  const participant = {
+    OR: [
+      { ownerId: user.id },
+      { invitees: { some: { userId: user.id } } },
+      { parentEvent: { is: { invitees: { some: { userId: user.id } } } } },
+    ],
+  };
+  const scope = isAdmin(user) ? { OR: [participant, { visibility: { notIn: ['Private', 'Confidential'] } }] } : participant;
+  const event = await prisma.calendarEvent.findFirst({ where: { AND: [{ id: reminder.eventId, deletedAt: null }, scope] }, select: { id: true } });
+  return !!event;
+}
+
 function modelHasDeletedAt(modelName) {
   const { modelHasField } = require('../utils/modelFields');
   return modelHasField(modelName, 'deletedAt');
+}
+
+/** Whether outbound mail to this address, or to its @domain, is suppressed. */
+async function addressSuppressed(address) {
+  const email = String(address).trim().toLowerCase();
+  const hit = await prisma.emailSuppression.findFirst({
+    where: { email: { in: [email, `@${email.split('@')[1]}`] } }, select: { id: true },
+  });
+  return !!hit;
 }
 
 const handlers = {
@@ -110,10 +143,21 @@ const handlers = {
       take: 200,
     });
 
-    let delivered = 0, failed = 0;
+    let delivered = 0, failed = 0, dismissed = 0;
 
     for (const reminder of due) {
       try {
+        // Not sent once its user can no longer see the event (eventStillVisible),
+        // nor for an activity that has since been deleted.
+        const gone = reminder.eventId
+          ? !(await eventStillVisible(reminder))
+          : !!reminder.activityId && !(await prisma.activity.findFirst({ where: { id: reminder.activityId, deletedAt: null }, select: { id: true } }));
+        if (gone) {
+          await prisma.reminder.update({ where: { id: reminder.id }, data: { status: 'Dismissed', dismissedAt: new Date() } });
+          dismissed++;
+          continue;
+        }
+
         // Fall back to whatever the reminder is about, so the notification
         // says something more useful than "Reminder".
         let message = reminder.message;
@@ -142,14 +186,12 @@ const handlers = {
         } else {
           // Popup, Push and SMS all land in the notification feed for now;
           // SMS has no transport and silently dropping it would be worse.
-          await prisma.notification.create({
-            data: {
-              title: 'Reminder',
-              message,
-              userId: reminder.userId,
-              recordModule: reminder.eventId ? 'calendar' : 'activities',
-              recordId: reminder.eventId || reminder.activityId || null,
-            },
+          await notify(prisma, 'reminders', {
+            title: 'Reminder',
+            message,
+            userId: reminder.userId,
+            recordModule: reminder.eventId ? 'calendar' : 'activities',
+            recordId: reminder.eventId || reminder.activityId || null,
           });
         }
 
@@ -168,7 +210,7 @@ const handlers = {
       }
     }
 
-    return { due: due.length, delivered, failed };
+    return { due: due.length, delivered, failed, dismissed };
   },
 
   /**
@@ -217,7 +259,7 @@ const handlers = {
 
   async checkOverdueInvoices() {
     const overdue = await prisma.invoice.updateMany({
-      where: { status: 'Sent', dueDate: { lt: new Date() } },
+      where: { status: 'Sent', dueDate: { lt: new Date() }, deletedAt: null },
       data: { status: 'Overdue' },
     });
     return { updated: overdue.count };
@@ -277,8 +319,12 @@ const handlers = {
    * never happened, which is worse than no automation at all.
    */
   async runScheduledWorkflows() {
-    const { resolveModel, evaluateConditions, runActions } = require('../services/workflowEngine');
-    const workflows = await prisma.workflow.findMany({ where: { active: true, trigger: 'scheduled' } });
+    const { resolveModel, evaluateConditions, runActions, triggersFor } = require('../services/workflowEngine');
+    // Every spelling the engine takes for a scheduled rule ('Scheduled',
+    // 'schedule', 'cron'); only the exact 'scheduled' was ever picked up.
+    const scheduled = triggersFor('scheduled');
+    const workflows = (await prisma.workflow.findMany({ where: { active: true } }))
+      .filter(w => scheduled.includes(String(w.trigger || '').toLowerCase()));
 
     let executed = 0, matched = 0, failed = 0;
 
@@ -348,65 +394,101 @@ const handlers = {
     return { deleted: deleted.count };
   },
 
+  /**
+   * Alert owners to open deals with no change and no activity in 30 days.
+   * Deleted deals were alerted on, a deal with a call logged yesterday was
+   * "stale", and each run added another alert beside the unread one.
+   */
   async checkStaleDeals() {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
     const staleDeals = await prisma.deal.findMany({
-      where: { stage: { notIn: ['Closed Won', 'Closed Lost'] }, updatedAt: { lt: cutoff } },
+      where: {
+        stage: { notIn: ['Closed Won', 'Closed Lost'] }, updatedAt: { lt: cutoff }, deletedAt: null,
+        activities: { none: { deletedAt: null, OR: [{ createdAt: { gte: cutoff } }, { date: { gte: cutoff } }] } },
+      },
       select: { id: true, name: true, ownerId: true },
     });
 
+    // Not again while the owner's last alert for the deal is still unread.
+    const unread = await prisma.notification.findMany({
+      where: { title: 'Stale Deal Alert', read: false, recordModule: 'deals', recordId: { in: staleDeals.map(d => d.id) } },
+      select: { userId: true, recordId: true },
+    });
+    const pending = new Set(unread.map(n => `${n.userId}:${n.recordId}`));
+
+    let alerted = 0;
     for (const deal of staleDeals) {
-      if (deal.ownerId) {
-        await prisma.notification.create({
-          data: {
-            title: 'Stale Deal Alert',
-            message: `"${deal.name}" has had no activity in 30+ days`,
-            userId: deal.ownerId,
-            recordModule: 'deals', recordId: deal.id,
-          },
+      if (deal.ownerId && !pending.has(`${deal.ownerId}:${deal.id}`)) {
+        const sent = await notify(prisma, 'dealAlerts', {
+          title: 'Stale Deal Alert',
+          message: `"${deal.name}" has had no activity in 30+ days`,
+          userId: deal.ownerId,
+          recordModule: 'deals', recordId: deal.id,
         });
+        if (sent) alerted++;
       }
     }
-    return { staleDeals: staleDeals.length };
+    return { staleDeals: staleDeals.length, alerted };
   },
 
+  /**
+   * Warn on, then escalate, open cases older than their priority's policy.
+   *
+   * Nothing was ever escalated: createdAt was not selected, so every case's
+   * age compared as undefined. Deleted cases were swept too, and the same
+   * warning went to the assignee every half hour; slaBreached now marks it
+   * sent, and a case with no assignee warns its owner. An escalation is
+   * stamped and recorded as the escalate route does it.
+   */
   async enforceSla() {
     const policies = await prisma.slaPolicy.findMany({ where: { active: true } });
     if (policies.length === 0) return { skipped: 'No active SLA policies' };
 
-    let escalated = 0;
+    let escalated = 0, warned = 0;
     for (const policy of policies) {
       const threshold = new Date(Date.now() - policy.firstResponseMinutes * 60 * 1000);
       const overdueCase = await prisma.case.findMany({
         where: {
           priority: policy.priority,
-          status: { notIn: ['Resolved', 'Closed', 'Escalated'] },
+          // Not while it waits on the customer, which pauses the SLA board's clock too.
+          status: { notIn: ['Resolved', 'Closed', 'Rejected', 'Escalated', ...require('../utils/integrity').SLA_PAUSED_STATUSES] },
           createdAt: { lt: threshold },
+          deletedAt: null,
         },
-        select: { id: true, caseNumber: true, assignedId: true },
+        select: { id: true, caseNumber: true, status: true, assignedId: true, ownerId: true, createdAt: true, slaBreached: true },
       });
 
       for (const cs of overdueCase) {
-        if (policy.escalateAfterMinutes) {
-          const escThreshold = new Date(Date.now() - policy.escalateAfterMinutes * 60 * 1000);
-          if (cs.createdAt < escThreshold) {
-            await prisma.case.update({ where: { id: cs.id }, data: { status: 'Escalated' } });
-            escalated++;
-          }
-        }
-        if (cs.assignedId) {
-          await prisma.notification.create({
+        const escalate = !!policy.escalateAfterMinutes
+          && cs.createdAt < new Date(Date.now() - policy.escalateAfterMinutes * 60 * 1000);
+        if (escalate) {
+          await prisma.case.update({
+            where: { id: cs.id },
             data: {
-              title: 'SLA Breach Warning',
-              message: `Case ${cs.caseNumber} has breached ${policy.priority} SLA (${policy.firstResponseMinutes}min response time)`,
-              userId: cs.assignedId,
-              recordModule: 'cases', recordId: cs.id,
+              status: 'Escalated', isEscalated: true, escalatedAt: new Date(), slaBreached: true,
+              escalationReason: `Open past the ${policy.priority} SLA (${policy.escalateAfterMinutes} min)`,
             },
           });
+          await prisma.caseStatusHistory.create({
+            data: { caseId: cs.id, fromStatus: cs.status, toStatus: 'Escalated', note: 'Escalated by SLA policy' },
+          }).catch(() => {});
+          await require('../services/webhooks').fireWebhookEvent(prisma, 'case.escalated', { id: cs.id, caseNumber: cs.caseNumber, by: 'sla' });
+          escalated++;
         }
+        if (cs.slaBreached) continue;
+        if (!escalate) await prisma.case.update({ where: { id: cs.id }, data: { slaBreached: true } });
+        // ownerId is a plain column, so a stale one must not fail the run.
+        const recipient = cs.assignedId || cs.ownerId;
+        const sent = recipient && await notify(prisma, 'caseAlerts', {
+          title: 'SLA Breach Warning',
+          message: `Case ${cs.caseNumber} has breached ${policy.priority} SLA (${policy.firstResponseMinutes}min response time)`,
+          userId: recipient,
+          recordModule: 'cases', recordId: cs.id,
+        }).catch(() => null);
+        if (sent) warned++;
       }
     }
-    return { policiesChecked: policies.length, escalated };
+    return { policiesChecked: policies.length, escalated, warned };
   },
 
   async cleanupRecycleBin() {
@@ -416,9 +498,19 @@ const handlers = {
     return { purged: result.count };
   },
 
+  /**
+   * Send each due step to the enrolled contact or lead.
+   *
+   * A step was recorded as 'sent' and handed to no transport, a lead's step
+   * failed outright (Email has no leadId), a deleted person was still
+   * "emailed", and pausing the sequence stopped nothing. It now goes through
+   * the mailer to the live person's address, unless that address or its
+   * domain is suppressed, and the email records what came back.
+   */
   async processSequenceSteps() {
+    const { sendEmail } = require('../services/mailer');
     const due = await prisma.emailSequenceEnrollment.findMany({
-      where: { status: 'Active', nextSendAt: { lte: new Date() } },
+      where: { status: 'Active', nextSendAt: { lte: new Date() }, sequence: { status: 'Active' } },
       include: { sequence: true },
     });
 
@@ -434,18 +526,28 @@ const handlers = {
         continue;
       }
 
-      // Create email from step
       try {
-        const emailData = {
-          subject: currentStep.subject || 'Sequence Email',
-          body: currentStep.body || '',
-          status: 'sent',
-          sentAt: new Date(),
-        };
-        if (enrollment.contactId) emailData.contactId = enrollment.contactId;
-        if (enrollment.leadId) emailData.leadId = enrollment.leadId;
-        await prisma.email.create({ data: emailData });
-        sent++;
+        const person = enrollment.contactId
+          ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, select: { email: true } })
+          : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null }, select: { email: true } });
+        const to = person?.email ? String(person.email).trim() : null;
+        if (to && !(await addressSuppressed(to))) {
+          // A step may name a template instead of carrying its own text.
+          const template = currentStep.templateId && !(currentStep.subject && currentStep.body)
+            ? await prisma.emailTemplate.findUnique({ where: { id: String(currentStep.templateId) } }).catch(() => null)
+            : null;
+          const subject = currentStep.subject || template?.subject || 'Sequence Email';
+          const body = currentStep.body || template?.body || '';
+          const delivery = await sendEmail(prisma, { to, subject, body });
+          await prisma.email.create({
+            data: {
+              subject, body, toEmail: to, status: delivery.status,
+              sentAt: delivery.delivered ? new Date() : null,
+              ...(enrollment.contactId && { contactId: enrollment.contactId }),
+            },
+          });
+          if (delivery.status !== 'failed') sent++;
+        }
       } catch (e) { /* Individual send failures don't stop sequence */ }
 
       const nextStep = enrollment.currentStep + 1;
@@ -486,6 +588,7 @@ function initJobQueue(databaseClient) {
 
     queues.maintenance = new Queue('maintenance', opts);
     queues.workflows = new Queue('workflows', opts);
+    queues.messaging = new Queue('messaging', opts);
 
     // Register processors with retry
     queues.maintenance.process('overdue-invoices', async () => withRetry('checkOverdueInvoices', handlers.checkOverdueInvoices));
@@ -494,6 +597,14 @@ function initJobQueue(databaseClient) {
     queues.maintenance.process('cleanup-notifications', async () => withRetry('cleanupNotifications', handlers.cleanupNotifications));
     queues.maintenance.process('stale-deals', async () => withRetry('checkStaleDeals', handlers.checkStaleDeals));
     queues.workflows.process('scheduled', async () => withRetry('runScheduledWorkflows', handlers.runScheduledWorkflows));
+    // These five ran only under node-cron: with Redis configured, SLAs were
+    // never enforced, reminders and sequence mail never went out, mailboxes
+    // were never read and the recycle bin never emptied.
+    queues.maintenance.process('enforce-sla', async () => withRetry('enforceSla', handlers.enforceSla));
+    queues.maintenance.process('cleanup-recycle-bin', async () => withRetry('cleanupRecycleBin', handlers.cleanupRecycleBin));
+    queues.messaging.process('sequence-steps', async () => withRetry('processSequenceSteps', handlers.processSequenceSteps));
+    queues.messaging.process('poll-mailboxes', async () => withRetry('pollInboundMailboxes', handlers.pollInboundMailboxes));
+    queues.messaging.process('deliver-reminders', async () => withRetry('deliverReminders', handlers.deliverReminders));
 
     // Schedule recurring jobs
     queues.maintenance.add('overdue-invoices', {}, { repeat: { cron: '0 6 * * *' } });
@@ -502,6 +613,11 @@ function initJobQueue(databaseClient) {
     queues.maintenance.add('cleanup-notifications', {}, { repeat: { cron: '0 3 * * 0' } });
     queues.maintenance.add('stale-deals', {}, { repeat: { cron: '0 8 * * 1' } });
     queues.workflows.add('scheduled', {}, { repeat: { cron: '*/15 * * * *' } });
+    queues.maintenance.add('enforce-sla', {}, { repeat: { cron: '*/30 * * * *' } });
+    queues.maintenance.add('cleanup-recycle-bin', {}, { repeat: { cron: '0 4 * * *' } });
+    queues.messaging.add('sequence-steps', {}, { repeat: { cron: '*/10 * * * *' } });
+    queues.messaging.add('poll-mailboxes', {}, { repeat: { cron: '* * * * *' } });
+    queues.messaging.add('deliver-reminders', {}, { repeat: { cron: '* * * * *' } });
 
     // Error handler
     Object.values(queues).forEach(q => {

@@ -46,12 +46,17 @@ async function loadRenderData(req, module, recordId) {
   if (record.dealId) await safeFind('deal', () => readable('deals', 'deal', record.dealId));
   if (record.ownerId) await safeFind('owner', () => prisma.user.findUnique({ where: { id: record.ownerId }, select: { id: true, firstName: true, lastName: true, email: true } }));
 
-  // Line items live on different models per document type
-  const lineItemModels = { quotes: 'quoteLineItem', invoices: 'invoiceLineItem', orders: 'orderLineItem', contracts: 'contractLineItem' };
+  // Line items as the Quotes, Invoices and Orders modules write them, named
+  // by their description or else their product. This read invoiceLineItem,
+  // orderLineItem and contractLineItem, which are not models, and
+  // QuoteLineItem, which the quote pages do not write, so quotes, invoices
+  // and orders printed with no lines and no totals.
+  const lineItemModels = { quotes: 'quoteItem', invoices: 'invoiceItem', orders: 'orderItem' };
   const lim = lineItemModels[module];
   if (lim) {
     const key = `${MODEL_FOR[module]}Id`;
-    await safeFind('lineItems', () => prisma[lim].findMany({ where: { [key]: record.id }, orderBy: { sortOrder: 'asc' } }));
+    await safeFind('lineItems', async () => (await prisma[lim].findMany({ where: { [key]: record.id }, include: { product: { select: { name: true } } } }))
+      .map(({ product, ...item }) => ({ ...item, name: item.description || product?.name || '' })));
   }
 
   return { record, related };
@@ -126,6 +131,10 @@ router.put('/:id', authenticate, requirePermission('admin', 'edit'), auditMiddle
   try {
     const prisma = req.app.locals.prisma;
     const data = columnsFrom('pdfTemplate', req.body);
+    // The editor sends the whole template back. Usage is the renders' to
+    // count (a stale form reset it), and deletedAt let admin: edit delete
+    // what DELETE needs admin: full for.
+    for (const key of ['usageCount', 'lastUsedAt', 'createdById', 'deletedAt']) delete data[key];
 
     if (data.bodyHtml) {
       const v = validateTemplate(data.bodyHtml);

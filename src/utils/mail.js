@@ -20,7 +20,10 @@ function getTransporter() {
 }
 
 function appBaseUrl() {
-  return String(process.env.FRONTEND_URL || 'http://localhost:7544').replace(/\/$/, '');
+  // FRONTEND_URL is a comma-separated list of allowed origins (app.js reads it
+  // so); links go to the first. Used whole, a list broke every emailed link.
+  const first = String(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).find(Boolean);
+  return (first || 'http://localhost:7544').replace(/\/+$/, '');
 }
 
 function appUrl(pathname) {

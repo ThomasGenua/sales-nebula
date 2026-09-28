@@ -106,8 +106,11 @@ router.post('/analyze', authenticate, async (req, res, next) => {
     // Sentiment (simple)
     const positiveWords = ['great', 'excellent', 'love', 'perfect', 'amazing', 'interested', 'agree', 'yes', 'absolutely'];
     const negativeWords = ['concern', 'issue', 'problem', 'expensive', 'no', 'difficult', 'worried', 'unfortunately'];
-    const posCount = positiveWords.filter(w => text.toLowerCase().includes(w)).length;
-    const negCount = negativeWords.filter(w => text.toLowerCase().includes(w)).length;
+    // Whole words: as substrings, "no" matched "know", "not" and "now", and
+    // "yes" matched "eyes", so nearly every call read as negative.
+    const words = new Set(text.toLowerCase().match(/[a-z']+/g) || []);
+    const posCount = positiveWords.filter(w => words.has(w)).length;
+    const negCount = negativeWords.filter(w => words.has(w)).length;
     const sentiment = posCount > negCount ? 'Positive' : negCount > posCount ? 'Negative' : 'Neutral';
     const analysis = {
       wordCount, sentenceCount: sentences.length, questionCount: questions.length,
@@ -156,10 +159,13 @@ router.get('/trends', authenticate, async (req, res, next) => {
       where: { createdAt: { gte: thirtyDaysAgo }, ...(isAdmin(req.user) ? {} : { userId: req.user.id }) },
       orderBy: { createdAt: 'asc' },
     });
-    // Group by week
+    // Group by week, keyed by the week's first day (Sunday, UTC). The key was
+    // the month, so "weekly" data held one or two buckets.
     const weeklyData = {};
     recordings.forEach(r => {
-      const week = new Date(r.createdAt).toISOString().split('T')[0].substring(0, 7);
+      const start = new Date(r.createdAt);
+      start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+      const week = start.toISOString().split('T')[0];
       if (!weeklyData[week]) weeklyData[week] = { count: 0, totalDuration: 0 };
       weeklyData[week].count++;
       weeklyData[week].totalDuration += r.duration || 0;
@@ -179,19 +185,21 @@ router.post('/dialer/call', authenticate, auditMiddleware, async (req, res, next
     const { contactId, phone } = req.body;
     if (!phone && !contactId) return res.status(400).json({ error: 'phone or contactId required' });
     // A contact it names, whose number it dials and on whom the call is filed,
-    // must be one the caller can see: any contact's number went back to
-    // anyone signed in, by id.
-    if (contactId && !(permits(req, 'contacts', 'read') && await canReach(req, 'contacts', 'contact', contactId))) {
-      return res.status(404).json({ error: 'Contact not found' });
+    // must be a live one the caller can see: any contact's number went back
+    // to anyone signed in, by id, and then a deleted contact's still did, as
+    // canReach does not look at deletedAt.
+    let contact = null;
+    if (contactId) {
+      contact = permits(req, 'contacts', 'read') && await prisma.contact.findFirst({
+        where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }),
+        select: { id: true, phone: true },
+      });
+      if (!contact) return res.status(404).json({ error: 'Contact not found' });
     }
-    let phoneNumber = phone;
-    if (contactId && !phone) {
-      const contact = await prisma.contact.findUnique({ where: { id: contactId }, select: { phone: true } });
-      phoneNumber = contact?.phone;
-    }
+    const phoneNumber = phone || contact?.phone;
     if (!phoneNumber) return res.status(400).json({ error: 'No phone number available' });
     const call = await prisma.callRecording.create({
-      data: { title: `Call to ${phoneNumber}`, userId: req.user.id, contactId, status: 'InProgress' },
+      data: { title: `Call to ${phoneNumber}`, userId: req.user.id, contactId: contact?.id, status: 'InProgress' },
     });
     res.json({ callId: call.id, phone: phoneNumber, status: 'connecting' });
   } catch (err) { next(err); }

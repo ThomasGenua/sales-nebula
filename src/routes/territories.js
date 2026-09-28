@@ -1,22 +1,48 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { linkRefusal } = require('../middleware/access');
+const { linkRefusal, moduleAccess, reachableWhere } = require('../middleware/access');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
-const { columnsFrom } = require('../utils/modelFields');
+const { editableFields, scalarOrderBy } = require('../utils/modelFields');
+const { currencyContext, sumInBase } = require('../utils/currency');
 
 const router = Router();
+
+// Reading takes territories: read. Every GET here, and the /count,
+// /status/health and /analytics/summary that moduleStatus adds, took a session
+// alone. Writes take edit, as each already asked for (or full, to delete one).
+router.use(authenticate, moduleAccess('territories'));
+
+/**
+ * How many of these accounts, and which of their deals, the caller can see:
+ * each module's read permission and row security. Performance and stats
+ * totalled every account and deal, other reps' and deleted ones included.
+ */
+async function visibleBook(req, accountIds) {
+  const prisma = req.app.locals.prisma;
+  const accountCount = accountIds.length && permits(req, 'accounts', 'read')
+    ? await prisma.account.count({ where: await reachableWhere(req, 'accounts', 'account', { id: { in: accountIds } }) })
+    : 0;
+  const deals = accountIds.length && permits(req, 'deals', 'read')
+    ? await prisma.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { accountId: { in: accountIds } }), select: { stage: true, value: true, currency: true } })
+    : [];
+  return { accountCount, deals };
+}
 
 // List territories
 router.get('/', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { page = 1, limit = 50, search, modelId } = req.query;
+    const { page = 1, limit = 50, search, modelId, type, sortBy, sortDir } = req.query;
     const where = { deletedAt: null };
     if (search) where.name = { contains: search, mode: 'insensitive' };
     if (modelId) where.modelId = modelId;
+    // The Territories page filters by type and sorts by column; both were
+    // ignored, so the list came back unfiltered and always by name.
+    if (typeof type === 'string' && type) where.type = type;
+    const orderBy = scalarOrderBy('territory', sortBy, sortDir) || { name: 'asc' };
     const [data, total] = await Promise.all([
-      prisma.territory.findMany({ where, orderBy: { name: 'asc' }, take: +limit, skip: (+page - 1) * +limit, include: { parent: { select: { id: true, name: true } } } }),
+      prisma.territory.findMany({ where, orderBy, take: +limit, skip: (+page - 1) * +limit, include: { parent: { select: { id: true, name: true } } } }),
       prisma.territory.count({ where }),
     ]);
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
@@ -28,14 +54,17 @@ router.post('/', authenticate, requirePermission('territories', 'edit'), auditMi
     const prisma = req.app.locals.prisma;
     const { name, parentId, type, description, rules } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const t = await prisma.territory.create({ data: { name, parentId, type: type || 'Geographic', description, rules } });
+    // No type means the schema's default (Sales, as the seeded territories
+    // have), not 'Geographic', which nothing else uses.
+    const t = await prisma.territory.create({ data: { name, parentId, type: type || undefined, description, rules } });
     await req.audit({ action: 'create', module: 'territories', recordId: t.id });
     res.status(201).json(t);
   } catch (err) { next(err); }
 });
 
+// Not deletedAt: edit could delete, or restore, what DELETE needs full for.
 router.put('/:id', authenticate, requirePermission('territories', 'edit'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.update({ where: { id: req.params.id }, data: columnsFrom('territory', req.body) }); res.json(t); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.update({ where: { id: req.params.id }, data: editableFields('territory', req.body) }); res.json(t); } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('territories', 'full'), auditMiddleware, async (req, res, next) => {
@@ -74,8 +103,14 @@ router.post('/:id/members', authenticate, requirePermission('territories', 'edit
   } catch (err) { next(err); }
 });
 
+// A member of the territory in the path: this deleted any member by id.
 router.delete('/:id/members/:memberId', authenticate, requirePermission('territories', 'edit'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; await prisma.territoryMember.delete({ where: { id: req.params.memberId } }); res.json({ success: true }); } catch (err) { next(err); }
+  try {
+    const prisma = req.app.locals.prisma;
+    const { count } = await prisma.territoryMember.deleteMany({ where: { id: req.params.memberId, territoryId: req.params.id } });
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 // Assign accounts to territory
@@ -107,18 +142,20 @@ router.post('/:id/assign', authenticate, requirePermission('territories', 'edit'
 });
 
 // Territory performance
+// Over the accounts and deals the caller can see (visibleBook).
 router.get('/:id/performance', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const accounts = await prisma.territoryAccount.findMany({ where: { territoryId: req.params.id }, select: { accountId: true } });
-    const accountIds = accounts.map(a => a.accountId);
-    const deals = await prisma.deal.findMany({ where: { accountId: { in: accountIds } } });
+    const { accountCount, deals } = await visibleBook(req, accounts.map(a => a.accountId));
     const won = deals.filter(d => d.stage === 'Closed Won');
     const pipeline = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
+    // Money in the default currency: deal values were added across currencies.
+    const ctx = await currencyContext(prisma);
     res.json({
-      territoryId: req.params.id, accountCount: accounts.length, totalDeals: deals.length,
-      wonDeals: won.length, wonRevenue: won.reduce((s, d) => s + (parseFloat(d.value) || 0), 0),
-      pipelineDeals: pipeline.length, pipelineValue: pipeline.reduce((s, d) => s + (parseFloat(d.value) || 0), 0),
+      territoryId: req.params.id, currency: ctx.base, accountCount, totalDeals: deals.length,
+      wonDeals: won.length, wonRevenue: sumInBase(won, ctx),
+      pipelineDeals: pipeline.length, pipelineValue: sumInBase(pipeline, ctx),
       winRate: deals.length ? ((won.length / deals.length) * 100).toFixed(1) : 0,
     });
   } catch (err) { next(err); }
@@ -179,7 +216,10 @@ router.post('/:id/accounts', authenticate, requirePermission('territories', 'edi
   } catch (err) { next(err); }
 });
 
-/** Roll-up for a territory, counting membership from both places it is stored. */
+/**
+ * Roll-up for a territory, counting membership from both places it is stored,
+ * over the accounts and deals the caller can see (visibleBook).
+ */
 router.get('/:id/stats', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -192,17 +232,18 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
     ]);
     const accountIds = [...new Set(joined.map(j => j.accountId))];
 
-    const deals = accountIds.length
-      ? await prisma.deal.findMany({ where: { accountId: { in: accountIds } }, select: { stage: true, value: true } })
-      : [];
+    const { accountCount, deals } = await visibleBook(req, accountIds);
     const won = deals.filter(d => d.stage === 'Closed Won');
     const open = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
-    const sum = rows => rows.reduce((t, d) => t + (parseFloat(d.value) || 0), 0);
+    // Money in the default currency: deal values were added across currencies.
+    const ctx = await currencyContext(prisma);
+    const sum = rows => sumInBase(rows, ctx);
 
     res.json({
       territoryId: territory.id,
       name: territory.name,
-      accountCount: accountIds.length,
+      currency: ctx.base,
+      accountCount,
       memberCount: members,
       dealCount: deals.length,
       wonCount: won.length,
@@ -217,8 +258,9 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
 /* Registered last: "/:id" is one segment, the same shape as /hierarchy,
    /models and /count, and while it sat at the top it answered those as
    territory lookups. */
+// A deleted territory is not found, and its deleted children are left out.
 router.get('/:id', authenticate, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findUnique({ where: { id: req.params.id }, include: { parent: true, children: true } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const t = await prisma.territory.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { parent: true, children: { where: { deletedAt: null } } } }); if (!t) return res.status(404).json({ error: 'Not found' }); res.json(t); } catch (err) { next(err); }
 });
 
 module.exports = router;

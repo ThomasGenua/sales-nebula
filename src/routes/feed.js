@@ -60,6 +60,9 @@ router.post('/:entryId/comment', authenticate, async (req, res, next) => {
       data: { feedItemId: req.params.entryId, body: body.trim(), authorId: req.user.id },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
+    // The post's own counts, which the feed lists return; nothing kept them,
+    // so they read 0. Recounted, so posts from before come right too.
+    await prisma.feedItem.update({ where: { id: parent.id }, data: { commentCount: await prisma.feedComment.count({ where: { feedItemId: parent.id } }) } });
     res.status(201).json(comment);
   } catch (err) { next(err); }
 });
@@ -72,13 +75,11 @@ router.post('/:entryId/like', authenticate, async (req, res, next) => {
     const entry = await prisma.feedItem.findUnique({ where: { id: req.params.entryId } });
     if (!entry || !(await readablePosts(req, [entry])).length) return res.status(404).json({ error: 'Feed entry not found' });
     const existing = await prisma.feedLike.findFirst({ where: { feedItemId: req.params.entryId, userId: req.user.id } });
-    if (existing) {
-      await prisma.feedLike.delete({ where: { id: existing.id } });
-      res.json({ liked: false });
-    } else {
-      await prisma.feedLike.create({ data: { feedItemId: req.params.entryId, userId: req.user.id } });
-      res.json({ liked: true });
-    }
+    if (existing) await prisma.feedLike.delete({ where: { id: existing.id } });
+    else await prisma.feedLike.create({ data: { feedItemId: req.params.entryId, userId: req.user.id } });
+    // The post's likeCount, recounted as its commentCount is (see /comment).
+    await prisma.feedItem.update({ where: { id: entry.id }, data: { likeCount: await prisma.feedLike.count({ where: { feedItemId: entry.id } }) } });
+    res.json({ liked: !existing });
   } catch (err) { next(err); }
 });
 
@@ -90,6 +91,8 @@ router.delete('/:entryId', authenticate, async (req, res, next) => {
     if (!entry) return res.status(404).json({ error: 'Not found' });
     // The author column is authorId; FeedItem has no userId, so this refused everyone.
     if (entry.authorId !== req.user.id && !isAdmin(req.user)) return res.status(403).json({ error: 'Can only delete own entries' });
+    // Likes name their post by id alone, with no relation to cascade, so they outlived it.
+    await prisma.feedLike.deleteMany({ where: { feedItemId: entry.id } });
     await prisma.feedItem.delete({ where: { id: req.params.entryId } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -166,7 +169,8 @@ router.post('/bulk', authenticate, async (req, res, next) => {
       select: { id: true },
     });
     const posts = await Promise.all(visible.map(({ id }) =>
-      prisma.feedItem.create({ data: { parentId: id, parentModule: module, body, type: 'text', authorId: req.user.id } })
+      // TextPost, as every other post is typed; 'text' was a type nothing else uses.
+      prisma.feedItem.create({ data: { parentId: id, parentModule: module, body, type: 'TextPost', authorId: req.user.id } })
     ));
     res.status(201).json({ created: posts.length });
   } catch (err) { next(err); }
@@ -200,7 +204,7 @@ router.get('/:module/:id', authenticate, async (req, res, next) => {
     if (before) where.createdAt = { lt: new Date(before) };
 
     const entries = await queryWithIncludes(prisma, 'feedItem', 'findMany', {
-      where, orderBy: { createdAt: 'desc' }, take: +limit,
+      where, orderBy: { createdAt: 'desc' }, take: Math.min(parseInt(limit) || 50, 200),
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
     res.json({ data: entries, module: mod, recordId: id });
@@ -226,8 +230,10 @@ router.post('/:module/:id', authenticate, auditMiddleware, async (req, res, next
       },
       include: { user: { select: { id: true, firstName: true, lastName: true } } },
     });
-    // Emit real-time event
-    try { req.app.locals.emit?.('feed:new', { module: mod, recordId: id, entry }); } catch (e) {}
+    // Emit real-time event, to those following the record, as ids they fetch
+    // through their own access. emit is a set of senders, not a function, so
+    // this threw into the catch and nothing was ever sent.
+    try { req.app.locals.emit?.toRecord?.(mod, id, 'feed:new', { module: mod, recordId: id, entryId: entry.id }); } catch (e) {}
     res.status(201).json(entry);
   } catch (err) { next(err); }
 });

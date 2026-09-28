@@ -179,12 +179,15 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
       }
 
       if (linkedCase) {
+        // A reply reopens a closed or resolved case as Open: 'Reopened' was a
+        // status no case screen offers and the open-case counts skipped, and a
+        // reply to a resolved case was linked and left resolved.
         await prisma.case.update({
           where: { id: linkedCase.id },
           data: {
             emailCount: { increment: 1 }, lastEmailAt: new Date(),
             lastEmailMessageId: raw.messageId || null,
-            ...(linkedCase.status === 'Closed' && { status: 'Reopened' }),
+            ...(['Closed', 'Resolved'].includes(linkedCase.status) && { status: 'Open' }),
           },
         }).catch(() => {});
         await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdCaseId: linkedCase.id, status: 'Linked' } }).catch(() => {});
@@ -193,7 +196,9 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
         continue;
       }
 
-      const rules = await prisma.inboundRoutingRule.findMany({ where: { accountId: account.id, active: true }, orderBy: { priority: 'asc' } }).catch(() => []);
+      // This mailbox's rules and the global ones (no mailbox), which the rules
+      // API allows and ingest never read.
+      const rules = await prisma.inboundRoutingRule.findMany({ where: { OR: [{ accountId: account.id }, { accountId: null }], active: true }, orderBy: { priority: 'asc' } }).catch(() => []);
       const routed = matchRule(rules, { subject, from: from.email || '', body: bodyText, to: raw.to || '' });
 
       if (account.autoCreateCase) {

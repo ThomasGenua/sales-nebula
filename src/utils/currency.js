@@ -71,6 +71,9 @@ async function resolveDealCurrency(prisma, code) {
   const ctx = await currencyContext(prisma);
   if (code === undefined || code === null || code === '') return ctx.base;
   const upper = String(code).trim().toUpperCase();
+  // The default always stands, as an empty value does: with no Currency rows
+  // yet (the default is then USD) an explicit "USD" was refused.
+  if (upper === ctx.base) return upper;
   const known = ctx.currencies.find(c => c.code === upper && c.active);
   if (!known) throw Object.assign(new Error(`Unknown or inactive currency: ${code}`), { status: 400 });
   return upper;

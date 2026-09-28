@@ -30,7 +30,8 @@ function pickModelFields(modelName, data = {}) {
   for (const [key, value] of Object.entries(data)) {
     const field = byName.get(key);
     if (!field || field.kind === 'object') { ignored.push(key); continue; }
-    kept[key] = coerce(field, value);
+    const coerced = coerce(field, value);
+    if (coerced !== undefined) kept[key] = coerced;
   }
   return { data: kept, ignored };
 }
@@ -124,17 +125,19 @@ function scalarWhere(modelName, where) {
   const model = findModel(modelName);
   const out = {};
   if (!model || !where || typeof where !== 'object' || Array.isArray(where)) return out;
+  // Values from a query string are all text; a filter on a number, date or
+  // yes/no column needs them as that type (coerce), or the query fails.
   for (const [key, value] of Object.entries(where)) {
     const field = model.fields.find(f => f.name === key);
     if (!field || field.kind === 'object') continue;
-    if (plain(value)) { out[key] = value; continue; }
+    if (plain(value)) { const v = coerce(field, value); if (v !== undefined) out[key] = v; continue; }
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
     const condition = {};
     for (const [op, v] of Object.entries(value)) {
       if (!FILTER_OPS.has(op)) continue;
-      if (op === 'in' || op === 'notIn') { if (Array.isArray(v) && v.every(plain)) condition[op] = v; }
+      if (op === 'in' || op === 'notIn') { if (Array.isArray(v) && v.every(plain)) condition[op] = v.map(item => coerce(field, item)).filter(item => item !== undefined); }
       else if (op === 'mode') { if (v === 'insensitive' || v === 'default') condition[op] = v; }
-      else if (plain(v)) condition[op] = v;
+      else if (plain(v)) { const c = coerce(field, v); if (c !== undefined) condition[op] = c; }
     }
     if (Object.keys(condition).length) out[key] = condition;
   }
@@ -178,13 +181,28 @@ function modelHasField(modelName, field) {
  *
  * Date inputs submit "2026-06-30", which Prisma rejects because it is not a
  * full ISO-8601 DateTime — a plain date picker was enough to 500 a create.
- * An unparseable value is passed through so Prisma still reports it.
+ * Form inputs submit every value as text, so a deal's value or a product's
+ * price arrived as "5000" and every save with a number field was a 500; a
+ * cleared field arrives as "", which no non-text column takes: it clears an
+ * optional column and leaves a required one as it is. An unparseable value
+ * is passed through so Prisma still reports it.
  */
 function coerce(field, value) {
-  if (field.type === 'DateTime' && typeof value === 'string' && value) {
+  // Prisma refuses a bare null for a Json column, and every edit form sends
+  // an empty one back as null, so saving any record with one failed (500).
+  if (value === null && field.type === 'Json') return field.isRequired ? undefined : Prisma.DbNull;
+  if (typeof value !== 'string' || field.type === 'String' || field.type === 'Json') return value;
+  if (!value.trim()) return field.isRequired ? undefined : null;
+  if (field.type === 'DateTime') {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed;
   }
+  if (field.type === 'Int' || field.type === 'Float') {
+    const number = Number(value);
+    if (!Number.isFinite(number) || (field.type === 'Int' && !Number.isInteger(number))) return value;
+    return number;
+  }
+  if (field.type === 'Boolean') return value === 'true' ? true : value === 'false' ? false : value;
   return value;
 }
 

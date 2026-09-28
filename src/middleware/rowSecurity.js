@@ -6,11 +6,15 @@
  *   2. They own the record (ownerId / assignedId matches).
  *   3. The record is assigned to a security group they belong to,
  *      directly or through group inheritance.
- *   4. The module has no group assignments at all (unrestricted).
+ *   4. The record is shared with them (RecordShare), or a sharing rule
+ *      that names them covers it.
+ *   5. The module has no group assignments at all (unrestricted).
  *
  * The filter is applied as an additional Prisma `where` clause so it
  * composes with whatever the route already filters on.
  */
+
+const { scalarWhere } = require('../utils/modelFields');
 
 const GROUP_CACHE_TTL_MS = 60000;
 const groupCache = new Map(); // userId -> { ids, expires }
@@ -169,6 +173,136 @@ function ownerFieldsFor(prisma, modelName) {
   return 'createdById' in fields ? ['createdById'] : [];
 }
 
+// ─── SHARING ───
+// Records shared one at a time (RecordShare, /api/sharing/records) and by
+// rule (SharingRule, /api/sharing/rules) were stored and read by nothing: a
+// record shared with someone stayed out of their reach. A share or a rule
+// adds access on top of ownership and groups; it never takes any away.
+
+/** Share levels, as stored (lowercase), that satisfy a check at minLevel. */
+const SHARE_LEVELS = { Read: ['read', 'edit', 'full'], Edit: ['edit', 'full'], Full: ['full'] };
+
+const RULE_CACHE_TTL_MS = 60000;
+let ruleCache = { byModule: null, expires: 0 };
+
+/** Active sharing rules, by module. */
+async function getSharingRules(prisma) {
+  if (ruleCache.byModule && ruleCache.expires > Date.now()) return ruleCache.byModule;
+  const byModule = new Map();
+  try {
+    for (const rule of await prisma.sharingRule.findMany({ where: { active: true } })) {
+      if (!byModule.has(rule.module)) byModule.set(rule.module, []);
+      byModule.get(rule.module).push(rule);
+    }
+  } catch (err) { /* table absent; no rules */ }
+  ruleCache = { byModule, expires: Date.now() + RULE_CACHE_TTL_MS };
+  return byModule;
+}
+
+function invalidateSharingRuleCache() { ruleCache = { byModule: null, expires: 0 }; }
+
+/** A rule's `{ type: 'user' | 'role' | 'group', value }`, as lowercase values; value may be a list. */
+const targetOf = target => ({
+  type: String(target?.type || '').toLowerCase(),
+  values: [].concat(target?.value ?? []).map(v => String(v).toLowerCase()),
+});
+
+/** Whether a rule's sharedTo names this user: by id, or their role or a group of theirs by id or name. */
+async function ruleNamesUser(prisma, sharedTo, user) {
+  const { type, values } = targetOf(sharedTo);
+  if (!values.length) return false;
+  if (type === 'user') return values.includes(String(user.id).toLowerCase());
+  if (type === 'role') {
+    const roleId = user.roleId || user.role?.id;
+    let roleName = user.role?.name || (typeof user.role === 'string' ? user.role : user.roleName);
+    if (!roleName && roleId) roleName = (await prisma.role.findUnique({ where: { id: roleId }, select: { name: true } }))?.name;
+    return [roleId, roleName].some(v => v && values.includes(String(v).toLowerCase()));
+  }
+  if (type === 'group') {
+    const groupIds = await getUserGroupIds(prisma, user.id);
+    if (!groupIds.length) return false;
+    const groups = await prisma.securityGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true } });
+    return groups.some(g => values.includes(g.id.toLowerCase()) || values.includes(String(g.name).toLowerCase()));
+  }
+  return false;
+}
+
+/** The users a rule's `{ type, value }` names: the user ids, or the members of the roles or groups. */
+async function usersNamed(prisma, target) {
+  const { type, values } = targetOf(target);
+  if (!values.length) return [];
+  if (type === 'user') return (await prisma.user.findMany({ where: { id: { in: values } }, select: { id: true } })).map(u => u.id);
+  if (type === 'role') {
+    const roles = (await prisma.role.findMany({ select: { id: true, name: true } }))
+      .filter(r => values.includes(r.id.toLowerCase()) || values.includes(String(r.name).toLowerCase()));
+    if (!roles.length) return [];
+    return (await prisma.user.findMany({ where: { roleId: { in: roles.map(r => r.id) } }, select: { id: true } })).map(u => u.id);
+  }
+  if (type === 'group') {
+    const groups = (await prisma.securityGroup.findMany({ where: { deletedAt: null }, select: { id: true, name: true } }))
+      .filter(g => values.includes(g.id.toLowerCase()) || values.includes(String(g.name).toLowerCase()));
+    if (!groups.length) return [];
+    const members = await prisma.securityGroupUser.findMany({ where: { securityGroupId: { in: groups.map(g => g.id) } }, select: { userId: true } });
+    return [...new Set(members.map(m => m.userId))];
+  }
+  return [];
+}
+
+/** A criteria rule's `{ field, operator, value }` as a Prisma condition on that field, or null. */
+const CRITERIA = {
+  equals: v => v, eq: v => v,
+  notequals: v => ({ not: v }), not_equals: v => ({ not: v }), neq: v => ({ not: v }),
+  in: v => ({ in: [].concat(v) }),
+  notin: v => ({ notIn: [].concat(v) }), not_in: v => ({ notIn: [].concat(v) }),
+  contains: v => ({ contains: String(v) }),
+  startswith: v => ({ startsWith: String(v) }), starts_with: v => ({ startsWith: String(v) }),
+  greaterthan: v => ({ gt: v }), gt: v => ({ gt: v }), gte: v => ({ gte: v }),
+  lessthan: v => ({ lt: v }), lt: v => ({ lt: v }), lte: v => ({ lte: v }),
+};
+
+/**
+ * The records a rule shares, as a `where` on the module's model, or null for
+ * none. criteria_based: the records matching sharedFrom's condition on one of
+ * the model's own columns. owner_based: the records owned by the users
+ * sharedFrom names, or with no sharedFrom, by the users the rule shares to (a
+ * team seeing its own records). A rule that cannot be read shares nothing.
+ */
+async function ruleScope(prisma, rule, modelName) {
+  const from = rule.sharedFrom && typeof rule.sharedFrom === 'object' && !Array.isArray(rule.sharedFrom) ? rule.sharedFrom : null;
+  if (rule.type === 'criteria_based') {
+    const build = from && CRITERIA[String(from.operator || 'equals').toLowerCase()];
+    if (!build || typeof from.field !== 'string' || from.value === undefined) return null;
+    const where = scalarWhere(modelName, { [from.field]: build(from.value) });
+    return Object.keys(where).length ? where : null;
+  }
+  if (rule.type === 'owner_based') {
+    const fields = ownerFieldsFor(prisma, modelName);
+    const owners = await usersNamed(prisma, from || rule.sharedTo);
+    if (!fields.length || !owners.length) return null;
+    return { OR: fields.map(field => ({ [field]: { in: owners } })) };
+  }
+  return null;
+}
+
+/** `where` arms for the records of a module shared with the user at minLevel or above. */
+async function sharedArms(prisma, user, module, modelName, minLevel = 'Read') {
+  const levels = SHARE_LEVELS[minLevel] || SHARE_LEVELS.Read;
+  const arms = [];
+  const shares = await prisma.recordShare.findMany({
+    where: { module, sharedWithId: user.id, accessLevel: { in: levels } },
+    select: { recordId: true },
+  }).catch(() => []);
+  if (shares.length) arms.push({ id: { in: shares.map(s => s.recordId) } });
+  if (!modelName) return arms;
+  for (const rule of (await getSharingRules(prisma)).get(module) || []) {
+    if (!levels.includes(String(rule.accessLevel || '').toLowerCase())) continue;
+    if (!(await ruleNamesUser(prisma, rule.sharedTo, user))) continue;
+    const scope = await ruleScope(prisma, rule, modelName);
+    if (scope) arms.push(scope);
+  }
+  return arms;
+}
+
 /**
  * Build the Prisma `where` fragment restricting a module to what the
  * user may see. Returns null when no restriction applies.
@@ -208,6 +342,8 @@ async function buildAccessFilter(prisma, user, module, { minLevel = 'Read', mode
     if (reports.length) or.push(...ownerFieldsFor(prisma, modelName).map(field => ({ [field]: { in: reports } })));
   }
 
+  or.push(...await sharedArms(prisma, user, module, modelName, minLevel));
+
   // Under an open org-wide default, a record nobody put in a group is nobody's
   // secret, so it stays visible. Under Private it does not.
   if (!restricted) {
@@ -243,6 +379,14 @@ function rowSecurity(module, opts = {}) {
 
       req.canAccessRecord = async (recordId, level = 'Read') => {
         if (isAdmin(req.user)) return true;
+        // The list's own filter, applied to the one record. Checked apart, a
+        // record a group held answered to the group alone, so its owner saw it
+        // listed and got Not found opening it; and shares counted for neither.
+        if (opts.modelName && prisma[opts.modelName]?.findFirst) {
+          const filter = await buildAccessFilter(prisma, req.user, module, { minLevel: level, modelName: opts.modelName });
+          if (!filter) return true;
+          return !!(await prisma[opts.modelName].findFirst({ where: applyAccessFilter({ id: recordId }, filter), select: { id: true } }));
+        }
         const groupIds = await getUserGroupIds(prisma, req.user.id);
         const levels = level === 'Full' ? ['Full'] : level === 'Edit' ? ['Edit', 'Full'] : ['Read', 'Edit', 'Full'];
 
@@ -347,7 +491,7 @@ async function autoAssignToUserGroups(prisma, userId, module, recordId) {
 }
 
 module.exports = {
-  invalidateOrgWideDefaultCache, invalidateHierarchyCache, subordinateUserIds,
+  invalidateOrgWideDefaultCache, invalidateHierarchyCache, invalidateSharingRuleCache, subordinateUserIds,
   rowSecurity, buildAccessFilter, applyAccessFilter, visibleWhere,
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
   applyAutoAssignRules, autoAssignToUserGroups, isAdmin,

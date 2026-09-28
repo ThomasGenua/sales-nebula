@@ -4,10 +4,12 @@ const { authenticate, permits } = require('../middleware/auth');
 const { canReach, reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { crudModelFor } = require('../utils/crud');
-const { summaryRoute } = require('../utils/moduleStatus');
+const { scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate);
+
+const AUTHOR = { id: true, firstName: true, lastName: true, avatar: true };
 
 /**
  * Whether the caller may read the notes on a record: the module's read
@@ -47,6 +49,97 @@ async function readableNotes(req, notes) {
   }
   return notes.filter(n => n.authorId === req.userId || readable.has(`${n.module}:${n.recordId}`));
 }
+
+/**
+ * `where`, narrowed to the live notes readableNotes would keep, so a list can
+ * page and count in the database: each record other people's notes sit on is
+ * judged once, as readableNotes judges it.
+ */
+async function readableNotesWhere(req, where = {}) {
+  const live = { AND: [where, { deletedAt: null }] };
+  if (isAdmin(req.user)) return live;
+  const records = await req.app.locals.prisma.note.findMany({
+    where: { AND: [live, { authorId: { not: req.userId } }] },
+    distinct: ['module', 'recordId'], select: { module: true, recordId: true },
+  });
+  const byModule = new Map(); // module -> readable record ids
+  for (const r of await readableNotes(req, records.map(r => ({ ...r, authorId: null })))) {
+    if (!byModule.has(r.module)) byModule.set(r.module, []);
+    byModule.get(r.module).push(r.recordId);
+  }
+  const onReadable = [...byModule].map(([module, ids]) => ({ module, recordId: { in: ids } }));
+  return { AND: [live, { OR: [{ authorId: req.userId }, ...onReadable] }] };
+}
+
+/** Notes with their authors' names, as a record's notes are listed. */
+async function withAuthors(prisma, notes) {
+  const authorIds = [...new Set(notes.map(n => n.authorId))];
+  const authors = await prisma.user.findMany({ where: { id: { in: authorIds } }, select: AUTHOR });
+  const authorMap = Object.fromEntries(authors.map(a => [a.id, a]));
+  return notes.map(n => ({ ...n, author: authorMap[n.authorId] || null }));
+}
+
+/**
+ * File a note, by the caller, on a live record they can see, and answer 201
+ * with it; otherwise answer why not. POST / and POST /:module/:recordId both
+ * create through this. The Notes page sends a title as well as the body, and
+ * a note has only a body, so a title leads it rather than being dropped.
+ */
+async function createNote(req, res, module, recordId) {
+  const prisma = req.app.locals.prisma;
+  const body = [req.body.title, req.body.body].filter(v => typeof v === 'string' && v.trim()).join('\n\n');
+  if (!body) return res.status(400).json({ error: 'body required' });
+  if (!(await readableRecord(req, res, module, recordId))) return;
+  // canReach passes any id in a module nothing restricts; a note must name a record that exists.
+  const modelName = crudModelFor(module);
+  if (!(await prisma[modelName].findFirst({ where: await reachableWhere(req, module, modelName, { id: String(recordId) }), select: { id: true } }))) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const note = await prisma.note.create({
+    data: {
+      body,
+      pinned: req.body.pinned === true,
+      module,
+      recordId: String(recordId),
+      authorId: req.userId,
+    },
+  });
+  const author = await prisma.user.findUnique({ where: { id: req.userId }, select: AUTHOR });
+  res.status(201).json({ ...note, author });
+}
+
+// LIST notes: the Notes page. The caller's own and those on records they can
+// see (readableNotesWhere), a page at a time. There was no list, so the page
+// never loaded.
+router.get('/', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { search, module, page = 1, limit = 50, sortBy, sortDir } = req.query;
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const where = await readableNotesWhere(req, {
+      ...(search ? { body: { contains: String(search), mode: 'insensitive' } } : {}),
+      ...(module ? { module: String(module) } : {}),
+    });
+    const [notes, total] = await Promise.all([
+      prisma.note.findMany({
+        where, skip: (current - 1) * take, take,
+        orderBy: scalarOrderBy('note', sortBy, sortDir) || [{ pinned: 'desc' }, { createdAt: 'desc' }],
+      }),
+      prisma.note.count({ where }),
+    ]);
+    res.json({ data: await withAuthors(prisma, notes), meta: { total, page: current, limit: take, pages: Math.ceil(total / take) } });
+  } catch (err) { next(err); }
+});
+
+// CREATE note from the Notes page, which names the record in the body.
+router.post('/', async (req, res, next) => {
+  try {
+    const { module, recordId } = req.body;
+    if (!module || !recordId) return res.status(400).json({ error: 'module and recordId required' });
+    await createNote(req, res, String(module), recordId);
+  } catch (err) { next(err); }
+});
 
 // UPDATE note
 router.put('/:id', async (req, res, next) => {
@@ -146,8 +239,30 @@ router.post('/bulk/delete', authenticate, auditMiddleware, async (req, res, next
   } catch (err) { next(err); }
 });
 
-// Totals from the module's own table.
-summaryRoute(router, { module: 'notes', model: 'note' });
+// Totals of the notes the list shows. The shared summary counted every note,
+// on records the caller cannot see included, as notes have no row security.
+router.get('/analytics/summary', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const since = new Date(Date.now() - 30 * 86400000);
+    const [total, recent] = await Promise.all([
+      prisma.note.count({ where: await readableNotesWhere(req) }),
+      prisma.note.count({ where: await readableNotesWhere(req, { createdAt: { gte: since } }) }),
+    ]);
+    res.json({ module: 'notes', total, createdLast30Days: recent, checkedAt: new Date() });
+  } catch (err) { next(err); }
+});
+
+// GET one note, when the list would show it. After the one-segment literal
+// routes (/search), which "/:id" would otherwise take.
+router.get('/:id', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const note = await prisma.note.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!note || !(await readableNotes(req, [note])).length) return res.status(404).json({ error: 'Not found' });
+    res.json((await withAuthors(prisma, [note]))[0]);
+  } catch (err) { next(err); }
+});
 
 /**
  * Catch-all record routes, registered last on purpose.
@@ -170,17 +285,7 @@ router.get('/:module/:recordId', async (req, res, next) => {
       orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
     });
 
-    // Hydrate author names
-    const authorIds = [...new Set(notes.map(n => n.authorId))];
-    const authors = await prisma.user.findMany({
-      where: { id: { in: authorIds } },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    });
-    const authorMap = Object.fromEntries(authors.map(a => [a.id, a]));
-
-    res.json({
-      data: notes.map(n => ({ ...n, author: authorMap[n.authorId] || null })),
-    });
+    res.json({ data: await withAuthors(prisma, notes) });
   } catch (err) { next(err); }
 });
 
@@ -188,21 +293,6 @@ router.get('/:module/:recordId', async (req, res, next) => {
 // On a record the caller can see; this took any module and record id.
 router.post('/:module/:recordId', async (req, res, next) => {
   try {
-    const prisma = req.app.locals.prisma;
-    if (!(await readableRecord(req, res, req.params.module, req.params.recordId))) return;
-    const note = await prisma.note.create({
-      data: {
-        body: req.body.body,
-        pinned: req.body.pinned || false,
-        module: req.params.module,
-        recordId: req.params.recordId,
-        authorId: req.userId,
-      },
-    });
-    const author = await prisma.user.findUnique({
-      where: { id: req.userId },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    });
-    res.status(201).json({ ...note, author });
+    await createNote(req, res, req.params.module, req.params.recordId);
   } catch (err) { next(err); }
 });

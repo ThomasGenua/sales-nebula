@@ -337,13 +337,19 @@ router.post('/data-request', authenticate, auditMiddleware, async (req, res, nex
 });
 
 // Consent audit trail
+// Consent is appended, never overwritten (see /bulk), so the contact's consent
+// rows are its trail. This read ConsentHistory, which nothing writes, and so
+// always answered with an empty list.
 router.get('/audit/:contactId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const history = await prisma.consentHistory.findMany({
-      where: { contactId: req.params.contactId }, orderBy: { createdAt: 'desc' }, take: 50,
-    }).catch(() => []);
-    res.json(history);
+    const rows = await prisma.consentRecord.findMany({
+      where: { contactId: req.params.contactId, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 50,
+    });
+    res.json(rows.map(r => ({
+      id: r.id, contactId: r.contactId, type: r.consentType, channel: r.channel,
+      action: isGranted(r) ? 'granted' : 'withdrawn', source: r.source, ipAddress: r.ipAddress, createdAt: r.createdAt,
+    })));
   } catch (err) { next(err); }
 });
 

@@ -46,9 +46,11 @@ router.post('/upload', authenticate, requirePermission('documents', 'edit'), aud
       await fs.promises.unlink(req.file.path).catch(() => {});
       return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     }
+    // fileName is the original name, which a download is saved under; the
+    // stored file (a UUID) is filePath. Downloads came back named by UUID.
     const doc = await prisma.document.create({
       data: {
-        name: req.body.name || req.file.originalname, fileName: req.file.filename,
+        name: req.body.name || req.file.originalname, fileName: req.file.originalname,
         category: req.body.category || 'General', mimeType: req.file.mimetype,
         fileSize: req.file.size, filePath: req.file.path,
         ...(req.body.dealId && { dealId: req.body.dealId }),
@@ -70,7 +72,7 @@ router.post('/upload/bulk', authenticate, requirePermission('documents', 'edit')
     const docs = await prisma.$transaction(req.files.map(file =>
       prisma.document.create({
         data: {
-          name: file.originalname, fileName: file.filename, mimeType: file.mimetype,
+          name: file.originalname, fileName: file.originalname, mimeType: file.mimetype,
           fileSize: file.size, filePath: file.path, category: req.body.category || 'General',
           createdById: req.user.id,
         },
@@ -84,7 +86,8 @@ router.post('/upload/bulk', authenticate, requirePermission('documents', 'edit')
 router.get('/:id/download', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+    // Not a deleted one, which GET /:id already answers 404 for.
+    const doc = await prisma.document.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!doc) return res.status(404).json({ error: 'Document not found' });
     // Only a file inside the upload directory, where multer writes them. A
     // stored filePath could name any file the server can read (.env, keys).
@@ -103,12 +106,15 @@ router.post('/:id/version', authenticate, requirePermission('documents', 'edit')
   try {
     const prisma = req.app.locals.prisma;
     if (!req.file) return res.status(400).json({ error: 'No file' });
-    const original = await prisma.document.findUnique({ where: { id: req.params.id } });
-    if (!original) return res.status(404).json({ error: 'Document not found' });
+    const original = await prisma.document.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!original) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(404).json({ error: 'Document not found' });
+    }
     const doc = await prisma.document.update({
       where: { id: req.params.id },
       data: {
-        fileName: req.file.filename, mimeType: req.file.mimetype,
+        fileName: req.file.originalname, mimeType: req.file.mimetype,
         fileSize: req.file.size, filePath: req.file.path,
         version: (original.version || 1) + 1, updatedAt: new Date(),
       },
@@ -164,7 +170,8 @@ router.post('/from-template/:templateId', authenticate, async (req, res, next) =
     // (its file included) could be copied by id and then downloaded.
     const template = await prisma.document.findFirst({ where: await reachableWhere(req, 'documents', 'document', { id: req.params.templateId }) });
     if (!template) return res.status(404).json({ error: 'Template not found' });
-    const { id, createdAt, updatedAt, ...data } = template;
+    // A copy starts its own history: version 1, never downloaded.
+    const { id, createdAt, updatedAt, version, downloadCount, ...data } = template;
     // Prisma refuses a bare null for a Json column; left out, it stays NULL.
     if (data.sharedWith === null) delete data.sharedWith;
     const doc = await prisma.document.create({ data: { ...data, name: req.body.name || `${template.name} (Copy)`, isTemplate: false, createdById: req.user.id } });

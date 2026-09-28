@@ -3,7 +3,7 @@
  * 
  * Security: Helmet, CORS lockdown, input sanitization, HPP, per-route body limits
  * Operational: Structured logging, Prometheus metrics, real health checks
- * Data: Validation constraints on write routes
+ * Data: write routes check their own fields and the org's validation rules
  */
 
 const express = require('express');
@@ -16,7 +16,6 @@ const { limiters } = require('./middleware/rateLimit');
 const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
-const { validateBody } = require('./utils/integrity');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
 
 let helmet, hpp, compression;
@@ -105,7 +104,18 @@ function createApp(rawPrisma) {
   }));
 
   // ─── BODY PARSING (with size limits) ───
-  app.use(express.json({ limit: '1mb' })); // Default 1MB
+  // One parser per request, chosen by path: 1MB by default, more where a
+  // route needs it. The larger parsers used to sit on their mounts, after
+  // this one, which had already answered 413 past 1MB, so they never applied.
+  const jsonDefault = express.json({ limit: '1mb' });
+  const jsonLarger = [
+    ['/api/documents', express.json({ limit: '10mb' })], // document uploads
+    ['/api/ai', express.json({ limit: '2mb' })], // AI context (not /api/ai-agents)
+  ];
+  app.use((req, res, next) => {
+    const larger = jsonLarger.find(([prefix]) => req.path === prefix || req.path.startsWith(`${prefix}/`));
+    return (larger ? larger[1] : jsonDefault)(req, res, next);
+  });
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   // ─── HTTP PARAMETER POLLUTION PROTECTION ───
@@ -160,10 +170,12 @@ function createApp(rawPrisma) {
         return res.status(400).json({ error: 'firstName, lastName, and company are required' });
       }
 
-      // Check for duplicate
-      const existing = email ? await prisma.lead.findFirst({ where: { email } }) : null;
+      // Check for duplicate: a live lead only, so a lead in the recycle bin does
+      // not turn the form away; and without its id, which is no business of an
+      // anonymous caller.
+      const existing = email ? await prisma.lead.findFirst({ where: { email, deletedAt: null }, select: { id: true } }) : null;
       if (existing) {
-        return res.status(409).json({ error: 'A lead with this email already exists', leadId: existing.id });
+        return res.status(409).json({ error: 'A lead with this email already exists' });
       }
 
       const lead = await prisma.lead.create({
@@ -226,7 +238,7 @@ function createApp(rawPrisma) {
     res.end(pixel);
   });
 
-  // ─── PROTECTED ROUTES (with validation constraints on write paths) ───
+  // ─── PROTECTED ROUTES ───
   app.use('/api/contacts', require('./routes/contacts'));
   app.use('/api/leads', require('./routes/leads'));
   app.use('/api/deals', require('./routes/deals'));
@@ -234,9 +246,7 @@ function createApp(rawPrisma) {
   app.use('/api/activities', require('./routes/activities'));
   app.use('/api/emails', require('./routes/emails'));
   app.use('/api/cases', require('./routes/cases'));
-  app.use('/api/documents',
-    express.json({ limit: '10mb' }), // Larger limit for document uploads
-    require('./routes/documents'));
+  app.use('/api/documents', require('./routes/documents'));
   app.use('/api/campaigns', require('./routes/campaigns'));
   app.use('/api/products', require('./routes/products'));
   app.use('/api/quotes', require('./routes/quotes'));
@@ -244,9 +254,7 @@ function createApp(rawPrisma) {
   app.use('/api/workflows', require('./routes/workflows'));
   app.use('/api/users', require('./routes/users'));
   app.use('/api/admin', require('./routes/admin'));
-  app.use('/api/ai',
-    express.json({ limit: '2mb' }), // Larger for AI context
-    require('./routes/ai'));
+  app.use('/api/ai', require('./routes/ai'));
   app.use('/api/forecasts', require('./routes/forecasts'));
   app.use('/api/cpq', require('./routes/cpq'));
   app.use('/api/approvals', require('./routes/approvals'));
@@ -345,7 +353,9 @@ function createApp(rawPrisma) {
       await prisma.$queryRaw`SELECT 1`;
       services.database = { status: 'up' };
     } catch (e) {
-      services.database = { status: 'down', error: e.message };
+      // Public endpoint: a connection error names internal hosts, so the
+      // detail stays in development.
+      services.database = { status: 'down', ...(isProd ? {} : { error: e.message }) };
       checks.status = 'degraded';
     }
 

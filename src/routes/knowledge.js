@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { columnsFrom } = require('../utils/modelFields');
+const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -11,8 +11,8 @@ router.use(authenticate, auditMiddleware);
 router.get('/', requirePermission('knowledge', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { category, status, search, visibility, tag } = req.query;
-    let where = {};
+    const { category, status, search, visibility, tag, page = 1, limit = 50, sortBy, sortDir } = req.query;
+    let where = { deletedAt: null };
     if (category) where.category = category;
     if (status) where.status = status;
     if (visibility) where.visibility = visibility;
@@ -23,12 +23,20 @@ router.get('/', requirePermission('knowledge', 'read'), async (req, res, next) =
       { summary: { contains: search, mode: 'insensitive' } },
       { tags: { has: search } },
     ];
-    const articles = await prisma.knowledgeArticle.findMany({
-      where,
-      include: { author: { select: { id: true, firstName: true, lastName: true } }, _count: { select: { attachments: true } } },
-      orderBy: { updatedAt: 'desc' },
-    });
-    res.json({ data: articles });
+    // A page and the total, as the list screen pages by: every article came
+    // back at once, with no count.
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const [articles, total] = await Promise.all([
+      prisma.knowledgeArticle.findMany({
+        where,
+        include: { author: { select: { id: true, firstName: true, lastName: true } }, _count: { select: { attachments: true } } },
+        orderBy: scalarOrderBy('knowledgeArticle', sortBy, sortDir) || { updatedAt: 'desc' },
+        skip: (current - 1) * take, take,
+      }),
+      prisma.knowledgeArticle.count({ where }),
+    ]);
+    res.json({ data: articles, total, page: current, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
 
@@ -82,9 +90,12 @@ router.post('/', requirePermission('knowledge', 'edit'), async (req, res, next) 
     const prisma = req.app.locals.prisma;
     // The article's own columns: relation keys in the body were nested writes.
     const data = { ...columnsFrom('knowledgeArticle', req.body), authorId: req.userId };
+    // A missing title was a 500 from the slug below; a draft may start empty.
+    if (typeof data.title !== 'string' || !data.title.trim()) return res.status(400).json({ error: 'title required' });
+    if (data.body == null) data.body = '';
     // Auto-generate slug from title
     if (!data.slug) {
-      data.slug = data.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      data.slug = data.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'article';
       // Ensure uniqueness
       const existing = await prisma.knowledgeArticle.findUnique({ where: { slug: data.slug } });
       if (existing) data.slug += '-' + Date.now().toString(36);
@@ -100,7 +111,9 @@ router.put('/:id', requirePermission('knowledge', 'edit'), async (req, res, next
   try {
     const prisma = req.app.locals.prisma;
     const data = columnsFrom('knowledgeArticle', req.body);
-    delete data.authorId;
+    // Not its author, nor the counts views and votes keep: the edit form sends
+    // the row back whole, and its counts from when it opened undid those since.
+    for (const key of ['authorId', 'viewCount', 'helpfulYes', 'helpfulNo']) delete data[key];
     if (data.status === 'Published' && !data.publishedAt) data.publishedAt = new Date();
     const article = await prisma.knowledgeArticle.update({ where: { id: req.params.id }, data });
     res.json(article);

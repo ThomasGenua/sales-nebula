@@ -1,7 +1,7 @@
 const { createCrudRouter } = require('../utils/crud');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { canReach, reachableWhere } = require('../middleware/access');
+const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
 
 /**
@@ -93,15 +93,31 @@ const router = createCrudRouter('account', 'accounts', {
     router.post('/:id/clone', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const source = await prisma.account.findUnique({ where: { id: req.params.id } });
+        // A live account, as GET /:id answers for. A deleted one was cloned,
+        // deletedAt and all, into a deleted copy.
+        const source = await prisma.account.findFirst({ where: { id: req.params.id, deletedAt: null } });
         if (!source) return res.status(404).json({ error: 'Not found' });
 
-        const { id, createdAt, updatedAt, ...data } = source;
+        const { id, createdAt, updatedAt, deletedAt, ...data } = source;
         data.name = `${data.name} (Copy)`;
         // The copy is the caller's, as a cloned deal is. It kept the source's
         // owner and creator, so it landed in another rep's accounts.
         data.ownerId = req.userId;
         data.createdById = req.userId;
+
+        // The copy links only to records the caller can see; it took the
+        // source's links unchecked, so it could be filed under an account
+        // hidden from them. A hidden link is dropped rather than refusing the
+        // clone: the caller did not send it and cannot change it. linkRefusal
+        // passes parentId (no model is called `parent`), so the parent is
+        // looked up as /:id/hierarchy looks it up.
+        const seen = new Map();
+        for (const key of Object.keys(data)) {
+          if (await linkRefusal(req, 'account', { [key]: data[key] }, null, seen)) data[key] = null;
+        }
+        if (data.parentId && !(await prisma.account.findFirst({ where: await reachableWhere(req, 'accounts', 'account', { id: data.parentId }), select: { id: true } }))) {
+          data.parentId = null;
+        }
 
         const clone = await prisma.account.create({ data });
         res.status(201).json(clone);
@@ -139,12 +155,15 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const id = req.params.id;
     const [account, contacts, deals, cases, activities] = await Promise.all([
-      prisma.account.findUnique({ where: { id } }),
+      prisma.account.findFirst({ where: { id, deletedAt: null }, select: { id: true } }),
       readable(req, 'contacts', 'contact', { accountId: id }, where => prisma.contact.count({ where }), 0),
       readable(req, 'deals', 'deal', { accountId: id }, where => prisma.deal.findMany({ where, select: { stage: true, value: true, currency: true } })),
       readable(req, 'cases', 'case', { accountId: id, createdAt: { gte: new Date(Date.now() - 90 * 86400000) } }, where => prisma.case.findMany({ where, select: { priority: true, status: true } })),
       readable(req, 'activities', 'activity', { accountId: id, createdAt: { gte: new Date(Date.now() - 30 * 86400000) } }, where => prisma.activity.count({ where }), 0),
     ]);
+    // The account was read and never checked, so any id, a deleted account's
+    // included, was scored as an account with nothing on it.
+    if (!account) return res.status(404).json({ error: 'Not found' });
     const ctx = await currencyContext(prisma);
     let score = 50;
     if (contacts > 3) score += 10; else if (contacts === 0) score -= 15;
@@ -152,7 +171,8 @@ router.get('/:id/health', authenticate, async (req, res, next) => {
     if (wonDeals.length > 0) score += 15;
     const openDeals = deals.filter(d => !['Closed Won', 'Closed Lost'].includes(d.stage));
     if (openDeals.length > 0) score += 10;
-    const criticalCases = cases.filter(c => c.priority === 'Critical' && c.status !== 'Closed');
+    // Open ones, as /:id/stats counts them: a resolved case was still critical here.
+    const criticalCases = cases.filter(c => c.priority === 'Critical' && !['Resolved', 'Closed'].includes(c.status));
     if (criticalCases.length > 0) score -= 20;
     if (activities > 5) score += 15; else if (activities === 0) score -= 10;
     score = Math.max(0, Math.min(100, score));
@@ -208,7 +228,8 @@ router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), a
 router.get('/:id/hierarchy', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const account = await prisma.account.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, parentId: true } });
+    // A live account, as GET /:id answers for; a deleted one still answered.
+    const account = await prisma.account.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true, name: true, parentId: true } });
     if (!account) return res.status(404).json({ error: 'Not found' });
     const visible = where => reachableWhere(req, 'accounts', 'account', where);
     const children = await prisma.account.findMany({ where: await visible({ parentId: account.id }), select: { id: true, name: true, industry: true, annualRevenue: true } });

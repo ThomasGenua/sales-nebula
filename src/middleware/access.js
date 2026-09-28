@@ -163,6 +163,10 @@ function linkKeys(model) {
     const target = field.name.slice(0, -2);
     if (moduleOf(target)) keys.set(field.name, target);
   }
+  // An undeclared parentId points at the model's own records (an account's
+  // parent account); there is no model called `parent` to find above.
+  const own = model.name.charAt(0).toLowerCase() + model.name.slice(1);
+  if (!keys.has('parentId') && model.fields.some(f => f.name === 'parentId' && f.kind === 'scalar') && moduleOf(own)) keys.set('parentId', own);
   return keys;
 }
 

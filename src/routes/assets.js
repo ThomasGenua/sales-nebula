@@ -28,12 +28,13 @@ const router = createCrudRouter('asset', 'assets', {
 router.post('/:id/install', authenticate, requirePermission('assets', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // An asset has no location column: sending one made the install answer
+    // 500, so it is not stored.
     const asset = await prisma.asset.update({
       where: { id: req.params.id },
       data: {
         status: 'Installed',
         installDate: new Date(),
-        ...(req.body.location && { location: req.body.location }),
       },
     });
     await req.audit({ action: 'update', module: 'assets', recordId: asset.id, details: 'Asset installed' });
@@ -98,18 +99,20 @@ router.get('/:id/warranty', authenticate, async (req, res, next) => {
 router.get('/:id/service-history', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const cases = await prisma.case.findMany({
-      where: { assetId: req.params.id },
+    // Each module's records only with its read permission, and only those row
+    // security lets the caller see; deleted cases and anyone's were listed.
+    const cases = permits(req, 'cases', 'read') ? await prisma.case.findMany({
+      where: await reachableWhere(req, 'cases', 'case', { assetId: req.params.id }),
       orderBy: { createdAt: 'desc' },
       take: 50,
       select: { id: true, caseNumber: true, subject: true, status: true, priority: true, createdAt: true, closedAt: true },
-    });
-    const workOrders = await prisma.workOrder.findMany({
-      where: { assetId: req.params.id },
+    }) : [];
+    const workOrders = permits(req, 'fieldService', 'read') ? await prisma.workOrder.findMany({
+      where: await reachableWhere(req, 'fieldService', 'workOrder', { assetId: req.params.id }),
       orderBy: { createdAt: 'desc' },
       take: 50,
       select: { id: true, workOrderNumber: true, subject: true, status: true, priority: true, createdAt: true },
-    });
+    }) : [];
     res.json({ cases, workOrders, totalServiceEvents: cases.length + workOrders.length });
   } catch (err) { next(err); }
 });
@@ -137,7 +140,8 @@ statusRoutes(router, { module: 'assets', model: 'asset', analytics: true });
 router.get('/reports/utilization', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const assets = await prisma.asset.findMany({ where: { deletedAt: null }, select: { id: true, name: true, status: true, installDate: true, usageEndDate: true } });
+    // The assets the caller may see; this counted everyone's.
+    const assets = await prisma.asset.findMany({ where: await reachableWhere(req, 'assets', 'asset'), select: { id: true, name: true, status: true, installDate: true, usageEndDate: true } });
     const byStatus = {};
     assets.forEach(a => { byStatus[a.status || 'Unknown'] = (byStatus[a.status || 'Unknown'] || 0) + 1; });
     const activeCount = assets.filter(a => a.status === 'Active' || a.status === 'Installed').length;
@@ -150,7 +154,7 @@ router.get('/reports/warranty-expiring', authenticate, async (req, res, next) =>
   try {
     const prisma = req.app.locals.prisma;
     const thirtyDaysOut = new Date(Date.now() + 30 * 86400000);
-    const expiring = await prisma.asset.findMany({ where: { warrantyEndDate: { lte: thirtyDaysOut, gte: new Date() }, deletedAt: null }, select: { id: true, name: true, warrantyEndDate: true, accountId: true }, orderBy: { warrantyEndDate: 'asc' } });
+    const expiring = await prisma.asset.findMany({ where: await reachableWhere(req, 'assets', 'asset', { warrantyEndDate: { lte: thirtyDaysOut, gte: new Date() } }), select: { id: true, name: true, warrantyEndDate: true, accountId: true }, orderBy: { warrantyEndDate: 'asc' } });
     res.json({ count: expiring.length, assets: expiring });
   } catch (err) { next(err); }
 });

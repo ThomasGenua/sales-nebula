@@ -2,14 +2,13 @@ require('dotenv').config();
 const http = require('http');
 
 const { cache } = require('./services/cache');
-const { initWebSocket, emit, getOnlineUsers } = require('./services/websocket');
+const { initWebSocket, emit } = require('./services/websocket');
 const { storage } = require('./services/storage');
-const { initJobQueue, runJob, getDeadLetterQueue, clearDeadLetterQueue } = require('./jobs/scheduler');
+const { initJobQueue } = require('./jobs/scheduler');
 const { logger } = require('./services/logger');
 const { setRedisClient } = require('./middleware/auth');
 
 const { createApp } = require('./app');
-const { authenticate, requirePermission } = require('./middleware/auth');
 const { createDatabaseClient } = require('./database');
 
 let prisma;
@@ -33,33 +32,9 @@ async function start() {
   app.locals.storage = storage;
   app.locals.databaseProvider = database.provider;
 
-  // ─── ADMIN ENDPOINTS ───
-  app.post('/api/admin/jobs/:name', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-    try {
-      const result = await runJob(req.params.name);
-      res.json({ success: true, job: req.params.name, result });
-    } catch (err) { next(err); }
-  });
-
-  app.get('/api/admin/jobs', authenticate, requirePermission('admin', 'full'), (req, res) => {
-    res.json({
-      available: [
-        'checkOverdueInvoices', 'recalcForecasts', 'runScheduledWorkflows',
-        'cleanupAuditLogs', 'cleanupNotifications', 'checkStaleDeals',
-        'enforceSla', 'cleanupRecycleBin', 'processSequenceSteps',
-      ],
-      deadLetterQueue: getDeadLetterQueue(),
-    });
-  });
-
-  app.delete('/api/admin/jobs/dlq', authenticate, requirePermission('admin', 'full'), (req, res) => {
-    clearDeadLetterQueue();
-    res.json({ success: true, message: 'Dead letter queue cleared' });
-  });
-
-  app.get('/api/users/online', authenticate, (req, res) => {
-    res.json({ online: getOnlineUsers() });
-  });
+  // Job and presence routes live in their routers (routes/admin.js,
+  // routes/users.js). Copies registered here came after the app's /api 404
+  // handler and so never answered.
 
   // Initialize services (with graceful degradation)
   try { await cache.connect(); } catch (e) { logger.warn({ error: e.message }, 'Cache init failed, continuing without cache'); }

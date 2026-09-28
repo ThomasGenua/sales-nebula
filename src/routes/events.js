@@ -31,14 +31,36 @@ router.post('/publish', requirePermission('admin', 'edit'), async (req, res, nex
     });
 
     const dispatched = [];
+    let webhooksSent = false;
+    let socketSent = false;
     for (const sub of matching) {
       if (sub.type === 'websocket') {
-        req.app.locals.emit?.(channel, { event, payload });
+        // app.locals.emit is a set of senders, not a function, so this threw
+        // and the publish answered 500 after storing the event. Sent once, to
+        // those following the record (or module) the event names, as ids they
+        // fetch through their own access, like every socket message
+        // (services/websocket.js); an event naming neither has no audience.
+        if (!module) continue;
+        if (!socketSent) {
+          const emit = req.app.locals.emit;
+          const note = { eventId: event.id, channel, module, recordId: recordId || null };
+          if (recordId) emit?.toRecord?.(module, recordId, `platform:${channel}`, note);
+          else emit?.toModule?.(module, `platform:${channel}`, note);
+          socketSent = true;
+        }
         dispatched.push({ type: 'websocket', channel });
       } else if (sub.type === 'webhook') {
-        // Async webhook delivery
-        const { fireWebhookEvent } = require('../services/webhooks');
-        fireWebhookEvent(channel, { event: event.id, channel, payload, module, recordId }, req.app.locals.prisma).catch(() => {});
+        // Async webhook delivery. The signature is (prisma, event, payload);
+        // called as (channel, payload, prisma), it threw inside and sent nothing.
+        // Delivered once per publish, however many subscriptions match (each
+        // match sent every webhook the event again), and as platform.<channel>:
+        // the caller names the channel, and unprefixed it could pass for a
+        // system event (deals.created), signed with each webhook's secret.
+        if (!webhooksSent) {
+          const { fireWebhookEvent } = require('../services/webhooks');
+          fireWebhookEvent(prisma, `platform.${channel}`, { event: event.id, channel, payload, module, recordId }).catch(() => {});
+          webhooksSent = true;
+        }
         dispatched.push({ type: 'webhook', endpoint: sub.endpoint });
       }
     }
@@ -48,7 +70,9 @@ router.post('/publish', requirePermission('admin', 'edit'), async (req, res, nex
 });
 
 // ─── EVENT HISTORY ───
-router.get('/history', requirePermission('admin', 'read'), async (req, res, next) => {
+// Payloads can carry record data from any module, so reading them takes
+// admin: full. admin: read, which the Sales Rep role holds, read them all.
+router.get('/history', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const { channel, module, limit = 50, before } = req.query;
     const where = {};
@@ -114,6 +138,21 @@ async function findEvent(req, res, id, edit = false) {
 const idList = value => (Array.isArray(value) ? value.map(String) : []);
 
 /**
+ * The start `n` days, weeks or calendar months after `from`. Monthly was a
+ * fixed 30 days, which drifted off the day of the month; a day the month
+ * lacks (the 31st) falls on its last day.
+ */
+function repeatStart(from, frequency, n) {
+  const start = new Date(from);
+  if (frequency !== 'monthly') return new Date(start.getTime() + n * (frequency === 'weekly' ? 604800000 : 86400000));
+  const day = start.getDate();
+  start.setDate(1);
+  start.setMonth(start.getMonth() + n);
+  start.setDate(Math.min(day, new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate()));
+  return start;
+}
+
+/**
  * Why these contacts or leads may not be added as attendees, or null: each
  * must be a live record the caller can see, since their names and emails come
  * back with the event. EventAttendee declares no relation for linkRefusal()
@@ -126,6 +165,17 @@ async function attendeeRefusal(req, key, module, modelName, ids) {
     ? await req.app.locals.prisma[modelName].count({ where: await reachableWhere(req, module, modelName, { id: { in: wanted } }) })
     : 0;
   return seen === wanted.length ? null : `${key} names a ${modelName} you cannot see`;
+}
+
+/** The contacts or leads among `ids` the caller can see, id -> name and email. */
+async function visiblePeople(req, module, modelName, ids) {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  if (!wanted.length || !permits(req, module, 'read')) return new Map();
+  const rows = await req.app.locals.prisma[modelName].findMany({
+    where: await reachableWhere(req, module, modelName, { id: { in: wanted } }),
+    select: { id: true, firstName: true, lastName: true, email: true },
+  });
+  return new Map(rows.map(r => [r.id, r]));
 }
 
 // Event attendees management
@@ -146,12 +196,23 @@ router.post('/:id/attendees', authenticate, requirePermission('activities', 'edi
   } catch (err) { next(err); }
 });
 
+// A contact's or lead's name and email only with that module's read permission
+// and a live record the caller can see. Otherwise the attendee row comes back
+// without the person's details: contact or lead null, and the row's own name
+// and email emptied. Anyone who could see the event read every attendee's.
 router.get('/:id/attendees', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     if (!(await findEvent(req, res, req.params.id))) return;
-    const attendees = await queryWithIncludes(prisma, 'eventAttendee', 'findMany', { where: { eventId: req.params.id }, include: { contact: { select: { firstName: true, lastName: true, email: true } }, lead: { select: { firstName: true, lastName: true, email: true } } } });
-    res.json(attendees);
+    const attendees = await prisma.eventAttendee.findMany({ where: { eventId: req.params.id } });
+    const contacts = await visiblePeople(req, 'contacts', 'contact', attendees.map(a => a.contactId));
+    const leads = await visiblePeople(req, 'leads', 'lead', attendees.map(a => a.leadId));
+    res.json(attendees.map(a => {
+      const contact = contacts.get(a.contactId) || null;
+      const lead = leads.get(a.leadId) || null;
+      const hidden = (a.contactId && !contact) || (a.leadId && !lead);
+      return { ...a, ...(hidden && { name: null, email: null }), contact, lead };
+    }));
   } catch (err) { next(err); }
 });
 
@@ -182,12 +243,14 @@ router.post('/:id/recurrence', authenticate, requirePermission('activities', 'ed
     if (!frequency || !['daily', 'weekly', 'monthly'].includes(frequency)) return res.status(400).json({ error: 'frequency required (daily/weekly/monthly)' });
     const parent = await findEvent(req, res, req.params.id, true);
     if (!parent) return;
+    // Copies are spaced from the event's start; one without a start was
+    // repeated from 1 January 1970.
+    if (!parent.startDate) return res.status(400).json({ error: 'The event needs a start date to repeat' });
     const created = [];
-    const intervalMs = { daily: 86400000, weekly: 604800000, monthly: 2592000000 }[frequency] * (interval || 1);
+    const step = Math.max(1, parseInt(interval, 10) || 1);
     const maxCount = Math.min(count || 12, 52);
-    let startTime = new Date(parent.startDate).getTime();
-    for (let i = 0; i < maxCount; i++) {
-      startTime += intervalMs;
+    for (let i = 1; i <= maxCount; i++) {
+      const startTime = repeatStart(parent.startDate, frequency, i * step).getTime();
       if (endDate && startTime > new Date(endDate).getTime()) break;
       const dur = parent.endDate ? new Date(parent.endDate) - new Date(parent.startDate) : 3600000;
       const ev = await prisma.event.create({ data: { name: parent.name, description: parent.description, location: parent.location, startDate: new Date(startTime), endDate: new Date(startTime + dur), type: parent.type, ownerId: parent.ownerId, createdById: parent.createdById, recurrenceParentId: parent.id } });
@@ -198,13 +261,16 @@ router.post('/:id/recurrence', authenticate, requirePermission('activities', 'ed
 });
 
 // Calendar view
-// The events the caller may see; this listed everyone's.
+// The events the caller may see; this listed everyone's. Those starting in
+// the range, as they are grouped by start day: requiring the end inside it too
+// dropped events that run past it and every event with no end date.
 router.get('/calendar/range', authenticate, requirePermission('activities', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end dates required' });
-    const events = await queryWithIncludes(prisma, 'event', 'findMany', { where: { startDate: { gte: new Date(start) }, endDate: { lte: new Date(end) }, deletedAt: null, ...eventScope(req) }, orderBy: { startDate: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
+    if (isNaN(new Date(start)) || isNaN(new Date(end))) return res.status(400).json({ error: 'Invalid date format' });
+    const events = await queryWithIncludes(prisma, 'event', 'findMany', { where: { startDate: { gte: new Date(start), lte: new Date(end) }, deletedAt: null, ...eventScope(req) }, orderBy: { startDate: 'asc' }, include: { owner: { select: { firstName: true, lastName: true } } } });
     const grouped = {};
     events.forEach(e => { const day = new Date(e.startDate).toISOString().split('T')[0]; (grouped[day] = grouped[day] || []).push(e); });
     res.json({ range: { start, end }, totalEvents: events.length, byDate: grouped });

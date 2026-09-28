@@ -1,9 +1,10 @@
 const { Router } = require('express');
+const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate } = require('../middleware/validate');
 const { diffFields, formatChanges } = require('./integrity');
-const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
+const { rowSecurity, applyAccessFilter, applyAutoAssignRules, autoAssignToUserGroups } = require('../middleware/rowSecurity');
 const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const {
   pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
@@ -14,6 +15,22 @@ const { createNumbered } = require('./numbering');
 const {
   checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
 } = require('../services/recordRules');
+
+/**
+ * File a record into security groups: the groups whose rules it matches, and
+ * on create the auto-assigning groups of its owner. Both were configurable
+ * and never ran, so a rule set to put new deals in a group left them open.
+ * As with workflows, a failure here does not fail the write.
+ */
+async function assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate }) {
+  try {
+    await applyAutoAssignRules(prisma, moduleName, record, { onCreate });
+    const owner = record.ownerId || record.assignedId || record.createdById;
+    if (onCreate && owner) await autoAssignToUserGroups(prisma, owner, moduleName, record.id);
+  } catch (err) {
+    require('../services/logger').logger.warn({ err, module: moduleName, recordId: record.id }, 'Security group assignment failed');
+  }
+}
 
 // The model behind each CRUD module, for code outside its router that must
 // check a record by module name (the WebSocket's record rooms).
@@ -110,6 +127,17 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // went into the where clause, relations included, which reached the
       // columns of related records.
       const wanted = Object.fromEntries(Object.entries(filters).filter(([, value]) => value && value !== 'All'));
+      // The filter panel sends a date range as <column>From / <column>To,
+      // which are not columns, so the range was dropped and the list came back
+      // unfiltered. They bound the column instead; a To date takes in its day.
+      for (const key of Object.keys(wanted)) {
+        const [, column, end] = /^(.+)(From|To)$/.exec(key) || [];
+        if (!column || modelHasField(modelName, key) || typeof wanted[key] !== 'string') continue;
+        const bound = end === 'To' && /^\d{4}-\d{2}-\d{2}$/.test(wanted[key]) ? `${wanted[key]}T23:59:59.999Z` : wanted[key];
+        const range = wanted[column] && typeof wanted[column] === 'object' ? wanted[column] : {};
+        wanted[column] = { ...range, [end === 'From' ? 'gte' : 'lte']: bound };
+        delete wanted[key];
+      }
       where = { ...where, ...scalarWhere(modelName, wanted) };
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
@@ -165,7 +193,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       if (validate) {
         const { valid, errors } = validate(data);
-        if (!valid) return res.status(400).json({ error: 'Validation failed', errors });
+        // The message names the fields: the pages show only `error`, which
+        // said "Validation failed" and not what to fix.
+        if (!valid) {
+          const detail = Object.entries(errors || {}).map(([field, problem]) => `${field}: ${String(problem).toLowerCase()}`).join('; ');
+          return res.status(400).json({ error: detail ? `Validation failed (${detail})` : 'Validation failed', errors });
+        }
       }
 
       if (beforeCreate) data = await beforeCreate(data, req);
@@ -222,6 +255,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       await hydrateIncludes(prisma, record, manualIncludes);
 
       await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
+      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: true });
 
       // Emit real-time event
       if (req.app.locals.emit?.recordCreated) {
@@ -300,6 +334,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       }
 
       const { data: updateData } = pickModelFields(modelName, data);
+      // An empty Json column sent back empty is no change; leave it unwritten.
+      for (const [key, value] of Object.entries(updateData)) {
+        if (value === Prisma.DbNull && oldRecord[key] === null) delete updateData[key];
+      }
       const linkProblem = await linkRefusal(req, modelName, updateData, oldRecord);
       if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
       const record = await prisma[modelName].update({
@@ -308,9 +346,11 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         include,
       });
       await hydrateIncludes(prisma, record, manualIncludes);
+      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: false });
 
-      // Field-level audit
-      const changes = diffFields(oldRecord, data);
+      // Field-level audit, of the values written: the form sends the whole
+      // record back as text, so diffing the body logged every number as changed.
+      const changes = diffFields(oldRecord, updateData);
       if (changes.length > 0) {
         await req.audit({
           action: 'update', module: moduleName, recordId: record.id,
@@ -337,6 +377,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       try {
         const { fireWebhookEvent } = require('../services/webhooks');
         await fireWebhookEvent(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
+        // Offered as deal.stage_changed and never fired.
+        if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
+          await fireWebhookEvent(prisma, `${moduleName}.stage_changed`, { id: record.id, module: moduleName, from: oldRecord.stage, to: record.stage });
+        }
       } catch (e) { /* Webhook is best-effort */ }
 
       // As for create: linked records as the caller may see them, in the response only.

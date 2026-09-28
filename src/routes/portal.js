@@ -11,8 +11,10 @@ const router = Router();
 router.get('/config', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    let config = await prisma.portalConfig.findFirst();
-    if (!config) config = { enabled: false, name: 'Customer Portal', allowSelfRegistration: true, theme: 'default', modules: ['cases', 'knowledge', 'orders'] };
+    let config = await prisma.portalConfig.findFirst({ where: { deletedAt: null } });
+    // Until one is saved, the model's own fields and defaults: this named
+    // fields the model does not have and said self-registration was on.
+    if (!config) config = { name: 'Customer Portal', type: 'Customer', active: false, selfRegistration: false, theme: null, features: ['cases', 'knowledge'] };
     res.json(config);
   } catch (err) { next(err); }
 });
@@ -21,7 +23,7 @@ router.get('/config', authenticate, async (req, res, next) => {
 router.put('/config', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const existing = await prisma.portalConfig.findFirst();
+    const existing = await prisma.portalConfig.findFirst({ where: { deletedAt: null } });
     const data = columnsFrom('portalConfig', req.body);
     const config = existing
       ? await prisma.portalConfig.update({ where: { id: existing.id }, data })
@@ -75,7 +77,11 @@ router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMid
     const contact = await prisma.contact.findFirst({ where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }) });
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
     if (!contact.email) return res.status(400).json({ error: 'Contact has no email address' });
-    const existing = await prisma.user.findUnique({ where: { email: contact.email } });
+    // Stored lowercased like every other account address, and checked against
+    // existing accounts in any case; the contact's own casing was kept.
+    const email = contact.email.trim().toLowerCase();
+    const existing = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
+      .catch(() => prisma.user.findUnique({ where: { email } })); // SQLite: no case-insensitive mode
     if (existing) return res.status(409).json({ error: 'User already exists with this email' });
     const { valid, errors } = validatePassword(String(password));
     if (!valid) return res.status(400).json({ error: errors.join('. ') });
@@ -83,7 +89,7 @@ router.post('/users', authenticate, requirePermission('admin', 'edit'), auditMid
     const hashedPassword = await bcrypt.hash(password, 12);
     const user = await prisma.user.create({
       data: {
-        firstName: contact.firstName, lastName: contact.lastName, email: contact.email,
+        firstName: contact.firstName, lastName: contact.lastName, email,
         password: hashedPassword, isPortalUser: true, contactId: contact.id, roleId: portalRole.id,
       },
     });
@@ -126,6 +132,8 @@ router.post('/my/cases', authenticate, auditMiddleware, async (req, res, next) =
     const prisma = req.app.locals.prisma;
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { contactId: true } });
     if (!user?.contactId) return res.status(403).json({ error: 'No associated contact' });
+    // A case needs a subject; without one this was a 500.
+    if (typeof req.body.subject !== 'string' || !req.body.subject.trim()) return res.status(400).json({ error: 'subject is required' });
     const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
       data: { subject: req.body.subject, description: req.body.description, priority: req.body.priority || 'Medium', status: 'New', origin: 'Portal', contactId: user.contactId },
     });
@@ -136,15 +144,33 @@ router.post('/my/cases', authenticate, auditMiddleware, async (req, res, next) =
 module.exports = router;
 
 // Portal knowledge base (public)
+// Public articles only: this listed, and searched the bodies of, every
+// published article, the Internal ones (the default visibility) included.
+const PORTAL_ARTICLES = { status: 'Published', visibility: 'Public', deletedAt: null };
+
 router.get('/knowledge', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { q, category, limit = 20 } = req.query;
-    const where = { status: 'Published', deletedAt: null };
+    const where = { ...PORTAL_ARTICLES };
     if (q) where.OR = [{ title: { contains: q, mode: 'insensitive' } }, { body: { contains: q, mode: 'insensitive' } }];
     if (category) where.category = category;
     const articles = await prisma.knowledgeArticle.findMany({ where, select: { id: true, title: true, category: true, summary: true, viewCount: true }, orderBy: { viewCount: 'desc' }, take: +limit });
     res.json(articles);
+  } catch (err) { next(err); }
+});
+
+// One article with its body, under the same rules: the list has no body and
+// nothing else in the portal served one.
+router.get('/knowledge/:id', async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const article = await prisma.knowledgeArticle.findFirst({
+      where: { ...PORTAL_ARTICLES, id: String(req.params.id) },
+      select: { id: true, title: true, category: true, summary: true, body: true, viewCount: true, updatedAt: true },
+    });
+    if (!article) return res.status(404).json({ error: 'Not found' });
+    res.json(article);
   } catch (err) { next(err); }
 });
 

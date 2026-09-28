@@ -88,9 +88,10 @@ router.post('/delete', async (req, res, next) => {
     if (!allowed(req, res, module, 'full')) return;
     const model = MODULE_MAP[module];
 
-    // Snapshot records for recycle bin: only those the caller may change.
+    // Snapshot records for recycle bin: only those the caller may delete, the
+    // row access a single DELETE asks for.
     const records = await prisma[model].findMany({
-      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Full'),
     });
 
     // Move to recycle bin
@@ -106,10 +107,14 @@ router.post('/delete', async (req, res, next) => {
       }).catch(() => {})
     ));
 
-    // Delete records
-    const result = await prisma[model].deleteMany({
-      where: { id: { in: records.map(r => r.id) } },
-    });
+    // Soft delete where the model supports it, as a single delete does. Rows
+    // were removed outright, taking their links with them (or failing on
+    // them after the bin entries were made), so the bin could not restore
+    // them in place.
+    const ids = records.map(r => r.id);
+    const result = modelHasField(model, 'deletedAt')
+      ? await prisma[model].updateMany({ where: { id: { in: ids } }, data: { deletedAt: new Date() } })
+      : await prisma[model].deleteMany({ where: { id: { in: ids } } });
 
     await req.audit({
       action: 'delete', module,
@@ -254,10 +259,19 @@ router.post('/add-to-campaign', async (req, res, next) => {
     const contacts = await visible('contacts', 'contact', contactIds);
     const leads = await visible('leads', 'lead', leadIds);
 
+    // People already on the campaign are skipped here: nothing unique stops a
+    // second row, so "skip dupes" never did. Status is left to its default
+    // ('pending'), which is what the campaign's own routes write.
+    const existing = await prisma.campaignRecipient.findMany({
+      where: { campaignId: String(campaignId), OR: [{ contactId: { in: contacts } }, { leadId: { in: leads } }] },
+      select: { contactId: true, leadId: true },
+    });
+    const onCampaign = new Set(existing.flatMap(r => [r.contactId, r.leadId]).filter(Boolean));
+
     let added = 0;
     const all = [
-      ...contacts.map(id => ({ campaignId, contactId: id, status: 'Pending' })),
-      ...leads.map(id => ({ campaignId, leadId: id, status: 'Pending' })),
+      ...contacts.filter(id => !onCampaign.has(id)).map(id => ({ campaignId: String(campaignId), contactId: id })),
+      ...leads.filter(id => !onCampaign.has(id)).map(id => ({ campaignId: String(campaignId), leadId: id })),
     ];
 
     for (const data of all) {

@@ -14,11 +14,13 @@ const router = Router();
  * changing takes admin: edit.
  */
 const SECRET_KEY = /secret|token|password|passwd|api[-_]?key|private/i;
+const MASK = '••••••';
+const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
 function present(integration) {
   if (!integration) return integration;
   const { credentials, ...rest } = integration;
-  if (rest.config && typeof rest.config === 'object' && !Array.isArray(rest.config)) {
-    rest.config = Object.fromEntries(Object.entries(rest.config).map(([k, v]) => [k, SECRET_KEY.test(k) && v ? '••••••' : v]));
+  if (isPlainObject(rest.config)) {
+    rest.config = Object.fromEntries(Object.entries(rest.config).map(([k, v]) => [k, SECRET_KEY.test(k) && v ? MASK : v]));
   }
   return { ...rest, hasCredentials: credentials != null };
 }
@@ -28,6 +30,32 @@ router.get('/', authenticate, requirePermission('admin', 'read'), async (req, re
     const prisma = req.app.locals.prisma;
     const integrations = await prisma.integration.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } });
     res.json(integrations.map(present));
+  } catch (err) { next(err); }
+});
+
+// Named routes before /:id, which took `email-sync` and `health` for ids.
+
+// Email sync status
+router.get('/email-sync', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const emailIntegrations = await prisma.integration.findMany({ where: { type: { in: ['gmail', 'outlook', 'email'] }, deletedAt: null } });
+    res.json(emailIntegrations.map(i => ({ id: i.id, name: i.name, type: i.type, status: i.status, lastSync: i.lastSyncAt })));
+  } catch (err) { next(err); }
+});
+
+// Integration health dashboard
+router.get('/health', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const integrations = await prisma.integration.findMany({ where: { deletedAt: null } });
+    const health = [];
+    for (const int of integrations) {
+      const logs = await prisma.syncLog.findMany({ where: { integrationId: int.id }, orderBy: { startedAt: 'desc' }, take: 10 });
+      const successRate = logs.length > 0 ? (logs.filter(l => l.status === 'Success').length / logs.length * 100).toFixed(0) + '%' : 'N/A';
+      health.push({ id: int.id, name: int.name, provider: int.provider, status: int.status, lastSync: int.lastSyncAt, recentLogs: logs.length, successRate });
+    }
+    res.json(health);
   } catch (err) { next(err); }
 });
 
@@ -48,7 +76,20 @@ router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddlewa
 });
 
 router.put('/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const { id, createdAt, updatedAt, createdById, ...rest } = req.body || {}; const i = await prisma.integration.update({ where: { id: req.params.id }, data: pickModelFields('integration', rest).data }); res.json(present(i)); } catch (err) { next(err); }
+  try {
+    const prisma = req.app.locals.prisma;
+    const { id, createdAt, updatedAt, createdById, ...rest } = req.body || {};
+    const { data } = pickModelFields('integration', rest);
+    // Reads mask secret config values. A config sent back with a value still
+    // masked saved the mask over the secret; that value now keeps what is stored.
+    if (isPlainObject(data.config)) {
+      const current = await prisma.integration.findUnique({ where: { id: req.params.id }, select: { config: true } });
+      const stored = isPlainObject(current?.config) ? current.config : {};
+      data.config = Object.fromEntries(Object.entries(data.config).map(([k, v]) => [k, v === MASK && k in stored ? stored[k] : v]));
+    }
+    const i = await prisma.integration.update({ where: { id: req.params.id }, data });
+    res.json(present(i));
+  } catch (err) { next(err); }
 });
 
 router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
@@ -102,15 +143,6 @@ router.post('/:id/test', authenticate, requirePermission('admin', 'edit'), async
   } catch (err) { next(err); }
 });
 
-// Email sync status
-router.get('/email-sync', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const emailIntegrations = await prisma.integration.findMany({ where: { type: { in: ['gmail', 'outlook', 'email'] }, deletedAt: null } });
-    res.json(emailIntegrations.map(i => ({ id: i.id, name: i.name, type: i.type, status: i.status, lastSync: i.lastSyncAt })));
-  } catch (err) { next(err); }
-});
-
 module.exports = router;
 
 // Sync schedule
@@ -161,20 +193,5 @@ router.get('/:id/health', authenticate, requirePermission('admin', 'read'), asyn
     const recentLogs = await prisma.syncLog.findMany({ where: { integrationId: req.params.id }, orderBy: { startedAt: 'desc' }, take: 10 });
     const errorCount = recentLogs.filter(l => ['error', 'Failed'].includes(l.status)).length;
     res.json({ status: errorCount > 3 ? 'unhealthy' : errorCount > 0 ? 'degraded' : 'healthy', recentErrors: errorCount, lastSync: int.lastSyncAt, recentLogs: recentLogs.slice(0, 5) });
-  } catch (err) { next(err); }
-});
-
-// Integration health dashboard
-router.get('/health', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const integrations = await prisma.integration.findMany({ where: { deletedAt: null } });
-    const health = [];
-    for (const int of integrations) {
-      const logs = await prisma.syncLog.findMany({ where: { integrationId: int.id }, orderBy: { startedAt: 'desc' }, take: 10 });
-      const successRate = logs.length > 0 ? (logs.filter(l => l.status === 'Success').length / logs.length * 100).toFixed(0) + '%' : 'N/A';
-      health.push({ id: int.id, name: int.name, provider: int.provider, status: int.status, lastSync: int.lastSyncAt, recentLogs: logs.length, successRate });
-    }
-    res.json(health);
   } catch (err) { next(err); }
 });

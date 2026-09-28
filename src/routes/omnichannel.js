@@ -1,8 +1,9 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { crudModelFor } = require('../utils/crud');
 const router = Router();
 router.use(authenticate);
 
@@ -70,6 +71,17 @@ router.post('/route', requirePermission('cases', 'edit'), async (req, res, next)
   try {
     const prisma = req.app.locals.prisma;
     const { type, recordId, module, priority, skills } = req.body;
+    // All three are required columns, so a missing one was a 500. The record
+    // was never looked at: in a record module it must be one the caller can see.
+    if (![type, recordId, module].every(v => typeof v === 'string' && v)) {
+      return res.status(400).json({ error: 'type, recordId and module required' });
+    }
+    const model = crudModelFor(module);
+    if (model) {
+      if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
+      const record = await prisma[model].findFirst({ where: await reachableWhere(req, module, model, { id: recordId }), select: { id: true } });
+      if (!record) return res.status(404).json({ error: 'Record not found' });
+    }
     const item = await prisma.omniWorkItem.create({ data: { type, recordId, module, priority: priority || 5, skills: skills || [] } });
     // Auto-route based on channel config, passing over agents whose presence
     // says they are not available: the check a second POST /route handler
@@ -77,11 +89,19 @@ router.post('/route', requirePermission('cases', 'edit'), async (req, res, next)
     const channels = await prisma.omniChannel.findMany({ where: { status: 'Online' }, orderBy: { priority: 'asc' } });
     for (const ch of channels) {
       if (ch.routingType === 'Least Active') {
-        const away = new Set((await prisma.agentPresence.findMany({ where: { status: { notIn: ['available', 'Available'] } }, select: { userId: true } })).map(p => p.userId));
-        const agents = (await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: 'Active' }, _count: true, orderBy: { _count: { assignedTo: 'asc' } } }))
-          .filter(a => !away.has(a.assignedTo));
-        if (agents.length > 0) {
-          await prisma.omniWorkItem.update({ where: { id: item.id }, data: { assignedTo: agents[0].assignedTo, status: 'Assigned', assignedAt: new Date(), channelId: ch.id } });
+        // The available staff agent with the fewest open items, counting
+        // those with none. Load was counted only for agents already holding
+        // an Active item, so an idle agent was never picked, and routed items
+        // not yet accepted (Assigned) counted against no one.
+        const presence = await prisma.agentPresence.findMany({ select: { userId: true, status: true } });
+        const away = new Set(presence.filter(p => !['available', 'Available'].includes(p.status)).map(p => p.userId));
+        const load = new Map(presence.filter(p => !away.has(p.userId)).map(p => [p.userId, 0]));
+        const open = await prisma.omniWorkItem.groupBy({ by: ['assignedTo'], where: { status: { in: ['Assigned', 'Active'] }, assignedTo: { not: null } }, _count: true });
+        for (const a of open) if (!away.has(a.assignedTo)) load.set(a.assignedTo, a._count);
+        const staff = new Set((await prisma.user.findMany({ where: { id: { in: [...load.keys()] }, active: true, isPortalUser: false }, select: { id: true } })).map(u => u.id));
+        const [agent] = [...load].filter(([userId]) => staff.has(userId)).sort((a, b) => a[1] - b[1]);
+        if (agent) {
+          await prisma.omniWorkItem.update({ where: { id: item.id }, data: { assignedTo: agent[0], status: 'Assigned', assignedAt: new Date(), channelId: ch.id } });
           break;
         }
       }
@@ -105,7 +125,13 @@ router.post('/queue/:id/complete', requirePermission('cases', 'edit'), async (re
 router.post('/queue/:id/transfer', requirePermission('cases', 'edit'), async (req, res, next) => {
   try {
     if (!(await assignedToCaller(req, res, 'omniWorkItem', 'assignedTo'))) return;
-    res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: req.body.toUserId, assignedAt: new Date() } }));
+    // toUserId was stored as sent: no one, a disabled account, or a customer's
+    // portal account could be handed the item.
+    const to = req.body.toUserId && await req.app.locals.prisma.user.findFirst({
+      where: { id: String(req.body.toUserId), active: true, isPortalUser: false }, select: { id: true },
+    });
+    if (!to) return res.status(400).json({ error: 'toUserId does not name an active staff user' });
+    res.json(await req.app.locals.prisma.omniWorkItem.update({ where: { id: req.params.id }, data: { status: 'Assigned', assignedTo: to.id, assignedAt: new Date() } }));
   } catch (err) { next(err); }
 });
 
@@ -199,7 +225,9 @@ router.get('/channels/metrics', authenticate, requirePermission('cases', 'read')
     const recent = await reachableWhere(req, 'cases', 'case', { createdAt: { gte: new Date(Date.now() - 30*86400000) } });
     const metrics = [];
     for (const ch of channels) {
-      const count = await prisma.case.count({ where: { AND: [recent, { origin: ch }] } }).catch(() => 0);
+      // Case origins are written capitalised ('Email', 'Web', 'Phone'), so an
+      // exact match on these names counted nothing.
+      const count = await prisma.case.count({ where: { AND: [recent, { origin: { equals: ch, mode: 'insensitive' } }] } }).catch(() => 0);
       metrics.push({ channel: ch, casesLast30Days: count });
     }
     res.json(metrics);

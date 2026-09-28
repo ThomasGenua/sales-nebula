@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { invalidateOrgWideDefaultCache, invalidateHierarchyCache } = require('../middleware/rowSecurity');
 const { columnsFrom } = require('../utils/modelFields');
+const { checkValidationRules } = require('../services/recordRules');
 
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'edit'));
@@ -30,31 +31,14 @@ router.delete('/validation-rules/:id', async (req, res, next) => {
 });
 
 // Validation engine: POST /validate/:module
+// The rules as saves enforce them (services/recordRules). This had its own
+// engine, whose operators the stored rules do not use and which read a
+// matching condition as a pass where saves read it as a failure, so it
+// called records valid that a save would refuse.
 router.post('/validate/:module', async (req, res, next) => {
   try {
-    const prisma = req.app.locals.prisma;
-    const rules = await prisma.validationRule.findMany({ where: { module: req.params.module, active: true } });
-    const errors = [];
-    for (const rule of rules) {
-      const cond = rule.condition || {};
-      const val = req.body[cond.field];
-      let fail = false;
-      switch (cond.operator) {
-        case 'required': fail = !val; break;
-        case 'min_length': fail = val && val.length < cond.value; break;
-        case 'max_length': fail = val && val.length > cond.value; break;
-        case 'regex': fail = val && !new RegExp(cond.value).test(val); break;
-        case 'gt': fail = Number(val) <= Number(cond.value); break;
-        case 'lt': fail = Number(val) >= Number(cond.value); break;
-        case 'in': fail = val && !cond.value.includes(val); break;
-        case 'not_empty_if': {
-          const dep = req.body[cond.dependentField];
-          if (dep === cond.dependentValue) fail = !val;
-          break;
-        }
-      }
-      if (fail) errors.push({ rule: rule.name, field: rule.errorField || cond.field, message: rule.errorMessage });
-    }
+    const record = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const errors = await checkValidationRules(req.app.locals.prisma, req.params.module, record);
     res.json({ valid: errors.length === 0, errors });
   } catch (err) { next(err); }
 });
@@ -147,28 +131,32 @@ router.get('/field-permissions', async (req, res, next) => {
     res.json({ data: await req.app.locals.prisma.fieldPermission.findMany({ where }) });
   } catch (err) { next(err); }
 });
+// A permission's own columns, found by role, module and field. The body went
+// to create whole, so a stray key or a missing one was a 500.
+const fieldPermissionUpsert = (prisma, body) => {
+  const data = columnsFrom('fieldPermission', body);
+  if (!data.roleId || !data.module || !data.field) return null;
+  return prisma.fieldPermission.upsert({
+    where: { roleId_module_field: { roleId: data.roleId, module: data.module, field: data.field } },
+    update: { visible: data.visible, editable: data.editable },
+    create: data,
+  });
+};
 router.post('/field-permissions', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
-    const fp = await req.app.locals.prisma.fieldPermission.upsert({
-      where: { roleId_module_field: { roleId: req.body.roleId, module: req.body.module, field: req.body.field } },
-      update: { visible: req.body.visible, editable: req.body.editable },
-      create: req.body,
-    });
-    res.json(fp);
+    const upsert = fieldPermissionUpsert(req.app.locals.prisma, req.body);
+    if (!upsert) return res.status(400).json({ error: 'roleId, module and field required' });
+    res.json(await upsert);
   } catch (err) { next(err); }
 });
 router.post('/field-permissions/bulk', requirePermission('admin', 'full'), async (req, res, next) => {
   try {
-    const { permissions } = req.body;
-    const results = [];
-    for (const p of permissions) {
-      const fp = await req.app.locals.prisma.fieldPermission.upsert({
-        where: { roleId_module_field: { roleId: p.roleId, module: p.module, field: p.field } },
-        update: { visible: p.visible, editable: p.editable },
-        create: p,
-      });
-      results.push(fp);
+    const { permissions } = req.body || {};
+    if (!Array.isArray(permissions) || permissions.some(p => !p?.roleId || !p.module || !p.field)) {
+      return res.status(400).json({ error: 'permissions must be a list of { roleId, module, field, visible, editable }' });
     }
+    const results = [];
+    for (const p of permissions) results.push(await fieldPermissionUpsert(req.app.locals.prisma, p));
     res.json({ data: results });
   } catch (err) { next(err); }
 });

@@ -27,7 +27,7 @@ function parseRRule(rrule) {
 
   const rule = {
     freq,
-    interval: parts.INTERVAL ? Math.max(1, parseInt(parts.INTERVAL, 10)) : 1,
+    interval: parts.INTERVAL ? Math.max(1, parseInt(parts.INTERVAL, 10) || 1) : 1,
     count: parts.COUNT ? parseInt(parts.COUNT, 10) : null,
     until: parts.UNTIL ? parseICalDate(parts.UNTIL) : null,
     byDay: parts.BYDAY ? parts.BYDAY.split(',').map(parseByDayToken).filter(Boolean) : [],
@@ -84,24 +84,33 @@ function expandRecurrence(dtstart, rrule, rangeStart, rangeEnd, opts = {}) {
   let winEnd = rangeEnd ? new Date(rangeEnd) : new Date(start.getTime() + 365 * 86400000);
   if (hardEnd && hardEnd < winEnd) winEnd = hardEnd;
 
-  const limit = Math.min(rule.count || MAX_OCCURRENCES, opts.max || MAX_OCCURRENCES);
+  // COUNT is a budget spent from DTSTART; `max` caps what one call returns.
+  // Both came out of one budget, so a series that began more than `max`
+  // occurrences before the window (a daily standup from last year) showed
+  // nothing in it.
+  const countLimit = rule.count || Infinity;
+  const cap = Math.min(opts.max || MAX_OCCURRENCES, MAX_OCCURRENCES);
   const excluded = new Set((opts.exdates || []).map(d => new Date(d).getTime()));
   const results = [];
   let emitted = 0;
+  let done = false;
   let cursor = new Date(start);
   let guard = 0;
 
-  while (guard++ < MAX_OCCURRENCES * 4) {
-    if (emitted >= limit) break;
-    if (cursor > winEnd && !(rule.count && emitted < rule.count)) break;
+  while (!done && guard++ < MAX_OCCURRENCES * 4) {
+    if (emitted >= countLimit || results.length >= cap) break;
+    // A weekly period opens on WKST, which can be before the cursor's own
+    // weekday: testing the cursor dropped the window's last Monday of an
+    // every-weekday series that began on a Wednesday.
+    const periodStart = rule.freq === 'WEEKLY' ? startOfWeek(cursor, rule.wkst) : cursor;
+    if (periodStart > winEnd && !(rule.count && emitted < rule.count)) break;
     if (cursor > new Date(winEnd.getTime() + 366 * 86400000)) break;
 
     const candidates = candidatesForPeriod(cursor, rule, start);
 
     for (const c of candidates) {
       if (c < start) continue;
-      if (hardEnd && c > hardEnd) { emitted = limit; break; }
-      if (emitted >= limit) break;
+      if ((hardEnd && c > hardEnd) || emitted >= countLimit || results.length >= cap) { done = true; break; }
       emitted++;
       if (excluded.has(c.getTime())) continue;
       if (c >= winStart && c <= winEnd) results.push(new Date(c));
@@ -122,6 +131,15 @@ function candidatesForPeriod(periodStart, rule, dtstart) {
 
   if (rule.freq === 'DAILY') {
     out = [new Date(periodStart)];
+    // BYDAY and BYMONTHDAY limit a daily rule; they were ignored, so
+    // FREQ=DAILY;BYDAY=MO,WE,FR came out every day.
+    if (rule.byDay.length) out = out.filter(d => rule.byDay.some(b => b.day === d.getDay()));
+    if (rule.byMonthDay.length) {
+      out = out.filter(d => {
+        const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        return rule.byMonthDay.some(md => (md > 0 ? md : dim + md + 1) === d.getDate());
+      });
+    }
   } else if (rule.freq === 'WEEKLY') {
     const weekStart = startOfWeek(periodStart, rule.wkst);
     const days = rule.byDay.length ? rule.byDay.map(b => b.day) : [dtstart.getDay()];
@@ -159,7 +177,9 @@ function candidatesForPeriod(periodStart, rule, dtstart) {
           .filter(md => md >= 1 && md <= dim)
           .map(md => at(y, m, md)));
       } else {
-        out.push(at(y, m, dtstart.getDate()));
+        // Clamped like MONTHLY: Feb 29 and "the 31st" of a short month rolled
+        // into the next month (a yearly Feb 29 event landed on Mar 1).
+        out.push(at(y, m, Math.min(dtstart.getDate(), new Date(y, m + 1, 0).getDate())));
       }
     }
   }
@@ -270,8 +290,17 @@ function buildICalendar(events, opts = {}) {
     lines.push(`UID:${ev.externalUid || ev.id}@${domain}`);
     lines.push(`DTSTAMP:${toICalDate(ev.updatedAt || ev.createdAt || new Date())}`);
     if (ev.allDay) {
-      lines.push(`DTSTART;VALUE=DATE:${toICalDate(ev.startAt, true)}`);
-      lines.push(`DTEND;VALUE=DATE:${toICalDate(ev.endAt, true)}`);
+      // A date DTEND is exclusive; an all-day event ending on its start day
+      // went out zero days long.
+      const firstDay = toICalDate(ev.startAt, true);
+      let lastDay = toICalDate(ev.endAt, true);
+      if (!(lastDay > firstDay)) {
+        const next = new Date(ev.startAt);
+        next.setUTCDate(next.getUTCDate() + 1);
+        lastDay = toICalDate(next, true);
+      }
+      lines.push(`DTSTART;VALUE=DATE:${firstDay}`);
+      lines.push(`DTEND;VALUE=DATE:${lastDay}`);
     } else {
       lines.push(`DTSTART:${toICalDate(ev.startAt)}`);
       lines.push(`DTEND:${toICalDate(ev.endAt)}`);
@@ -296,7 +325,7 @@ function buildICalendar(events, opts = {}) {
     }
     for (const rem of ev.reminders || []) {
       lines.push('BEGIN:VALARM');
-      lines.push(`TRIGGER:-PT${rem.minutesBefore || 15}M`);
+      lines.push(`TRIGGER:-PT${rem.minutesBefore ?? 15}M`);
       lines.push(rem.method === 'Email' ? 'ACTION:EMAIL' : 'ACTION:DISPLAY');
       lines.push(`DESCRIPTION:${escapeICalText(rem.message || ev.title)}`);
       lines.push('END:VALARM');

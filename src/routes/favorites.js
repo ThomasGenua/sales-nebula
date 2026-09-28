@@ -119,9 +119,16 @@ router.post('/toggle', authenticate, async (req, res, next) => {
       return res.json({ favorited: false, module, recordId });
     }
 
+    // Added as POST / adds one: a supported module, within the limit, at the
+    // end of the list. This took any module, past the limit, at position 0.
+    if (!TRACKED_MODULES.includes(module)) return res.status(400).json({ error: `Unsupported module: ${module}` });
+    const count = await prisma.favorite.count({ where: { userId: req.user.id } });
+    if (count >= 300) return res.status(400).json({ error: 'Favorite limit reached (300). Remove some first.' });
+    const last = await prisma.favorite.findFirst({ where: { userId: req.user.id }, orderBy: { sortOrder: 'desc' } });
+
     const name = recordName || await resolveName(req, module, recordId);
     const favorite = await prisma.favorite.create({
-      data: { userId: req.user.id, module, recordId, recordName: name, recordUrl: `/${module}/${recordId}` },
+      data: { userId: req.user.id, module, recordId, recordName: name, recordUrl: `/${module}/${recordId}`, sortOrder: (last?.sortOrder ?? -1) + 1 },
     });
     res.json({ favorited: true, favorite });
   } catch (err) { next(err); }
@@ -220,11 +227,13 @@ router.post('/track', authenticate, async (req, res, next) => {
       }
     }
 
-    // Aggregate popularity, useful for ranking and for the admin view
+    // Aggregate popularity, useful for ranking and for the admin view. A user
+    // with no view of the record yet adds one to its unique users, which
+    // stayed at 1 whoever else looked.
     try {
       const stat = await prisma.viewStat.findFirst({ where: { module, recordId } });
       if (stat) {
-        await prisma.viewStat.update({ where: { id: stat.id }, data: { totalViews: { increment: 1 }, lastViewedAt: new Date() } });
+        await prisma.viewStat.update({ where: { id: stat.id }, data: { totalViews: { increment: 1 }, lastViewedAt: new Date(), ...(!existing && { uniqueUsers: { increment: 1 } }) } });
       } else {
         await prisma.viewStat.create({ data: { module, recordId, totalViews: 1, uniqueUsers: 1 } });
       }

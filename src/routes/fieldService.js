@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { WORK_ORDER_NUMBER } = require('../utils/numbering');
@@ -50,7 +51,10 @@ router.post('/:id/dispatch', authenticate, requirePermission('fieldService', 'ed
       where: { id: req.params.id },
       data: { status: 'Dispatched', dispatchedAt: new Date() },
     });
-    try { req.app.locals.emit?.('fieldService:dispatched', { workOrderId: wo.id }); } catch (e) {}
+    // app.locals.emit is the socket helper object, not a function, so this
+    // threw into the catch and no dispatch was ever announced. It goes to the
+    // technician it was dispatched to.
+    try { if (wo.assignedToId) req.app.locals.emit?.toUser?.(wo.assignedToId, 'fieldService:dispatched', { workOrderId: wo.id }); } catch (e) {}
     res.json(wo);
   } catch (err) { next(err); }
 });
@@ -93,12 +97,13 @@ router.get('/route/optimize', authenticate, async (req, res, next) => {
     const targetDate = date ? new Date(date) : new Date();
     const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
+    // Only work orders row security lets the caller see, as the list does.
     const workOrders = await queryWithIncludes(prisma, 'workOrder', 'findMany', {
-      where: {
+      where: await reachableWhere(req, 'fieldService', 'workOrder', {
         assignedToId: userId || req.user.id,
         status: { in: ['Scheduled', 'Dispatched'] },
         startDate: { gte: dayStart, lte: dayEnd },
-      },
+      }),
       orderBy: { startDate: 'asc' },
       include: { account: { select: { name: true } } },
     });
@@ -132,9 +137,15 @@ module.exports = router;
 router.get('/reports/utilization', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, firstName: true, lastName: true } });
+    // Every active technician with work orders; this took the first twenty
+    // active users, in no particular order, and skipped everyone after them.
+    const assigned = await prisma.workOrder.groupBy({ by: ['assignedToId'], where: { assignedToId: { not: null } } });
+    const users = await prisma.user.findMany({
+      where: { active: true, id: { in: assigned.map(a => a.assignedToId) } },
+      select: { id: true, firstName: true, lastName: true },
+    });
     const utilization = [];
-    for (const u of users.slice(0, 20)) {
+    for (const u of users) {
       const completed = await prisma.workOrder.count({ where: { assignedToId: u.id, status: 'Completed' } }).catch(() => 0);
       const open = await prisma.workOrder.count({ where: { assignedToId: u.id, status: { notIn: ['Completed', 'Cancelled'] } } }).catch(() => 0);
       if (completed > 0 || open > 0) {

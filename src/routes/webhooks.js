@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const crypto = require('crypto');
+const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate, schemas } = require('../middleware/validate');
@@ -9,17 +10,38 @@ const { assertPublicHttpUrl } = require('../utils/outboundUrl');
 const router = Router();
 router.use(authenticate, auditMiddleware);
 
+// Events typed into a form arrive as one comma-separated string; the API
+// stores a list.
+const eventList = (req, res, next) => {
+  if (typeof req.body?.events === 'string') req.body.events = req.body.events.split(',').map(s => s.trim()).filter(Boolean);
+  next();
+};
+
 // LIST webhooks
+// Paged, searched and filtered as the Webhooks page asks, with a total and
+// when each last fired. Every webhook came back whatever the page, search or
+// status filter, and "Last Triggered" read a column there is not.
 router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const webhooks = await prisma.webhook.findMany({
-      include: { _count: { select: { logs: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+    const { page = 1, limit = 50, search, active } = req.query;
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const where = {};
+    if (active === 'true' || active === 'false') where.active = active === 'true';
+    if (search) where.OR = [{ name: { contains: String(search), mode: 'insensitive' } }, { url: { contains: String(search), mode: 'insensitive' } }];
+    const [webhooks, total] = await Promise.all([
+      prisma.webhook.findMany({
+        where,
+        include: { _count: { select: { logs: true } }, logs: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip: (current - 1) * take, take,
+      }),
+      prisma.webhook.count({ where }),
+    ]);
     // Mask secrets
-    const safe = webhooks.map(w => ({ ...w, secret: w.secret ? '****' : null }));
-    res.json({ data: safe });
+    const safe = webhooks.map(({ logs, ...w }) => ({ ...w, secret: w.secret ? '****' : null, lastTriggered: logs[0]?.createdAt || null }));
+    res.json({ data: safe, total, page: current, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
 
@@ -33,12 +55,13 @@ router.get('/:id', requirePermission('settings', 'read'), async (req, res, next)
     });
     if (!webhook) return res.status(404).json({ error: 'Not found' });
     webhook.secret = webhook.secret ? '****' : null;
+    webhook.lastTriggered = webhook.logs[0]?.createdAt || null;
     res.json(webhook);
   } catch (err) { next(err); }
 });
 
 // CREATE webhook
-router.post('/', requirePermission('settings', 'full'), validate(schemas.createWebhook), async (req, res, next) => {
+router.post('/', requirePermission('settings', 'full'), eventList, validate(schemas.createWebhook), async (req, res, next) => {
   try {
     // The server will request this URL, so it must not be able to reach
     // the metadata endpoint or anything else behind the firewall.
@@ -54,7 +77,9 @@ router.post('/', requirePermission('settings', 'full'), validate(schemas.createW
     const webhook = await prisma.webhook.create({
       data: {
         name, url, events, secret,
-        headers: headers || null,
+        // Left out rather than null: a Json column refuses a plain null, so a
+        // webhook created without custom headers failed.
+        ...(headers && { headers }),
         retries: retries || 3,
         createdById: req.userId,
       },
@@ -67,7 +92,7 @@ router.post('/', requirePermission('settings', 'full'), validate(schemas.createW
 });
 
 // UPDATE webhook
-router.put('/:id', requirePermission('settings', 'full'), async (req, res, next) => {
+router.put('/:id', requirePermission('settings', 'full'), eventList, async (req, res, next) => {
   try {
     // The server will request this URL, so it must not be able to reach
     // the metadata endpoint or anything else behind the firewall.
@@ -83,7 +108,9 @@ router.put('/:id', requirePermission('settings', 'full'), async (req, res, next)
     if (url !== undefined) data.url = url;
     if (events !== undefined) data.events = events;
     if (active !== undefined) data.active = active;
-    if (headers !== undefined) data.headers = headers;
+    // The edit form sends the row back, `headers: null` included; a Json
+    // column is emptied with DbNull, and a plain null failed the update.
+    if (headers !== undefined) data.headers = headers === null ? Prisma.DbNull : headers;
     if (retries !== undefined) data.retries = retries;
 
     const webhook = await prisma.webhook.update({ where: { id: req.params.id }, data });

@@ -1,10 +1,11 @@
 const { Router } = require('express');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, hasPermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
 const {
   getUserGroupIds, expandGroupHierarchy, invalidateGroupCache,
-  applyAutoAssignRules, isAdmin,
+  applyAutoAssignRules, isAdmin, buildAccessFilter, applyAccessFilter,
 } = require('../middleware/rowSecurity');
 
 const router = Router();
@@ -14,6 +15,14 @@ const SECURABLE_MODULES = [
   'quotes', 'invoices', 'contracts', 'orders', 'products', 'campaigns',
   'documents', 'projects', 'subscriptions', 'assets',
 ];
+
+// Each securable module's model (every one has deletedAt).
+const MODEL_OF = {
+  contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
+  cases: 'case', activities: 'activity', quotes: 'quote', invoices: 'invoice',
+  contracts: 'contract', orders: 'order', products: 'product', campaigns: 'campaign',
+  documents: 'document', projects: 'project', subscriptions: 'subscription', assets: 'asset',
+};
 
 // ── GROUPS ────────────────────────────────────────────────────────────
 
@@ -133,7 +142,9 @@ router.delete('/:id', authenticate, requirePermission('admin', 'full'), auditMid
       await prisma.securityGroup.updateMany({ where: { parentGroupId: group.id }, data: { parentGroupId: group.parentGroupId } });
     }
 
-    await prisma.securityGroup.update({ where: { id: group.id }, data: { deletedAt: new Date(), active: false } });
+    // The name is unique among deleted groups too, so a deleted group gives it
+    // up, keeping it with a suffix: a new group of that name failed as a duplicate.
+    await prisma.securityGroup.update({ where: { id: group.id }, data: { deletedAt: new Date(), active: false, name: `${group.name} (deleted ${group.id.slice(0, 8)})` } });
     invalidateGroupCache();
     await req.audit({ action: 'delete', module: 'securityGroups', recordId: group.id, details: `Security group deleted: ${group.name}` });
     res.json({ deleted: true, childrenReparented: children });
@@ -287,19 +298,27 @@ router.delete('/:id/records', authenticate, requirePermission('admin', 'full'), 
 });
 
 // Which groups control a given record
+// youHaveAccess is row security's own answer (the module's read permission,
+// then ownership, org-wide default, groups, shares and sharing rules); it
+// looked at groups alone.
 router.get('/record/:module/:recordId', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const modelName = MODEL_OF[req.params.module];
+    if (!modelName) return res.status(400).json({ error: `module must be one of: ${SECURABLE_MODULES.join(', ')}` });
     const assignments = await prisma.securityGroupRecord.findMany({
       where: { module: req.params.module, recordId: req.params.recordId },
       include: { securityGroup: { select: { id: true, name: true, active: true } } },
     });
-    const myGroups = await getUserGroupIds(prisma, req.user.id);
+    const reachable = permits(req, req.params.module, 'read') && await prisma[modelName].findFirst({
+      where: await reachableWhere(req, req.params.module, modelName, { id: req.params.recordId }),
+      select: { id: true },
+    });
     res.json({
       module: req.params.module, recordId: req.params.recordId,
       isRestricted: assignments.length > 0,
       assignments,
-      youHaveAccess: isAdmin(req.user) || !assignments.length || assignments.some(a => myGroups.includes(a.securityGroupId)),
+      youHaveAccess: !!reachable,
     });
   } catch (err) { next(err); }
 });
@@ -415,13 +434,18 @@ router.post('/rules/:ruleId/preview', authenticate, requirePermission('admin', '
 // ── DIAGNOSTICS ───────────────────────────────────────────────────────
 
 // Explain why a user can or cannot see a record
+// The verdict is row security's own for that user: the module's read
+// permission, then the filter every list and record route applies. This went
+// by groups alone, so it told an owner no and called Private records open.
 router.get('/explain/:module/:recordId', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const userId = req.query.userId || req.user.id;
+    const userId = String(req.query.userId || req.user.id);
     const { module, recordId } = req.params;
+    const modelName = MODEL_OF[module];
+    if (!modelName) return res.status(400).json({ error: `module must be one of: ${SECURABLE_MODULES.join(', ')}` });
 
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, firstName: true, lastName: true, role: true } });
+    const user = await prisma.user.findUnique({ where: { id: userId }, include: { role: { include: { permissions: true } } } });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const assignments = await prisma.securityGroupRecord.findMany({
@@ -433,10 +457,31 @@ router.get('/explain/:module/:recordId', authenticate, requirePermission('admin'
 
     const reasons = [];
     let hasAccess = false;
-    if (isAdmin(user)) { hasAccess = true; reasons.push('User is an administrator and bypasses row-level security'); }
-    else if (!assignments.length) { hasAccess = true; reasons.push('Record is not assigned to any security group, so it is unrestricted'); }
-    else if (matching.length) { hasAccess = true; reasons.push(`User belongs to ${matching.length} group(s) that control this record: ${matching.map(m => m.securityGroup.name).join(', ')}`); }
-    else { reasons.push(`Record is controlled by ${assignments.length} group(s) the user does not belong to: ${assignments.map(a => a.securityGroup.name).join(', ')}`); }
+    // Only a record the caller can see: the answer says who owns it and who
+    // it is shared with.
+    const record = permits(req, module, 'read') && await prisma[modelName].findFirst({ where: await reachableWhere(req, module, modelName, { id: recordId }) });
+    if (!record) reasons.push(`No live ${module} record with that id is visible to you`);
+    else if (!hasPermission(user, module, 'read')) reasons.push(`The user's role has no read permission on ${module}`);
+    else {
+      const filter = await buildAccessFilter(prisma, user, module, { modelName });
+      hasAccess = !filter || !!(await prisma[modelName].findFirst({ where: applyAccessFilter({ id: recordId }, filter), select: { id: true } }));
+      if (isAdmin(user)) reasons.push('User is an administrator and bypasses row-level security');
+      else if (!filter) reasons.push(`No ${module} record is group-controlled and the org-wide default is open, so every one is visible`);
+      else {
+        // Ownership as row security reads it: ownerId or assignedId, else the creator.
+        const held = ['ownerId', 'assignedId'].filter(f => f in record);
+        if ((held.length ? held : ['createdById']).some(f => record[f] === user.id)) reasons.push('User owns the record');
+        if (matching.length) reasons.push(`User belongs to ${matching.length} group(s) that control this record: ${matching.map(m => m.securityGroup.name).join(', ')}`);
+        const share = await prisma.recordShare.findFirst({ where: { module, recordId, sharedWithId: user.id } });
+        if (share) reasons.push(`Record is shared with the user (${share.accessLevel})`);
+        if (hasAccess && !reasons.length) reasons.push('Reached through the org-wide default, the role hierarchy or a sharing rule');
+        if (!hasAccess) {
+          reasons.push(assignments.length
+            ? `Record is controlled by ${assignments.length} group(s) the user does not belong to: ${assignments.map(a => a.securityGroup.name).join(', ')}`
+            : `The org-wide default for ${module} is Private, and neither ownership, a share nor a sharing rule gives the user this record`);
+        }
+      }
+    }
 
     res.json({
       user: { id: user.id, name: `${user.firstName || ''} ${user.lastName || ''}`.trim() },
@@ -455,8 +500,13 @@ router.get('/analytics/coverage', authenticate, requirePermission('admin', 'read
     for (const [module, model] of Object.entries(modelMap)) {
       try {
         const total = await prisma[model].count({ where: { deletedAt: null } });
-        const secured = await prisma.securityGroupRecord.findMany({ where: { module }, select: { recordId: true }, distinct: ['recordId'] });
-        coverage.push({ module, totalRecords: total, securedRecords: secured.length, unsecured: total - secured.length, coveragePercent: total ? +((secured.length / total) * 100).toFixed(1) : 0 });
+        const assigned = await prisma.securityGroupRecord.findMany({ where: { module }, select: { recordId: true }, distinct: ['recordId'] });
+        // Live records only, as the total counts: assignments outlive their
+        // records, and counting them put coverage over 100%.
+        const secured = assigned.length
+          ? await prisma[model].count({ where: { deletedAt: null, id: { in: assigned.map(a => a.recordId) } } })
+          : 0;
+        coverage.push({ module, totalRecords: total, securedRecords: secured, unsecured: total - secured, coveragePercent: total ? +((secured / total) * 100).toFixed(1) : 0 });
       } catch (e) { /* model may not expose deletedAt */ }
     }
     const groups = await prisma.securityGroup.count({ where: { deletedAt: null, active: true } });

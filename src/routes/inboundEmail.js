@@ -1,7 +1,9 @@
 const { Router } = require('express');
 const crypto = require('crypto');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere } = require('../middleware/access');
+const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { encrypt, decrypt } = require('../utils/secretBox');
 const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
 const { columnsFrom } = require('../utils/modelFields');
@@ -41,7 +43,7 @@ router.get('/accounts/:id', authenticate, requirePermission('admin', 'read'), as
     if (!account) return res.status(404).json({ error: 'Account not found' });
 
     const [messageCount, recentPolls] = await Promise.all([
-      prisma.inboundEmailMessage.count({ where: { accountId: account.id } }),
+      prisma.inboundEmailMessage.count({ where: { accountId: account.id, deletedAt: null } }),
       prisma.emailPollLog.findMany({ where: { accountId: account.id }, orderBy: { startedAt: 'desc' }, take: 10 }),
     ]);
     res.json({ ...safeAccount(account), messageCount, recentPolls });
@@ -76,11 +78,14 @@ router.post('/accounts', authenticate, requirePermission('admin', 'full'), audit
     if (port && (port < 1 || port > 65535)) return res.status(400).json({ error: 'port must be between 1 and 65535' });
     if (pollIntervalMinutes != null && +pollIntervalMinutes < 1) return res.status(400).json({ error: 'pollIntervalMinutes must be at least 1' });
 
+    // The default port follows the protocol stored: a pop3 account that named
+    // no protocol was stored as pop3 but given IMAP's port.
+    const proto = protocol || (kind === 'pop3' ? 'pop3' : 'imap');
     const account = await prisma.inboundEmailAccount.create({
       data: {
-        name, provider: kind, protocol: protocol || (kind === 'pop3' ? 'pop3' : 'imap'),
+        name, provider: kind, protocol: proto,
         host: kind === 'microsoft' ? null : host,
-        port: port ? +port : (protocol === 'pop3' ? 995 : 993),
+        port: port ? +port : (proto === 'pop3' ? 995 : 993),
         username: username || mailboxAddress,
         password: kind === 'microsoft' ? null : encrypt(password),
         mailboxAddress: kind === 'microsoft' ? mailboxAddress : null,
@@ -281,6 +286,12 @@ router.post('/messages/:id/reply', authenticate, requirePermission('cases', 'edi
 
     const message = await prisma.inboundEmailMessage.findUnique({ where: { id: req.params.id } });
     if (!message) return res.status(404).json({ error: 'Message not found' });
+    // The reply is logged on the message's case, so that must be a live case
+    // the caller may change. Any case was commented on, with cases: edit alone.
+    if (message.createdCaseId && !(await prisma.case.findFirst({
+      where: await reachableWhere(req, 'cases', 'case', { id: message.createdCaseId }, 'Edit'),
+      select: { id: true },
+    }))) return res.status(404).json({ error: 'Case not found' });
 
     const account = await prisma.inboundEmailAccount.findFirst({ where: { id: message.accountId, deletedAt: null } });
     if (!account) return res.status(404).json({ error: 'Account not found' });
@@ -331,24 +342,47 @@ router.get('/messages', authenticate, requirePermission('cases', 'read'), async 
   try {
     const prisma = req.app.locals.prisma;
     const { accountId, status, search, page = 1, limit = 50 } = req.query;
-    const where = {};
+    // One `where` for the page and its total: live messages only (the count
+    // took in deleted ones), and a page size that is a number and capped.
+    const take = Math.min(parseInt(limit) || 50, 200);
+    const current = Math.max(parseInt(page) || 1, 1);
+    const where = { deletedAt: null };
     if (accountId) where.accountId = accountId;
     if (status) where.status = status;
     if (search) where.OR = [{ subject: { contains: search, mode: 'insensitive' } }, { fromEmail: { contains: search, mode: 'insensitive' } }];
 
     const [data, total] = await Promise.all([
-      prisma.inboundEmailMessage.findMany({ where, skip: (+page - 1) * +limit, take: +limit, orderBy: { receivedAt: 'desc' } }),
+      prisma.inboundEmailMessage.findMany({ where, skip: (current - 1) * take, take, orderBy: { receivedAt: 'desc' } }),
       prisma.inboundEmailMessage.count({ where }),
     ]);
-    res.json({ data, total, page: +page, limit: +limit });
+    res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });
 
+/**
+ * Who owns what a conversion creates: the caller, or the active user they
+ * name when they are an admin or that user reports to them. Null when they
+ * may not name that user.
+ */
+async function conversionOwner(req) {
+  const named = req.body.ownerId ? String(req.body.ownerId) : req.user.id;
+  if (named === req.user.id) return named;
+  const prisma = req.app.locals.prisma;
+  if (!isAdmin(req.user) && !(await subordinateUserIds(prisma, req.user)).includes(named)) return null;
+  return (await prisma.user.findFirst({ where: { id: named, active: true, isPortalUser: false }, select: { id: true } })) ? named : null;
+}
+
+// A lead takes leads: edit, as a case takes cases: edit; cases: edit alone
+// created leads. And ownerId was taken as sent, so anyone could hand either
+// to anyone (see conversionOwner).
 router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { target } = req.body;
     if (!['case', 'lead'].includes(target)) return res.status(400).json({ error: 'target must be case or lead' });
+    if (target === 'lead' && !permits(req, 'leads', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for leads' });
+    const ownerId = await conversionOwner(req);
+    if (!ownerId) return res.status(400).json({ error: 'ownerId must be you or an active user who reports to you' });
 
     const message = await prisma.inboundEmailMessage.findUnique({ where: { id: req.params.id } });
     if (!message) return res.status(404).json({ error: 'Message not found' });
@@ -361,7 +395,7 @@ router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'e
           subject: (message.subject || 'Email enquiry').slice(0, 250),
           description: (message.textBody || '').slice(0, 8000),
           status: 'New', priority: req.body.priority || 'Medium', origin: 'Email',
-          ownerId: req.body.ownerId || req.user.id,
+          ownerId,
           contactId: contact?.id || null, accountId: contact?.accountId || null,
           contactEmail: message.fromEmail,
         },
@@ -378,7 +412,7 @@ router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'e
         email: message.fromEmail, source: 'Email', status: 'New',
         company: (message.fromEmail || '').split('@')[1] || 'Unknown',
         description: (message.textBody || '').slice(0, 4000),
-        ownerId: req.body.ownerId || req.user.id,
+        ownerId,
       },
     });
     await prisma.inboundEmailMessage.update({ where: { id: message.id }, data: { createdLeadId: lead.id, status: 'Converted' } });
@@ -474,8 +508,9 @@ router.post('/rules/test', authenticate, requirePermission('admin', 'read'), asy
     // A mailbox that exists, and an id rather than a filter object.
     const problem = await ruleTargetProblem(prisma, { accountId });
     if (problem) return res.status(400).json({ error: problem });
+    // A mailbox's test runs what its ingest runs: its own rules and the global ones.
     const where = { active: true };
-    if (accountId) where.accountId = String(accountId);
+    if (accountId) where.OR = [{ accountId: String(accountId) }, { accountId: null }];
     const rules = await prisma.inboundRoutingRule.findMany({ where, orderBy: { priority: 'asc' } });
 
     const haystack = { subject: subject.toLowerCase(), from: from.toLowerCase(), body: body.toLowerCase(), to: to.toLowerCase() };
@@ -513,7 +548,7 @@ router.get('/analytics', authenticate, requirePermission('admin', 'read'), async
     const [accounts, logs, messages] = await Promise.all([
       prisma.inboundEmailAccount.findMany({ where: { deletedAt: null }, select: { id: true, name: true, status: true, lastPolledAt: true, lastError: true, active: true } }),
       prisma.emailPollLog.findMany({ where: { startedAt: { gte: since } }, take: 5000 }),
-      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since } }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
+      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since }, deletedAt: null }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
     ]);
 
     res.json({

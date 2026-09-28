@@ -4,7 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 // The app integrates Claude only; these templates named gpt-4.
 const { aiModel } = require('../services/claude');
-const { columnsFrom } = require('../utils/modelFields');
+const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 
 const router = Router();
 
@@ -14,12 +14,39 @@ const RUN_MODULES = { SDR: 'leads', DealCoach: 'deals', ServiceAgent: 'cases' };
 // An agent's configuration (its system prompt and tools), its conversations
 // and its past runs' output are admin reads, as its writes are admin's. These
 // took a session alone.
+// The list page's search, Type and Active filters, sort and pages: all were
+// ignored, and every agent came back whatever was asked.
 router.get('/', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const agents = await prisma.aiAgent.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } }); res.json(agents); } catch (err) { next(err); }
+  try {
+    const prisma = req.app.locals.prisma;
+    const { search, type, active, sortBy, sortDir, page = 1, limit = 50 } = req.query;
+    const where = { deletedAt: null };
+    if (type) where.type = String(type);
+    if (active === 'true' || active === 'false') where.active = active === 'true';
+    if (search) where.OR = ['name', 'description'].map(f => ({ [f]: { contains: String(search), mode: 'insensitive' } }));
+    const take = Math.min(parseInt(limit, 10) || 50, 200);
+    const skip = (Math.max(parseInt(page, 10) || 1, 1) - 1) * take;
+    const [agents, total] = await Promise.all([
+      prisma.aiAgent.findMany({ where, orderBy: scalarOrderBy('aiAgent', sortBy, sortDir) || { name: 'asc' }, skip, take }),
+      prisma.aiAgent.count({ where }),
+    ]);
+    res.json({ data: agents, meta: { total, page: Math.max(parseInt(page, 10) || 1, 1), limit: take, pages: Math.ceil(total / take) } });
+  } catch (err) { next(err); }
 });
 
+// Agent templates. Registered after /:id, it was answered by /:id as an agent
+// id: a 403 for non-admins and a 404 for everyone else.
+router.get('/templates', authenticate, async (req, res, next) => {
+  res.json([
+    { type: 'SDR', name: 'Sales Development', description: 'Prioritize leads, draft outreach, qualify prospects', defaultConfig: { model: aiModel(), maxTokens: 1000 } },
+    { type: 'DealCoach', name: 'Deal Coach', description: 'Analyze deals, suggest next steps, identify risks', defaultConfig: { model: aiModel(), maxTokens: 2000 } },
+    { type: 'ServiceAgent', name: 'Service Agent', description: 'Triage cases, suggest solutions, draft responses', defaultConfig: { model: aiModel(), maxTokens: 1500 } },
+  ]);
+});
+
+// A deleted agent is gone here, as it is from the list.
 router.get('/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.findUnique({ where: { id: req.params.id } }); if (!a) return res.status(404).json({ error: 'Not found' }); res.json(a); } catch (err) { next(err); }
+  try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.findFirst({ where: { id: req.params.id, deletedAt: null } }); if (!a) return res.status(404).json({ error: 'Not found' }); res.json(a); } catch (err) { next(err); }
 });
 
 router.post('/', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
@@ -56,7 +83,7 @@ router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) =>
   try {
     const prisma = req.app.locals.prisma;
     const agent = await prisma.aiAgent.findUnique({ where: { id: req.params.id } });
-    if (!agent || !agent.active) return res.status(400).json({ error: 'Agent not found or inactive' });
+    if (!agent || agent.deletedAt || !agent.active) return res.status(400).json({ error: 'Agent not found or inactive' });
     // A run returned the top new leads or open cases across the org to anyone
     // signed in. It now takes read on the module it returns, and lists only
     // records the caller can see.
@@ -164,13 +191,4 @@ router.get('/:id/analytics', authenticate, async (req, res, next) => {
     const avgDuration = finished.length ? Math.round(finished.reduce((s, r) => s + (new Date(r.completedAt) - new Date(r.startedAt)), 0) / finished.length) : 0;
     res.json({ period: +period, totalRuns: runs.length, successRate: runs.length ? Math.round(successful.length / runs.length * 100) : 0, avgDurationMs: avgDuration, runsPerDay: Math.round(runs.length / +period * 10) / 10 });
   } catch (err) { next(err); }
-});
-
-// Agent templates
-router.get('/templates', authenticate, async (req, res, next) => {
-  res.json([
-    { type: 'SDR', name: 'Sales Development', description: 'Prioritize leads, draft outreach, qualify prospects', defaultConfig: { model: aiModel(), maxTokens: 1000 } },
-    { type: 'DealCoach', name: 'Deal Coach', description: 'Analyze deals, suggest next steps, identify risks', defaultConfig: { model: aiModel(), maxTokens: 2000 } },
-    { type: 'ServiceAgent', name: 'Service Agent', description: 'Triage cases, suggest solutions, draft responses', defaultConfig: { model: aiModel(), maxTokens: 1500 } },
-  ]);
 });

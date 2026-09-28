@@ -130,6 +130,9 @@ const VALID_CASE_PRIORITIES = ['Low', 'Medium', 'High', 'Critical'];
 const VALID_INVOICE_STATUSES = ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled'];
 const VALID_QUOTE_STATUSES = ['Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'];
 const VALID_CAMPAIGN_STATUSES = ['Planned', 'Planning', 'Active', 'Sent', 'Paused', 'Completed', 'Aborted'];
+// Case statuses that stop the SLA clock: waiting on the customer. "Pending"
+// is the one the Cases page offers; without it no case ever paused.
+const SLA_PAUSED_STATUSES = ['Pending', 'Pending Customer', 'Waiting on Customer', 'On Hold', 'Awaiting Info'];
 
 const constraints = {
   deal: {
@@ -205,4 +208,5 @@ module.exports = {
   VALID_INVOICE_STATUSES,
   VALID_QUOTE_STATUSES,
   VALID_CAMPAIGN_STATUSES,
+  SLA_PAUSED_STATUSES,
 };

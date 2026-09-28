@@ -552,10 +552,11 @@ async function executeReport(prisma, definition, req) {
       result.summary = await executeAggregations(prisma, config.model, where, aggregations, []);
     }
 
-    // Also return raw data for drill-down
+    // Also return raw data for drill-down. The count is every matching row,
+    // as for a tabular report, not the (at most 1000) rows returned.
     const rows = await model.findMany({ where, orderBy, take: Math.min(report.limit, 1000) });
     result.rows = rows;
-    result.totalCount = rows.length;
+    result.totalCount = await model.count({ where });
   }
 
   // Chart: same as summary but structured for chart rendering
@@ -574,14 +575,17 @@ async function executeReport(prisma, definition, req) {
         groups[key].count++;
         groups[key]._rows.push(row);
 
-        // Calculate aggregations per group
+        // Calculate aggregations per group, min and max from the group's first
+        // value. A count stayed at 0, a maximum of negative values read 0, and
+        // a minimum of 0 was replaced by the next value.
         for (const agg of aggregations) {
           const aggKey = `${agg.function}_${agg.field}`;
-          if (!groups[key][aggKey]) groups[key][aggKey] = 0;
+          const first = !(aggKey in groups[key]);
           const val = parseFloat(row[agg.field]) || 0;
-          if (agg.function === 'sum') groups[key][aggKey] += val;
-          if (agg.function === 'max') groups[key][aggKey] = Math.max(groups[key][aggKey], val);
-          if (agg.function === 'min') groups[key][aggKey] = groups[key][aggKey] === 0 ? val : Math.min(groups[key][aggKey], val);
+          if (agg.function === 'sum') groups[key][aggKey] = (groups[key][aggKey] || 0) + val;
+          if (agg.function === 'count') groups[key][aggKey] = (groups[key][aggKey] || 0) + (row[agg.field] == null ? 0 : 1);
+          if (agg.function === 'max') groups[key][aggKey] = first ? val : Math.max(groups[key][aggKey], val);
+          if (agg.function === 'min') groups[key][aggKey] = first ? val : Math.min(groups[key][aggKey], val);
         }
       }
 
@@ -602,6 +606,7 @@ async function executeReport(prisma, definition, req) {
     }
 
     result.chartType = report.chartType || 'bar';
+    result.totalCount = await model.count({ where });
   }
 
   // Always include grand totals if aggregations defined
@@ -680,6 +685,7 @@ router.get('/folders/all', async (req, res, next) => {
 router.post('/folders', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    if (!req.body.name) return res.status(400).json({ error: 'name required' });
     const folder = await prisma.reportFolder.create({ data: { name: req.body.name, parentId: req.body.parentId } });
     res.status(201).json(folder);
   } catch (err) { next(err); }
@@ -701,6 +707,11 @@ router.post('/:id/schedule', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { cron, format, recipients } = req.body;
     if (!cron) return res.status(400).json({ error: 'cron expression required' });
+    // A report's schedules are its owner's, as its edits are. Anyone could add
+    // one to any report, and an unknown report id failed as a 500.
+    const report = await prisma.report.findUnique({ where: { id: req.params.id }, select: { createdById: true } });
+    if (!report) return res.status(404).json({ error: 'Report not found' });
+    if (report.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can schedule' });
     const schedule = await prisma.reportSchedule.create({
       data: { reportId: req.params.id, cron, format: format || 'csv', recipients: recipients || [] },
     });
@@ -711,6 +722,9 @@ router.post('/:id/schedule', async (req, res, next) => {
 router.delete('/schedule/:id', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const schedule = await prisma.reportSchedule.findUnique({ where: { id: req.params.id }, include: { report: { select: { createdById: true } } } });
+    if (!schedule) return res.status(404).json({ error: 'Schedule not found' });
+    if (schedule.report.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can delete' });
     await prisma.reportSchedule.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -722,6 +736,8 @@ router.post('/:id/clone', async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const source = await prisma.report.findUnique({ where: { id: req.params.id } });
     if (!source) return res.status(404).json({ error: 'Report not found' });
+    // As for reading it: this copied anyone's private report.
+    if (!source.isPublic && source.createdById !== req.userId) return res.status(403).json({ error: 'Access denied' });
 
     const { id, createdAt, updatedAt, createdById, ...data } = source;
     const clone = await prisma.report.create({

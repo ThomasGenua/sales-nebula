@@ -1,10 +1,11 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { createNumbered, CONTRACT_NUMBER } = require('../utils/numbering');
 const { summaryRoute } = require('../utils/moduleStatus');
-const { columnsFrom } = require('../utils/modelFields');
+const { editableFields } = require('../utils/modelFields');
 
 const router = createCrudRouter('contract', 'contracts', {
   include: {
@@ -18,7 +19,18 @@ const router = createCrudRouter('contract', 'contracts', {
     ],
   }),
   numbering: CONTRACT_NUMBER,
+  // A contract must have an account and its dates; without them the create
+  // answered 500.
+  validate: (data) => {
+    const errors = {};
+    for (const field of ['accountId', 'startDate', 'endDate']) if (!data[field]) errors[field] = 'Required';
+    return { valid: Object.keys(errors).length === 0, errors };
+  },
 });
+
+// A contract's value: `value`, which the page and these routes write, or
+// `totalValue`, where only that was set (the seed's contract).
+const contractValue = c => c.value ?? c.totalValue ?? 0;
 
 // Activate contract
 router.post('/:id/activate', authenticate, requirePermission('contracts', 'edit'), auditMiddleware, async (req, res, next) => {
@@ -50,15 +62,25 @@ router.post('/:id/terminate', authenticate, requirePermission('contracts', 'edit
 router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const original = await prisma.contract.findUnique({ where: { id: req.params.id } });
+    const original = await prisma.contract.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!original) return res.status(404).json({ error: 'Contract not found' });
-    const { id, createdAt, updatedAt, contractNumber, ...contractData } = original;
+    // A new draft: it took the original's deleted marker, activation,
+    // signature and termination with the rest.
+    const {
+      id, createdAt, updatedAt, contractNumber, deletedAt,
+      activatedAt, activatedById, signedDate, terminationDate, terminationReason,
+      ...contractData
+    } = original;
+    // The amendment's own columns from the body: relation keys were nested
+    // writes into the account and its deals. Not its owner or deleted
+    // marker, and links only to records the caller can see, as on a create.
+    const changes = editableFields('contract', req.body);
+    const linkProblem = await linkRefusal(req, 'contract', changes, original);
+    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
     const amendment = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
-        // The amendment's own columns from the body: relation keys were nested
-        // writes into the account and its deals.
-        ...contractData, ...columnsFrom('contract', req.body),
-        name: `${original.name} (Amendment)`,
+        ...contractData, ...changes,
+        name: `${original.name || original.contractNumber} (Amendment)`,
         status: 'Draft', parentContractId: original.id,
         version: (original.version || 1) + 1,
       },
@@ -72,16 +94,22 @@ router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), 
 router.post('/:id/renew', authenticate, requirePermission('contracts', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const original = await prisma.contract.findUnique({ where: { id: req.params.id } });
+    const original = await prisma.contract.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!original) return res.status(404).json({ error: 'Contract not found' });
-    const { months = 12, priceAdjustment } = req.body;
+    const { priceAdjustment } = req.body;
+    // A number of months: sent as text it was appended to the month, so
+    // "12" renewed a contract for decades.
+    const months = parseInt(req.body.months) || 12;
     const newStart = original.endDate ? new Date(original.endDate) : new Date();
     const newEnd = new Date(newStart); newEnd.setMonth(newEnd.getMonth() + months);
+    // The renewal is the caller's, as a contract they create is, with the
+    // original's contact and terms; with no owner, a Private default hid it.
     const renewed = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
       data: {
-        name: `${original.name} (Renewal)`, accountId: original.accountId, dealId: original.dealId,
-        startDate: newStart, endDate: newEnd, status: 'Draft', parentContractId: original.id,
-        value: priceAdjustment || original.value,
+        name: `${original.name || original.contractNumber} (Renewal)`, accountId: original.accountId, dealId: original.dealId,
+        contactId: original.contactId, billingFrequency: original.billingFrequency, autoRenew: original.autoRenew,
+        startDate: newStart, endDate: newEnd, contractTerm: months, status: 'Draft', parentContractId: original.id,
+        value: Number(priceAdjustment) || contractValue(original), ownerId: req.userId,
       },
     });
     await req.audit({ action: 'create', module: 'contracts', recordId: renewed.id, details: `Renewal of contract ${original.id}` });
@@ -99,7 +127,7 @@ router.get('/:id/compliance', authenticate, async (req, res, next) => {
     if (!contract.startDate) issues.push({ field: 'startDate', severity: 'error', message: 'Missing start date' });
     if (!contract.endDate) issues.push({ field: 'endDate', severity: 'error', message: 'Missing end date' });
     if (contract.endDate && new Date(contract.endDate) < new Date()) issues.push({ field: 'endDate', severity: 'warning', message: 'Contract has expired' });
-    if (!contract.value) issues.push({ field: 'value', severity: 'warning', message: 'No value specified' });
+    if (!contractValue(contract)) issues.push({ field: 'value', severity: 'warning', message: 'No value specified' });
     if (contract.endDate) {
       const daysRemaining = Math.ceil((new Date(contract.endDate) - new Date()) / 86400000);
       if (daysRemaining > 0 && daysRemaining < 30) issues.push({ severity: 'warning', message: `Contract expires in ${daysRemaining} days` });
@@ -124,7 +152,11 @@ router.post('/:id/milestones', authenticate, auditMiddleware, async (req, res, n
     const prisma = req.app.locals.prisma;
     const { name, dueDate, description, amount } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const ms = await prisma.contractMilestone.create({ data: { contractId: req.params.id, name, dueDate: dueDate ? new Date(dueDate) : null, description, amount } });
+    // Dates and amounts as the columns take them: text or a bad date was a 500.
+    if (dueDate && Number.isNaN(new Date(dueDate).getTime())) return res.status(400).json({ error: 'dueDate must be a date' });
+    const value = amount === undefined || amount === null || amount === '' ? null : Number(amount);
+    if (Number.isNaN(value)) return res.status(400).json({ error: 'amount must be a number' });
+    const ms = await prisma.contractMilestone.create({ data: { contractId: req.params.id, name, dueDate: dueDate ? new Date(dueDate) : null, description, amount: value } });
     res.status(201).json(ms);
   } catch (err) { next(err); }
 });
@@ -139,8 +171,9 @@ router.get('/renewals/forecast', authenticate, async (req, res, next) => {
     for (let i = 0; i < +months; i++) {
       const start = new Date(now); start.setMonth(start.getMonth() + i); start.setDate(1);
       const end = new Date(start); end.setMonth(end.getMonth() + 1);
-      const expiring = await prisma.contract.findMany({ where: { endDate: { gte: start, lt: end }, status: { not: 'Terminated' }, deletedAt: null }, select: { id: true, name: true, value: true, endDate: true } });
-      forecast.push({ month: start.toISOString().substring(0, 7), count: expiring.length, value: expiring.reduce((s, c) => s + (c.value || 0), 0), contracts: expiring });
+      // The contracts the caller may see; this listed everyone's.
+      const expiring = await prisma.contract.findMany({ where: await reachableWhere(req, 'contracts', 'contract', { endDate: { gte: start, lt: end }, status: { not: 'Terminated' } }), select: { id: true, name: true, value: true, totalValue: true, endDate: true } });
+      forecast.push({ month: start.toISOString().substring(0, 7), count: expiring.length, value: expiring.reduce((s, c) => s + contractValue(c), 0), contracts: expiring });
     }
     res.json(forecast);
   } catch (err) { next(err); }

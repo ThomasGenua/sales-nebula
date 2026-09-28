@@ -13,6 +13,11 @@ const MODEL_MAP = {
   contracts: 'contract', orders: 'order', entitlements: 'entitlement',
 };
 
+// A bin module as its model, named as the bin names it (contacts) or as the
+// model (contact); null for anything else. And back.
+const binModel = name => MODEL_MAP[name] || (Object.values(MODEL_MAP).includes(name) ? name : null);
+const binModule = model => Object.keys(MODEL_MAP).find(key => MODEL_MAP[key] === model);
+
 // LIST deleted items
 router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
@@ -22,7 +27,9 @@ router.get('/', requirePermission('settings', 'read'), async (req, res, next) =>
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
     let where = {};
-    if (module) where.module = module;
+    // The Recycle Bin page asks for a model name (contact); entries are filed
+    // by module (contacts), so it opened on an empty list.
+    if (module) where.module = binModule(binModel(module)) || module;
 
     const [items, total] = await Promise.all([
       prisma.recycleBinItem.findMany({
@@ -95,6 +102,32 @@ router.post('/:id/restore', requirePermission('settings', 'full'), async (req, r
   } catch (err) { next(err); }
 });
 
+// Permanent delete (purge). It sat below DELETE /:id, which took "purge" for
+// a bin entry's id, so it never ran. A module is named as elsewhere in the bin
+// (contacts) or, as it was here, by model (contact); a model that cannot be
+// purged is reported in `failed`, not skipped in silence.
+router.delete('/purge', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { module, olderThanDays = 30 } = req.body;
+    const days = Number(olderThanDays);
+    if (!Number.isFinite(days) || days < 0) return res.status(400).json({ error: 'olderThanDays must be a number of days' });
+    const cutoff = new Date(Date.now() - days * 86400000);
+    const modules = module ? [binModel(module)] : ['contact', 'lead', 'deal', 'account', 'case', 'activity'];
+    if (!modules[0]) return res.status(400).json({ error: `Cannot purge module: ${module}` });
+    let totalPurged = 0;
+    const failed = [];
+    for (const m of modules) {
+      try {
+        const result = await prisma[m].deleteMany({ where: { deletedAt: { not: null, lt: cutoff } } });
+        totalPurged += result.count;
+      } catch (e) { failed.push(m); }
+    }
+    await req.audit({ action: 'delete', module: 'recycleBin', recordId: 'purge', details: `Purged ${totalPurged} records older than ${days} days` });
+    res.json({ purged: totalPurged, cutoffDate: cutoff, failed });
+  } catch (err) { next(err); }
+});
+
 // PERMANENTLY DELETE
 router.delete('/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
@@ -142,52 +175,25 @@ function extractName(module, data) {
 
 module.exports = router;
 
-// Recycle bin stats
-router.get('/stats', authenticate, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const modules = ['contact', 'lead', 'deal', 'account', 'case', 'activity', 'campaign', 'product', 'quote', 'invoice', 'contract', 'order'];
-    const stats = {};
-    let total = 0;
-    for (const mod of modules) {
-      try {
-        const count = await prisma[mod].count({ where: { deletedAt: { not: null } } });
-        stats[mod] = count;
-        total += count;
-      } catch (e) { stats[mod] = 0; }
-    }
-    const oldestDeletion = await prisma.contact.findFirst({ where: { deletedAt: { not: null } }, orderBy: { deletedAt: 'asc' }, select: { deletedAt: true } }).catch(() => null);
-    res.json({ total, byModule: stats, oldestDeletion: oldestDeletion?.deletedAt, retentionDays: 30 });
-  } catch (err) { next(err); }
-});
+// A second GET /stats (per-model counts of soft-deleted rows, for anyone signed
+// in) stood here. The one above answers that path, so it never ran.
 
-// Bulk restore
+// Bulk restore. The module is named as elsewhere in the bin (contacts) or by
+// model (contact); any other name went to prisma[module] and failed as a 500.
+// The restored records leave the bin, as a single restore's does: they stayed
+// listed, and restoring one again answered 409.
 router.post('/restore/bulk', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { module, ids } = req.body;
-    if (!module || !ids?.length) return res.status(400).json({ error: 'module and ids required' });
-    const result = await prisma[module].updateMany({ where: { id: { in: ids }, deletedAt: { not: null } }, data: { deletedAt: null } });
+    if (!module || !Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'module and ids required' });
+    const model = binModel(module);
+    if (!model) return res.status(400).json({ error: `Cannot restore module: ${module}` });
+    const deleted = await prisma[model].findMany({ where: { id: { in: ids.map(String) }, deletedAt: { not: null } }, select: { id: true } });
+    const restoredIds = deleted.map(r => r.id);
+    const result = await prisma[model].updateMany({ where: { id: { in: restoredIds } }, data: { deletedAt: null } });
+    await prisma.recycleBinItem.deleteMany({ where: { module: binModule(model), recordId: { in: restoredIds } } });
     await req.audit({ action: 'restore', module: 'recycleBin', recordId: module, details: `Bulk restored ${result.count} ${module} records` });
     res.json({ restored: result.count });
-  } catch (err) { next(err); }
-});
-
-// Permanent delete (purge)
-router.delete('/purge', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { module, olderThanDays = 30 } = req.body;
-    const cutoff = new Date(Date.now() - olderThanDays * 86400000);
-    const modules = module ? [module] : ['contact', 'lead', 'deal', 'account', 'case', 'activity'];
-    let totalPurged = 0;
-    for (const m of modules) {
-      try {
-        const result = await prisma[m].deleteMany({ where: { deletedAt: { not: null, lt: cutoff } } });
-        totalPurged += result.count;
-      } catch (e) {}
-    }
-    await req.audit({ action: 'delete', module: 'recycleBin', recordId: 'purge', details: `Purged ${totalPurged} records older than ${olderThanDays} days` });
-    res.json({ purged: totalPurged, cutoffDate: cutoff });
   } catch (err) { next(err); }
 });

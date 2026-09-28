@@ -123,7 +123,10 @@ function calculateCriticalPath(tasks, dependencies, projectStart) {
     const dur = durationOf(task);
     const succs = successorsOf.get(id);
 
-    let latestFinish = succs.length ? null : new Date(projectFinish);
+    // Nothing finishes after the project does. Only tasks without successors
+    // started from projectFinish, so a long task whose SS/SF successor ends
+    // early got float it did not have and dropped off the critical path.
+    let latestFinish = new Date(projectFinish);
     for (const dep of succs) {
       const sStart = ls.get(dep.successorId);
       const sFinish = lf.get(dep.successorId);
@@ -132,11 +135,12 @@ function calculateCriticalPath(tasks, dependencies, projectStart) {
       switch (dep.dependencyType) {
         case 'SS': candidate = addDays(addDays(sStart, -lag), dur); break;
         case 'FF': candidate = addDays(sFinish, -lag); break;
-        case 'SF': candidate = addDays(addDays(sStart, -lag), dur); break;
+        // Start-to-finish ties this start to the successor's finish, not its start.
+        case 'SF': candidate = addDays(addDays(sFinish, -lag), dur); break;
         case 'FS':
         default: candidate = addDays(sStart, -lag); break;
       }
-      if (latestFinish === null || candidate < latestFinish) latestFinish = candidate;
+      if (candidate < latestFinish) latestFinish = candidate;
     }
     lf.set(id, latestFinish);
     ls.set(id, addDays(latestFinish, -dur));
@@ -224,22 +228,29 @@ function rollUpProgress(tasks) {
   }
 
   const computed = new Map();
+  const visiting = new Set();
   const weightOf = t => t.estimatedHours || t.durationDays || 1;
+  const ownPercent = task => (task.status === 'Completed' ? 100 : (task.percentComplete || 0));
 
   const resolve = (task) => {
     if (computed.has(task.id)) return computed.get(task.id);
+    // A parent loop (a task moved under itself or its own child) recursed
+    // until the stack overflowed; met again on its own path, it counts alone.
+    if (visiting.has(task.id)) return ownPercent(task);
     const kids = children.get(task.id) || [];
     if (!kids.length) {
-      const pct = task.status === 'Completed' ? 100 : (task.percentComplete || 0);
+      const pct = ownPercent(task);
       computed.set(task.id, pct);
       return pct;
     }
     let weighted = 0, totalWeight = 0;
+    visiting.add(task.id);
     for (const kid of kids) {
       const w = weightOf(kid);
       weighted += resolve(kid) * w;
       totalWeight += w;
     }
+    visiting.delete(task.id);
     const pct = totalWeight ? Math.round(weighted / totalWeight) : 0;
     computed.set(task.id, pct);
     return pct;

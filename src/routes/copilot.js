@@ -5,6 +5,7 @@ const { crudModelFor } = require('../utils/crud');
 const { complete, isConfigured, AiError } = require('../services/claude');
 // The tighter limit meant for model calls was defined and attached to nothing.
 const { limiters } = require('../middleware/rateLimit');
+const { VALID_STAGES } = require('../utils/integrity');
 
 const router = Router();
 
@@ -21,10 +22,12 @@ router.post('/ask', authenticate, limiters.ai, async (req, res, next) => {
     // Gather context if not provided
     let enrichedContext = context || {};
     if (!context) {
+      // Open as the dashboard counts it: lost deals, resolved cases and
+      // deleted activities were counted too.
       const [dealCount, openCases, activities] = await Promise.all([
-        prisma.deal.count({ where: { ownerId: req.user.id, stage: { not: 'Closed Won' }, deletedAt: null } }),
-        prisma.case.count({ where: { ownerId: req.user.id, status: { not: 'Closed' }, deletedAt: null } }),
-        prisma.activity.count({ where: { ownerId: req.user.id, createdAt: { gte: new Date(Date.now() - 7 * 86400000) } } }),
+        prisma.deal.count({ where: { ownerId: req.user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] }, deletedAt: null } }),
+        prisma.case.count({ where: { ownerId: req.user.id, status: { notIn: ['Resolved', 'Closed'] }, deletedAt: null } }),
+        prisma.activity.count({ where: { ownerId: req.user.id, createdAt: { gte: new Date(Date.now() - 7 * 86400000) }, deletedAt: null } }),
       ]);
       enrichedContext = { openDeals: dealCount, openCases, weeklyActivities: activities };
     }
@@ -122,11 +125,13 @@ router.delete('/threads/:id', authenticate, async (req, res, next) => {
 router.post('/actions', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { action, params } = req.body;
+    // An action sent without params failed as a 500 reading params.subject.
+    const { action, params = {} } = req.body;
     if (!action) return res.status(400).json({ error: 'action required' });
     const actions = {
       'create_task': async () => {
-        const task = await prisma.activity.create({ data: { type: 'Task', subject: params.subject || 'New Task', status: 'Open', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null } });
+        // Status left to its default (Scheduled); 'Open' was a status no activity screen or count knows.
+        const task = await prisma.activity.create({ data: { type: 'Task', subject: params.subject || 'New Task', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null } });
         return { message: 'Task created', task };
       },
       'log_call': async () => {
@@ -135,7 +140,19 @@ router.post('/actions', authenticate, async (req, res, next) => {
       },
       'update_deal_stage': async () => {
         if (!params.dealId || !params.stage) return { error: 'dealId and stage required' };
-        const deal = await prisma.deal.update({ where: { id: params.dealId }, data: { stage: params.stage } });
+        // A stage the pipeline has, recorded in the deal's stage history and
+        // announced as an edit is: this wrote any text as the stage, unrecorded.
+        if (!VALID_STAGES.includes(params.stage)) return { error: `Invalid stage. Must be one of: ${VALID_STAGES.join(', ')}` };
+        const before = await prisma.deal.findFirst({ where: { id: String(params.dealId), deletedAt: null }, select: { stage: true } });
+        if (!before) return { error: 'Deal not found' };
+        const deal = await prisma.deal.update({ where: { id: String(params.dealId) }, data: { stage: params.stage } });
+        if (before.stage !== deal.stage) {
+          const last = await prisma.dealStageHistory.findFirst({ where: { dealId: deal.id }, orderBy: { createdAt: 'desc' } });
+          await prisma.dealStageHistory.create({
+            data: { dealId: deal.id, fromStage: before.stage, toStage: deal.stage, changedById: req.userId, duration: last ? Math.round((Date.now() - last.createdAt.getTime()) / 86400000) : null },
+          });
+          req.app.locals.emit?.dealStageChanged?.(deal, before.stage, deal.stage);
+        }
         return { message: `Deal moved to ${params.stage}`, deal };
       },
     };
@@ -170,15 +187,15 @@ router.get('/insights/:module/:id', authenticate, async (req, res, next) => {
       if (deal) {
         if (deal.probability < 30) insights.push({ type: 'warning', text: 'Low win probability. Consider adding more stakeholders.' });
         if (deal.closeDate && new Date(deal.closeDate) < new Date()) insights.push({ type: 'alert', text: 'Close date has passed. Update the timeline or close the deal.' });
-        const activities = await prisma.activity.count({ where: { dealId: id, createdAt: { gte: new Date(Date.now() - 14 * 86400000) } } });
+        const activities = await prisma.activity.count({ where: { dealId: id, createdAt: { gte: new Date(Date.now() - 14 * 86400000) }, deletedAt: null } });
         if (activities === 0) insights.push({ type: 'warning', text: 'No activities in 14 days. This deal may be stalling.' });
         const contacts = await prisma.dealContactRole.count({ where: { dealId: id } }).catch(() => 0);
         if (contacts < 2) insights.push({ type: 'tip', text: 'Add more contact roles to improve deal visibility.' });
       }
     } else if (module === 'accounts') {
-      const casesOpen = await prisma.case.count({ where: { accountId: id, status: { not: 'Closed' }, deletedAt: null } });
+      const casesOpen = await prisma.case.count({ where: { accountId: id, status: { notIn: ['Resolved', 'Closed'] }, deletedAt: null } });
       if (casesOpen > 3) insights.push({ type: 'alert', text: `${casesOpen} open cases. Customer satisfaction may be at risk.` });
-      const lastActivity = await prisma.activity.findFirst({ where: { accountId: id }, orderBy: { createdAt: 'desc' } });
+      const lastActivity = await prisma.activity.findFirst({ where: { accountId: id, deletedAt: null }, orderBy: { createdAt: 'desc' } });
       if (!lastActivity || new Date(lastActivity.createdAt) < new Date(Date.now() - 30 * 86400000)) {
         insights.push({ type: 'warning', text: 'No recent engagement. Schedule a check-in.' });
       }
@@ -196,7 +213,9 @@ router.get('/suggestions', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const userId = req.user.id;
     const suggestions = [];
-    const overdueTasks = await prisma.activity.count({ where: { ownerId: userId, status: { in: ['Open', 'InProgress'] }, dueDate: { lt: new Date() }, deletedAt: null } });
+    // Not done, whatever the open status is called: Scheduled and Pending
+    // (the default and the seed's) were never counted as overdue.
+    const overdueTasks = await prisma.activity.count({ where: { ownerId: userId, status: { notIn: ['Completed', 'Cancelled'] }, dueDate: { lt: new Date() }, deletedAt: null } });
     if (overdueTasks > 0) suggestions.push({ priority: 'high', action: 'Complete overdue tasks', details: `${overdueTasks} tasks are past due`, link: '/activities' });
     const stalledDeals = await prisma.deal.findMany({ where: { ownerId: userId, stage: { notIn: ['Closed Won', 'Closed Lost'] }, updatedAt: { lt: new Date(Date.now() - 7 * 86400000) }, deletedAt: null }, take: 5 });
     stalledDeals.forEach(d => suggestions.push({ priority: 'medium', action: `Follow up on "${d.name}"`, details: `No updates in ${Math.floor((Date.now() - new Date(d.updatedAt)) / 86400000)} days`, link: `/deals/${d.id}` }));
