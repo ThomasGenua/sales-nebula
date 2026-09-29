@@ -3,6 +3,7 @@ const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { fireWebhookEvent } = require('../services/webhooks');
+const { acquireLease, releaseLease } = require('../utils/lease');
 const { notify } = require('../services/notify');
 const {
   APPROVER_TYPES, APPROVAL_MODELS, buildApprovalSteps, notifyApprovers, settleStep, closeOpenSteps,
@@ -209,34 +210,45 @@ router.post('/requests', async (req, res, next) => {
     if (!meetsEntryConditions(process, record)) {
       return res.status(400).json({ error: `This record does not meet the entry conditions of "${process.name}"` });
     }
-    const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: String(recordId), status: 'Pending' } });
-    if (open) return res.status(409).json({ error: 'This record is already awaiting approval', requestId: open.id });
+    // "Is one open already?" and the create below are two steps, and two
+    // submits at the same moment both passed the first, filing two pending
+    // requests. One holds the lease (utils/lease), the same one POST
+    // /deals/:id/submit takes, so the two ways in cannot race each other either.
+    const leaseName = `approval-submit:${process.id}:${String(recordId)}`;
+    const leaseToken = await acquireLease(prisma, leaseName, 30000);
+    if (!leaseToken) return res.status(409).json({ error: 'This record is already awaiting approval' });
+    try {
+      const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: String(recordId), status: 'Pending' } });
+      if (open) return res.status(409).json({ error: 'This record is already awaiting approval', requestId: open.id });
 
-    // Every candidate for every step, never the submitter (services/approvals).
-    const rows = await buildApprovalSteps(prisma, process.steps, req.user);
+      // Every candidate for every step, never the submitter (services/approvals).
+      const rows = await buildApprovalSteps(prisma, process.steps, req.user);
 
-    const request = await prisma.approvalRequest.create({
-      data: {
-        processId: process.id,
-        module: process.module,
-        recordId: String(recordId),
-        dealId: process.module === 'deals' ? String(recordId) : null,
-        submittedById: req.userId,
-        comments: comments == null ? null : String(comments),
-        currentStep: 1,
-        steps: { create: rows },
-      },
-      include: {
-        steps: { include: { approver: { select: { id: true, firstName: true, lastName: true } } } },
-        process: true,
-      },
-    });
+      const request = await prisma.approvalRequest.create({
+        data: {
+          processId: process.id,
+          module: process.module,
+          recordId: String(recordId),
+          dealId: process.module === 'deals' ? String(recordId) : null,
+          submittedById: req.userId,
+          comments: comments == null ? null : String(comments),
+          currentStep: 1,
+          steps: { create: rows },
+        },
+        include: {
+          steps: { include: { approver: { select: { id: true, firstName: true, lastName: true } } } },
+          process: true,
+        },
+      });
 
-    await notifyApprovers(prisma, request, 1, 'Approval Required', `${process.name}: Submitted by ${req.user.firstName}`);
+      await notifyApprovers(prisma, request, 1, 'Approval Required', `${process.name}: Submitted by ${req.user.firstName}`);
 
-    await req.audit({ action: 'create', module: 'approvals', recordId: request.id, details: `Submitted for approval: ${process.name}` });
-    await fireWebhookEvent(prisma, 'approval.requested', { id: request.id, module: request.module, recordId: request.recordId });
-    res.status(201).json(request);
+      await req.audit({ action: 'create', module: 'approvals', recordId: request.id, details: `Submitted for approval: ${process.name}` });
+      await fireWebhookEvent(prisma, 'approval.requested', { id: request.id, module: request.module, recordId: request.recordId });
+      res.status(201).json(request);
+    } finally {
+      await releaseLease(prisma, leaseName, leaseToken);
+    }
   } catch (err) { next(err); }
 });
 

@@ -3,6 +3,8 @@ const { requirePermission, permits } = require('../middleware/auth');
 const { visibleWhere } = require('../middleware/rowSecurity');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { buildApprovalSteps, notifyApprovers, meetsEntryConditions } = require('../services/approvals');
+const { fireWebhookEvent } = require('../services/webhooks');
+const { acquireLease, releaseLease } = require('../utils/lease');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
 
 /**
@@ -426,29 +428,43 @@ module.exports = createCrudRouter('deal', 'deals', {
         const process = processes.find(p => meetsEntryConditions(p, deal));
         if (!process) return res.status(400).json({ error: 'This deal meets the entry conditions of no active approval process' });
         if (!process.steps.length) return res.status(400).json({ error: 'Approval process has no steps' });
-        const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: deal.id, status: 'Pending' } });
-        if (open) return res.status(409).json({ error: 'This deal is already awaiting approval', requestId: open.id });
-        // Every candidate for every step, never the submitter (services/approvals).
-        const stepRows = await buildApprovalSteps(prisma, process.steps, req.user);
+        // "Is one open already?" and the create below are two steps, and two
+        // submits at the same moment (a double click) both passed the first:
+        // two pending requests for one deal, its approvers asked twice. One
+        // submit holds the lease (utils/lease); the other is told it is on its way.
+        const leaseName = `approval-submit:${process.id}:${deal.id}`;
+        const leaseToken = await acquireLease(prisma, leaseName, 30000);
+        if (!leaseToken) return res.status(409).json({ error: 'This deal is already awaiting approval' });
+        try {
+          const open = await prisma.approvalRequest.findFirst({ where: { processId: process.id, recordId: deal.id, status: 'Pending' } });
+          if (open) return res.status(409).json({ error: 'This deal is already awaiting approval', requestId: open.id });
+          // Every candidate for every step, never the submitter (services/approvals).
+          const stepRows = await buildApprovalSteps(prisma, process.steps, req.user);
 
-        // Create approval request
-        const request = await prisma.approvalRequest.create({
-          data: {
-            processId: process.id,
-            recordId: deal.id,
-            dealId: deal.id,
-            module: 'deals',
-            submittedById: req.userId,
-            status: 'Pending',
-            currentStep: 1,
-            steps: { create: stepRows },
-          },
-          include: { steps: true },
-        });
-        await notifyApprovers(prisma, request, 1, 'Approval Required', `Deal "${deal.name}" submitted by ${req.user.firstName}`);
+          // Create approval request
+          const request = await prisma.approvalRequest.create({
+            data: {
+              processId: process.id,
+              recordId: deal.id,
+              dealId: deal.id,
+              module: 'deals',
+              submittedById: req.userId,
+              status: 'Pending',
+              currentStep: 1,
+              steps: { create: stepRows },
+            },
+            include: { steps: true },
+          });
+          await notifyApprovers(prisma, request, 1, 'Approval Required', `Deal "${deal.name}" submitted by ${req.user.firstName}`);
 
-        await req.audit({ action: 'update', module: 'deals', recordId: deal.id, details: `Submitted deal for approval` });
-        res.json({ success: true, approvalRequest: request });
+          await req.audit({ action: 'update', module: 'deals', recordId: deal.id, details: `Submitted deal for approval` });
+          // As POST /approvals/requests fires it: a subscription to
+          // approval.requested heard about one way of submitting and not this one.
+          await fireWebhookEvent(prisma, 'approval.requested', { id: request.id, module: request.module, recordId: request.recordId });
+          res.json({ success: true, approvalRequest: request });
+        } finally {
+          await releaseLease(prisma, leaseName, leaseToken);
+        }
       } catch (err) { next(err); }
     });
 
