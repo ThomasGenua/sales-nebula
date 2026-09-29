@@ -18,8 +18,10 @@ const request = require('supertest');
 const { setup, teardown, cleanDatabase, createTestRole, createTestUser, authHeader } = require('./setup');
 const { collectGetRoutes } = require('../scripts/collect-routes');
 
-// Lower this as routes are fixed. Never raise it.
-const BASELINE = Number.POSITIVE_INFINITY;
+// Lower this as routes are fixed. Never raise it. It was left at Infinity,
+// which made the ratchet below unable to fail; a crawl of all 522 GET routes
+// answers no 5xx, so it is 0 and a route that starts to fail now fails this.
+const BASELINE = 0;
 
 let app, prisma, admin;
 const failures = [];

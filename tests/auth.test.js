@@ -20,7 +20,12 @@ beforeEach(async () => {
 
 describe('POST /api/auth/register', () => {
   it('creates a new user and returns JWT', async () => {
-    const role = await createTestRole();
+    // Registration always gives the configured default role (Sales Rep), never
+    // one named in the body: it used to take roleId from the request, so a
+    // stranger could register as an Admin. The route answers 503 when that
+    // role does not exist, which is what this test ran into with only an Admin.
+    await createTestRole('Sales Rep');
+    const admin = await createTestRole('Admin');
     const res = await request(app)
       .post('/api/auth/register')
       .send({
@@ -28,14 +33,26 @@ describe('POST /api/auth/register', () => {
         password: 'SecurePass123!',
         firstName: 'New',
         lastName: 'User',
-        roleId: role.id,
+        roleId: admin.id,
       });
 
     expect(res.status).toBe(201);
     expect(res.body.token).toBeDefined();
     expect(res.body.user.email).toBe('new@test.com');
     expect(res.body.user.firstName).toBe('New');
+    expect(res.body.user.role.name).toBe('Sales Rep'); // not the Admin role the body asked for
     expect(res.body.user.password).toBeUndefined(); // Should not leak password
+  });
+
+  it('answers 503 when the default role is not configured, rather than picking another', async () => {
+    const admin = await createTestRole('Admin');
+    const res = await request(app)
+      .post('/api/auth/register')
+      .send({ email: 'norole@test.com', password: 'SecurePass123!', firstName: 'No', lastName: 'Role', roleId: admin.id });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('NO_DEFAULT_ROLE');
+    expect(await prisma.user.count({ where: { email: 'norole@test.com' } })).toBe(0);
   });
 
   it('rejects duplicate email', async () => {
