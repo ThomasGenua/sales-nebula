@@ -152,8 +152,20 @@ async function sendEmailChangedNotice({ to, firstName, newEmail }) {
   return sendMail({ to, subject, text, html });
 }
 
+/**
+ * Whether mail really leaves: an SMTP server is configured. Without one,
+ * sendMail only writes the message to the log and reports success, so code
+ * that means to send (a sequence step) asks first rather than record a send
+ * that did not happen. Read from the environment each time, as getTransporter
+ * decides it.
+ */
+function mailConfigured() {
+  return !!process.env.SMTP_HOST;
+}
+
 module.exports = {
   sendMail,
+  mailConfigured,
   sendEmailChangedNotice,
   sendVerificationEmail,
   sendInviteEmail,

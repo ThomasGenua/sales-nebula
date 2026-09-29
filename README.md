@@ -7,13 +7,17 @@ A full-stack enterprise CRM platform with 100% Salesforce feature parity. Built 
 
 Two paths, both of which end with the public site at `/` and the product at `/app`.
 
-**Docker, one command:**
+**Docker:**
 
 ```bash
+export JWT_SECRET=$(openssl rand -base64 48)   # signs sessions; keep it, and do not reuse one from an example
 docker compose up
 ```
 
-The image builds the front end during the Docker build, so nothing else is needed.
+The image builds the front end during the Docker build, so nothing else is
+needed. In production the app refuses to start without a real `JWT_SECRET`
+(at least 32 characters, and not a placeholder such as the one in `.env.example`),
+and `docker compose up` stops with a message if it is not set.
 
 **Locally:**
 
@@ -532,7 +536,7 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 | Variable | Description |
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection string (e.g., `postgresql://user:pass@localhost:5432/sales_nebula`) |
-| `JWT_SECRET` | Secret for JWT signing. Use at least 256 bits of randomness. |
+| `JWT_SECRET` | Secret for JWT signing: at least 32 characters (`openssl rand -base64 48`), and never a placeholder such as the one in `.env.example`. With `NODE_ENV=production` the app refuses to start on a missing, placeholder or short key, since anyone who knows the key can sign an administrator's session. |
 
 **Server:**
 
@@ -541,7 +545,18 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 | `PORT` | `7544` | API server port |
 | `NODE_ENV` | `development` | `development`, `production`, or `test` |
 | `LOG_LEVEL` | `debug` | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
-| `FRONTEND_URL` | `http://localhost:7544` | CORS allowed origin(s), comma-separated for multiple |
+| `FRONTEND_URL` | `http://localhost:7544` | CORS allowed origin(s), comma-separated for multiple. The app is also allowed to talk to itself: a page served from any address of this server may call it, listed or not. Links in emails point at the first one. |
+
+**Mail** (without `SMTP_HOST` nothing is emailed: password reset links, invitations and sequence steps are only written to the log, and the app says so at start-up in production):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SMTP_HOST` | -- | SMTP server. Setting it turns email on |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_SECURE` | `false` | `true` for implicit TLS (usually port 465) |
+| `SMTP_USER` / `SMTP_PASS` | -- | SMTP credentials, if the server needs them |
+| `MAIL_FROM` | `SMTP_USER` | The From address, e.g. `Sales Nebula <crm@example.com>` |
+| `MAIL_SECRET` | `JWT_SECRET` | Key that encrypts stored mailbox credentials; the same length rule as `JWT_SECRET` applies in production |
 
 **Auth:**
 
@@ -557,7 +572,7 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_WINDOW_MS` | `900000` | Rate limit window in ms (15 min) |
-| `RATE_LIMIT_MAX` | `200` | Max requests per IP per window |
+| `RATE_LIMIT_MAX` | `1000` | Max requests per IP per window |
 
 **Optional Services:**
 
