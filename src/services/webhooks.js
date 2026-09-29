@@ -69,6 +69,7 @@ async function deliverWebhook(prisma, { webhook, event, payload, attempt }) {
   let statusCode = null;
   let responseText = null;
   let success = false;
+  let retryable = true;
 
   try {
     // Checked again here, not only when the webhook was saved: the name can
@@ -84,12 +85,25 @@ async function deliverWebhook(prisma, { webhook, event, payload, attempt }) {
       headers,
       body,
       signal: controller.signal,
+      // Not followed. Only the address above was checked, and a redirect goes
+      // to one that was not: a public endpoint answering 307 to the cloud
+      // metadata address or a service on the private network had the signed
+      // event POSTed there, and that service's answer kept in the delivery
+      // log, which anyone with settings access reads.
+      redirect: 'manual',
     });
 
     clearTimeout(timeout);
     statusCode = res.status;
-    responseText = await res.text().catch(() => '');
-    success = res.ok;
+    if (res.status >= 300 && res.status < 400) {
+      const to = String(res.headers.get('location') || '').slice(0, 200);
+      responseText = `Redirect (${res.status})${to ? ` to ${to}` : ''} not followed; set the webhook to the final address`;
+      retryable = false; // it will answer the same way again
+      await res.body?.cancel().catch(() => {}); // the body is not read, so let the connection go
+    } else {
+      responseText = await res.text().catch(() => '');
+      success = res.ok;
+    }
   } catch (err) {
     responseText = err.message || 'Connection failed';
   }
@@ -110,7 +124,7 @@ async function deliverWebhook(prisma, { webhook, event, payload, attempt }) {
   } catch (e) { /* logging failure shouldn't break delivery */ }
 
   // Retry on failure
-  if (!success && attempt < webhook.retries) {
+  if (!success && retryable && attempt < webhook.retries) {
     const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
     setTimeout(() => {
       deliveryQueue.push({ webhook, event, payload, attempt: attempt + 1 });
