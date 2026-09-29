@@ -124,7 +124,10 @@ async function main() {
     prisma.deal.create({ data: { name: 'Stark Analytics Suite', stage: 'Proposal', value: 500000, probability: 50, closeDate: new Date('2026-04-01'), ownerId: thomas.id, accountId: accts[2].id, contactId: contacts[2].id } }),
     prisma.deal.create({ data: { name: 'Initech Support Contract', stage: 'Closed Won', value: 45000, probability: 100, closeDate: new Date('2026-01-20'), ownerId: sam.id, accountId: accts[3].id, contactId: contacts[3].id } }),
     prisma.deal.create({ data: { name: 'Pied Piper Integration', stage: 'Proposal', value: 320000, probability: 40, closeDate: new Date('2026-06-01'), ownerId: alex.id, accountId: accts[4].id, contactId: contacts[4].id } }),
-    prisma.deal.create({ data: { name: 'Hooli Cloud Migration', stage: 'Closed Lost', value: 750000, probability: 0, ownerId: thomas.id, accountId: accts[5].id, contactId: contacts[5].id } }),
+    // With a close date, like the others: the seeded "Deal close date required"
+    // validation rule refuses to save a deal without one, so this one could not
+    // be edited at all until somebody found the field.
+    prisma.deal.create({ data: { name: 'Hooli Cloud Migration', stage: 'Closed Lost', value: 750000, probability: 0, closeDate: new Date('2026-02-27'), ownerId: thomas.id, accountId: accts[5].id, contactId: contacts[5].id } }),
   ]);
   console.log('  6 deals created');
 
@@ -749,25 +752,10 @@ async function main() {
     console.log('  2 forecast items');
   }
 
-  // ─── APPROVAL PROCESS STEPS ───
-  const approvalProcesses = await prisma.approvalProcess.findMany({ take: 1 });
-  if (approvalProcesses.length > 0) {
-    await prisma.approvalProcessStep.create({ data: {
-      processId: approvalProcesses[0].id,
-      stepOrder: 1,
-      name: 'Manager Approval',
-      approverType: 'user',
-      approverId: users[1].id,
-    }});
-    await prisma.approvalProcessStep.create({ data: {
-      processId: approvalProcesses[0].id,
-      stepOrder: 2,
-      name: 'VP Approval',
-      approverType: 'user',
-      approverId: users[0].id,
-    }});
-    console.log('  2 approval process steps');
-  }
+  // (The approval process steps are created with their processes above. A
+  // second block here added the same two steps to whichever process came back
+  // first, so a request to the deal process asked alex twice and then thomas
+  // twice, as four steps.)
 
   // ─── CONTRACTS ───
   const contract = await prisma.contract.create({ data: {
