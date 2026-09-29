@@ -88,7 +88,8 @@ describe('Password Policy', () => {
   });
 
   it('accepts strong password', async () => {
-    const role = await createTestRole();
+    // Registration gives the default role, Sales Rep, and answers 503 without one.
+    const role = await createTestRole('Sales Rep');
     const res = await request(app)
       .post('/api/auth/register')
       .send({ email: 'strong@test.com', password: 'Strong1!Pass', firstName: 'A', lastName: 'B', roleId: role.id });

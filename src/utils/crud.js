@@ -316,7 +316,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       // Get old record for field-level audit
       const oldRecord = await prisma[modelName].findUnique({ where: { id: req.params.id } });
-      if (!oldRecord) return res.status(404).json({ error: 'Not found' });
+      // A record in the recycle bin is gone for editing, as it is for GET: this
+      // saved an edit to it and answered 200, so a stale tab reported a save of
+      // something that no longer showed anywhere.
+      if (!oldRecord || (softDeletes && oldRecord.deletedAt)) return res.status(404).json({ error: 'Not found' });
       if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Edit'))) {
         return res.status(404).json({ error: 'Not found' });
       }
@@ -397,7 +400,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
       // Snapshot record before delete for recycle bin
       const record = await prisma[modelName].findUnique({ where: { id: req.params.id } });
-      if (!record) return res.status(404).json({ error: 'Not found' });
+      // Not one already deleted: a second delete answered 200 and filed a second
+      // recycle bin entry, whose restore then failed on the row that is there.
+      if (!record || (softDeletes && record.deletedAt)) return res.status(404).json({ error: 'Not found' });
       if (req.canAccessRecord && !(await req.canAccessRecord(req.params.id, 'Full'))) {
         return res.status(404).json({ error: 'Not found' });
       }

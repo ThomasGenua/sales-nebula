@@ -175,7 +175,9 @@ function AuthProvider({ children }) {
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       const reasons = Array.isArray(e.details) && e.details.length && e.details.every(d => typeof d === "string") ? `: ${e.details.join(". ")}` : "";
-      throw new Error((e.error || res.statusText) + reasons);
+      // The status and the API's own code ride along for callers that answer a
+      // particular refusal (an edit over someone else's is CONFLICT), not just show it.
+      throw Object.assign(new Error((e.error || res.statusText) + reasons), { status: res.status, code: e.code });
     }
     return res.json();
   }, [demoMode, renewSession, clearSession]);
@@ -710,7 +712,7 @@ function FilterPanel({ open, onClose, filters = [], values = {}, onChange, onApp
 // ========================================================================
 // RECORD DETAIL VIEW -- full record with tabs, related lists
 // ========================================================================
-function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, onDelete, title }) {
+function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, onDelete, title, actions = [] }) {
   const [activeTab, setActiveTab] = useState("details");
   const tabs = ["details", ...relatedLists.map(r => r.key)];
 
@@ -729,6 +731,7 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
           </div>
         </div>
         <div className="flex items-center gap-2 pl-10 sm:pl-0">
+          {actions.map(a => <Button key={a.label} variant="secondary" size="sm" icon={a.icon} onClick={() => a.onClick(record)}>{a.label}</Button>)}
           {onEdit && <Button variant="secondary" size="sm" icon={Edit2} onClick={() => onEdit(record)}>Edit</Button>}
           {onDelete && <Button variant="danger" size="sm" icon={Trash2} onClick={() => onDelete(record)}>Delete</Button>}
         </div>
@@ -1064,7 +1067,9 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
     </div>
   );
 }
-function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true }) {
+// `recordActions` are buttons on a record's detail page beside Edit and Delete:
+// [{ label, icon, run: async (record, apiFetch) => "message shown on success" }].
+function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [] }) {
   const { apiFetch } = useAuth();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1135,11 +1140,31 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
 
   const save = async () => {
     try {
-      if (editing) { await apiFetch(`${endpoint}/${editing.id}`, { method: "PUT", body: form }); }
-      else { await apiFetch(endpoint, { method: "POST", body: form }); }
+      if (editing) {
+        // The form sends the whole record back, so a save over someone else's
+        // change put their change back to what this form held, and answered
+        // "Updated successfully". If-Match is the version the form was opened
+        // on; the API refuses (409) when the record has moved on since.
+        const saved = await apiFetch(`${endpoint}/${editing.id}`, {
+          method: "PUT", body: form,
+          ...(typeof editing.updatedAt === "string" && { headers: { "If-Match": editing.updatedAt } }),
+        });
+        // The detail page showed the record as it was before this save, and its
+        // next edit would start from the old version and be refused. Take the
+        // new version from the answer at once, then load the record afresh.
+        if (detailRecord?.id === editing.id) {
+          if (saved && typeof saved === "object" && saved.id === editing.id) setDetailRecord(prev => ({ ...prev, ...saved }));
+          apiFetch(`${endpoint}/${editing.id}`).then(setDetailRecord).catch(() => {});
+        }
+      } else { await apiFetch(endpoint, { method: "POST", body: form }); }
       setModalOpen(false); setEditing(null); setForm({}); load();
       setToast({ message: editing ? "Updated successfully" : "Created successfully", type: "success" });
-    } catch (e) { setToast({ message: e.message, type: "error" }); }
+    } catch (e) {
+      setToast({
+        message: e.code === "CONFLICT" ? "Someone else changed this record while you were editing it. Close this form and open the record again to see their changes." : e.message,
+        type: "error",
+      });
+    }
   };
 
   const remove = async (row) => {
@@ -1171,6 +1196,13 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
           onBack={() => { setDetailRecord(null); closeRecord(); }}
           onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
           onDelete={remove}
+          actions={recordActions.map(a => ({
+            ...a,
+            onClick: async row => {
+              try { setToast({ message: (await a.run(row, apiFetch)) || "Done", type: "success" }); }
+              catch (e) { setToast({ message: e.message, type: "error" }); }
+            },
+          }))}
         />
         <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }}
           title={`Edit ${title.slice(0, -1)}`}>
@@ -1357,7 +1389,13 @@ function DealsPage() {
       { key: "probability", label: "Probability %", type: "number" },
       { key: "closeDate", label: "Close Date", type: "date" }, { key: "source", label: "Source" },
       { key: "description", label: "Description", type: "textarea" },
-    ]} />;
+    ]}
+    // Approvals could be decided on the Approvals page but not started from
+    // anywhere: nothing called POST /deals/:id/submit.
+    recordActions={[{
+      label: "Submit for approval", icon: CheckCircle2,
+      run: async (deal, api) => { await api(`/deals/${deal.id}/submit`, { method: "POST", body: {} }); return "Submitted for approval"; },
+    }]} />;
 }
 
 function AccountsPage() {

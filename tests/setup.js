@@ -16,9 +16,43 @@ const bcrypt = require('bcryptjs');
 let prisma;
 let app;
 
+// ─── SAFETY ───
+
+/** The database name at the end of a connection URL. Never the rest: it carries the password. */
+function databaseName(url) {
+  const path = String(url).replace(/[?#].*$/, '');
+  const last = path.slice(path.lastIndexOf('/') + 1);
+  try { return decodeURIComponent(last); } catch { return last; }
+}
+
+/**
+ * These tests wipe the database they run against: setup() force-resets its
+ * schema and cleanDatabase() truncates every table in it before each test.
+ * .env.example's DATABASE_URL is the app's own database, which `npm run setup`
+ * seeds, so `npm test` on a fresh checkout emptied it. Refuse unless the name
+ * says it is a test database ("test" at the start of the name or after a
+ * separator: sales_nebula_test, review_test, but not latest). Set
+ * ALLOW_TEST_DB_RESET=true to say you are sure.
+ */
+function assertTestDatabase(url = process.env.DATABASE_URL) {
+  if (process.env.ALLOW_TEST_DB_RESET === 'true') return;
+  if (!url) {
+    throw new Error('DATABASE_URL is not set. These tests wipe the database they run against; point it at a throwaway one, '
+      + 'for example postgresql://USER:PASS@127.0.0.1:5432/sales_nebula_test?schema=public');
+  }
+  const name = databaseName(url);
+  if (!/(^|[^a-z])test/i.test(name)) {
+    throw new Error(`Refusing to run the tests: DATABASE_URL points at "${name}", and they truncate every table in it. `
+      + 'Use a throwaway database whose name contains "test" (for example sales_nebula_test), '
+      + 'or set ALLOW_TEST_DB_RESET=true if you are sure.');
+  }
+}
+
 // ─── LIFECYCLE ───
 
 async function setup() {
+  assertTestDatabase();
+
   // Open registration is off by default and returns 403; the register and
   // password-policy specs are about what happens when it is switched on.
   process.env.ALLOW_OPEN_REGISTRATION = 'true';
@@ -34,7 +68,18 @@ async function setup() {
       stdio: 'pipe',
     });
   } catch (e) {
-    console.warn('Prisma push failed (may already be up to date):', e.message);
+    // "May already be up to date" was the whole handling, so a push that failed
+    // for a real reason (no database, Prisma's guard against an AI agent
+    // resetting one) let every suite run against no tables and fail with
+    // "The table public.Role does not exist". Carry on only when the schema is there.
+    const reason = String(e.stderr || e.message).split('\n').find(line => line.trim()) || 'unknown error';
+    let tablesPresent = true;
+    try { await prisma.$queryRaw`SELECT 1 FROM "Role" LIMIT 1`; } catch (err) { tablesPresent = false; }
+    if (!tablesPresent) {
+      throw new Error(`The test database has no tables, and \`prisma db push --force-reset\` failed: ${reason}. `
+        + 'Create them first with: DATABASE_URL=<the test database> npx prisma migrate deploy');
+    }
+    console.warn(`Prisma push failed (${reason.trim()}); using the schema that is already there.`);
   }
 
   return { prisma, app };
@@ -89,6 +134,7 @@ const ORDERED_TABLES = [
   ];
 
 async function cleanDatabase() {
+  assertTestDatabase();
   // One TRUNCATE across every table beats a hand-maintained list: the list had
   // drifted, so Lead, CalendarEvent and others were never cleared and rows
   // leaked between runs — a recurring-series test counted 4, then 12, then 20
@@ -283,6 +329,7 @@ function authHeader(token) {
 module.exports = {
   setup,
   teardown,
+  assertTestDatabase,
   cleanDatabase,
   createTestRole,
   createTestUser,

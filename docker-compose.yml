@@ -54,9 +54,23 @@ services:
       PORT: 7544
       DATABASE_URL: postgresql://salesnebula:snpassword@postgres:5432/sales_nebula?schema=public
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-strong-random-secret-in-production}
+      # Sessions are signed with this. There is deliberately no default: the
+      # one that used to be here is published in this repository, and anyone
+      # who knew it could sign an administrator's session. The app refuses to
+      # start in production with a placeholder or a key under 32 characters.
+      JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET first, for example with openssl rand -base64 48}"
       JWT_EXPIRES_IN: 7d
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:7544}
+      # Mail. These were not passed on, so a stack started from this file could
+      # not send any: password resets, invitations and sequence emails were only
+      # written to the log. Without SMTP_HOST that is still what happens, and the
+      # app says so at start-up.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AWS_REGION: ${AWS_REGION:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}

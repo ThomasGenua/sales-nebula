@@ -38,6 +38,19 @@ function hashToken(raw) {
   return crypto.createHash('sha256').update(String(raw)).digest('hex');
 }
 
+/**
+ * What an invite response says about the mail: whether it left, and, when it
+ * did not (no SMTP server is configured, or it refused the message), the link
+ * itself, for the administrator who made the invite to pass on. These routes
+ * answered the same whether the mail went or was only written to the log, so
+ * an invite could go nowhere and look sent. `devInviteUrl`, outside production,
+ * is unchanged.
+ */
+function mailStatus(result, inviteUrl) {
+  const emailSent = !!(result && result.ok && result.mode === 'smtp');
+  return emailSent ? { emailSent } : { emailSent, inviteUrl };
+}
+
 function isValidEmail(email) {
   return !!email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email));
 }
@@ -316,13 +329,13 @@ router.post('/requests/:id/approve', authenticate, requirePermission('users', 'f
     await req.audit({ action: 'update', module: 'signup', recordId: request.id, details: `Signup approved and invite issued: ${request.email}` });
 
     const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
-    await sendInviteEmail({
+    const mail = await sendInviteEmail({
       to: request.email,
       firstName: request.firstName,
       inviteUrl,
       message: req.body.message || null,
     });
-    const payload = { approved: true, inviteId: invite.id, email: request.email, expiresAt: invite.expiresAt };
+    const payload = { approved: true, inviteId: invite.id, email: request.email, expiresAt: invite.expiresAt, ...mailStatus(mail, inviteUrl) };
     if (process.env.NODE_ENV !== 'production') payload.devInviteUrl = inviteUrl;
     res.status(201).json(payload);
   } catch (err) { next(err); }
@@ -405,8 +418,8 @@ router.post('/invites', authenticate, requirePermission('users', 'full'), auditM
     await req.audit({ action: 'create', module: 'signup', recordId: invite.id, details: `Invite sent: ${clean}` });
 
     const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
-    await sendInviteEmail({ to: clean, firstName, inviteUrl, message });
-    const payload = { id: invite.id, email: invite.email, expiresAt: invite.expiresAt, status: invite.status };
+    const mail = await sendInviteEmail({ to: clean, firstName, inviteUrl, message });
+    const payload = { id: invite.id, email: invite.email, expiresAt: invite.expiresAt, status: invite.status, ...mailStatus(mail, inviteUrl) };
     if (process.env.NODE_ENV !== 'production') payload.devInviteUrl = inviteUrl;
     res.status(201).json(payload);
   } catch (err) { next(err); }
@@ -443,14 +456,14 @@ router.post('/invites/:id/resend', authenticate, requirePermission('users', 'ful
       },
     });
 
-    const payload = { resent: true, resendCount: updated.resendCount, expiresAt: updated.expiresAt };
     const inviteUrl = `${publicOrigin()}/accept-invite?token=${raw}`;
-    await sendInviteEmail({
+    const mail = await sendInviteEmail({
       to: invite.email,
       firstName: invite.firstName,
       inviteUrl,
       message: invite.message,
     });
+    const payload = { resent: true, resendCount: updated.resendCount, expiresAt: updated.expiresAt, ...mailStatus(mail, inviteUrl) };
     if (process.env.NODE_ENV !== 'production') {
       payload.devInviteUrl = inviteUrl;
     }

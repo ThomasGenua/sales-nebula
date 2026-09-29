@@ -9,9 +9,29 @@
  *
  * So: start at count() + 1, jump past the highest number in use when that one
  * is taken, and when a concurrent insert still wins the race, pick again.
+ *
+ * Picking again is not enough when many creates arrive together: each round
+ * only one of them wins, so with the old five attempts the sixth and later of
+ * eight simultaneous quotes failed with "Duplicate value for number". Creates
+ * of one kind now take turns within a process, which removes nearly all the
+ * clashes, and the retry (twelve attempts, each after a random pause so racers
+ * from other processes do not collide in step) covers the rest.
  */
 
-const MAX_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 12;
+
+/** A random pause, longer each attempt. */
+const pause = attempt => new Promise(resolve => setTimeout(resolve, Math.random() * 20 * attempt));
+
+// One chain of pending creates per kind of record, in this process.
+const turns = new Map();
+
+/** Run `task` after every earlier one for `key` has finished, however it ended. */
+function inTurn(key, task) {
+  const run = (turns.get(key) || Promise.resolve()).then(task);
+  turns.set(key, run.catch(() => {}));
+  return run;
+}
 
 const format = (prefix, n, width) => `${prefix}${String(n).padStart(width, '0')}`;
 
@@ -43,15 +63,18 @@ const isClashOn = (err, field) =>
  * Not for use inside an interactive transaction: Postgres aborts the whole
  * transaction on the unique violation, so there is nothing left to retry in.
  */
-async function createNumbered(prisma, delegate, numbering, args) {
-  for (let attempt = 1; ; attempt++) {
-    const number = await nextFreeNumber(prisma, delegate, numbering);
-    try {
-      return await prisma[delegate].create({ ...args, data: { ...args.data, [numbering.field]: number } });
-    } catch (err) {
-      if (!isClashOn(err, numbering.field) || attempt >= MAX_ATTEMPTS) throw err;
+function createNumbered(prisma, delegate, numbering, args) {
+  return inTurn(`${delegate}.${numbering.field}`, async () => {
+    for (let attempt = 1; ; attempt++) {
+      const number = await nextFreeNumber(prisma, delegate, numbering);
+      try {
+        return await prisma[delegate].create({ ...args, data: { ...args.data, [numbering.field]: number } });
+      } catch (err) {
+        if (!isClashOn(err, numbering.field) || attempt >= MAX_ATTEMPTS) throw err;
+        await pause(attempt);
+      }
     }
-  }
+  });
 }
 
 // The formats the seed data and the old count() + 1 code already used.

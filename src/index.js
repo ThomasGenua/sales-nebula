@@ -7,6 +7,7 @@ const { storage } = require('./services/storage');
 const { initJobQueue } = require('./jobs/scheduler');
 const { logger } = require('./services/logger');
 const { setRedisClient } = require('./middleware/auth');
+const { mailConfigured } = require('./utils/mail');
 
 const { createApp } = require('./app');
 const { createDatabaseClient } = require('./database');
@@ -19,6 +20,14 @@ async function start() {
   const PORT = process.env.PORT || 7544;
 
   logger.info('Starting Sales Nebula API...');
+
+  // Without an SMTP server every email is only written to the log and reported
+  // as done: password reset links never arrive, invitations go nowhere and
+  // sequence steps wait. Say so where an operator will see it.
+  if (process.env.NODE_ENV === 'production' && !mailConfigured()) {
+    logger.warn('SMTP_HOST is not set: password reset, invitation and sequence emails are written to the log, not sent. '
+      + 'Set SMTP_HOST (with SMTP_PORT, SMTP_USER, SMTP_PASS and MAIL_FROM as your provider needs).');
+  }
 
   const database = await createDatabaseClient();
   prisma = database.prisma;

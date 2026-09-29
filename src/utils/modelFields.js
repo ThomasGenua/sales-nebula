@@ -25,15 +25,28 @@ function pickModelFields(modelName, data = {}) {
   if (!model) return { data: {}, ignored: Object.keys(data || {}) };
 
   const byName = new Map(model.fields.map(f => [f.name, f]));
+  const foreignKeys = new Set(model.fields.flatMap(f => (f.kind === 'object' ? f.relationFromFields || [] : [])));
   const kept = {};
   const ignored = [];
   for (const [key, value] of Object.entries(data)) {
     const field = byName.get(key);
     if (!field || field.kind === 'object') { ignored.push(key); continue; }
+    // A picker put back on "Select…" sends "", which means no link. Stored as
+    // an id it matches no record, which the database refuses with a 500 (a
+    // foreign key), or, on a plain id column, keeps as a blank owner.
+    if (typeof value === 'string' && !value.trim() && isLinkColumn(field, foreignKeys)) {
+      if (!field.isRequired) kept[key] = null;
+      continue;
+    }
     const coerced = coerce(field, value);
     if (coerced !== undefined) kept[key] = coerced;
   }
   return { data: kept, ignored };
+}
+
+/** A column that holds another record's id: a declared foreign key, or a plain `<name>Id` text column. */
+function isLinkColumn(field, foreignKeys) {
+  return field.kind === 'scalar' && field.type === 'String' && (foreignKeys.has(field.name) || /Id$/.test(field.name));
 }
 
 /**

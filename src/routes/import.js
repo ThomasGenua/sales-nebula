@@ -138,18 +138,29 @@ router.post('/execute', async (req, res, next) => {
     const dedupeMap = new Map();
     if (config.dedupeFields.length > 0 && (skipDuplicates || updateDuplicates)) {
       const dedupeField = config.dedupeFields[0];
-      const values = records
+      // Trimmed, as they are stored, and looked up whatever their case: the map
+      // below compares in lower case, but the lookup was an exact `in`, so a
+      // file with ADA@EXAMPLE.COM did not find the ada@example.com already
+      // there and created a second contact. Chunked, because each value is one
+      // condition and a file may carry thousands.
+      const values = [...new Set(records
         .map(r => applyMapping(r, mapping)[dedupeField])
         .filter(Boolean)
-        .map(String);
+        .map(v => String(v).trim())
+        .filter(Boolean))];
 
-      if (values.length > 0) {
+      for (let i = 0; i < values.length; i += 200) {
+        const chunk = values.slice(i, i + 200);
         const existing = await prisma[config.model].findMany({
-          where: await reachableWhere(req, module, config.model, { [dedupeField]: { in: values } }, updateDuplicates ? 'Edit' : 'Read'),
+          where: await reachableWhere(
+            req, module, config.model,
+            { OR: chunk.map(value => ({ [dedupeField]: { equals: value, mode: 'insensitive' } })) },
+            updateDuplicates ? 'Edit' : 'Read',
+          ),
           select: { id: true, [dedupeField]: true },
         });
         for (const rec of existing) {
-          dedupeMap.set(String(rec[dedupeField]).toLowerCase(), rec.id);
+          dedupeMap.set(String(rec[dedupeField]).trim().toLowerCase(), rec.id);
         }
       }
     }
