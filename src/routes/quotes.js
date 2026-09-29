@@ -7,6 +7,7 @@ const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { currencyContext } = require('../utils/currency');
 const { createNumbered, QUOTE_NUMBER, INVOICE_NUMBER } = require('../utils/numbering');
 const { fireWebhookEvent } = require('../services/webhooks');
+const { acquireLease, releaseLease } = require('../utils/lease');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -182,32 +183,49 @@ router.post('/:id/create-invoice', requirePermission('invoices', 'edit'), async 
     const quote = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { items: true } });
     if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-    // Invoice items are product, description, quantity, unit price and total;
-    // the name, price and discount these were written with are not columns,
-    // so a quote with lines never became an invoice. A line's total already
-    // has its discount off, and the quote's discount comes off the subtotal.
-    // The invoice's amounts are the quote's; they were left at 0.
-    const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
-      data: {
-        quoteId: quote.id,
-        accountId: quote.accountId,
-        contactId: quote.contactId,
-        subtotal: quote.total - quote.tax,
-        tax: quote.tax,
-        total: quote.total,
-        totalAmount: quote.total,
-        notes: quote.notes,
-        terms: quote.terms,
-        items: {
-          create: quote.items.map(i => ({
-            productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, total: i.total,
-          })),
+    // One invoice per quote. Each click billed the whole quote again, and a
+    // double click (two requests at once) got two invoices for it: nothing
+    // looked for one that was already there, and the two requests could not
+    // see each other. One request holds the lease (utils/lease) while it
+    // looks and creates. A quote whose invoice was deleted can be invoiced again.
+    const leaseName = `invoice-from-quote:${quote.id}`;
+    const leaseToken = await acquireLease(prisma, leaseName, 30000);
+    if (!leaseToken) return res.status(409).json({ error: 'An invoice is already being created from this quote' });
+    try {
+      const existing = await prisma.invoice.findFirst({ where: { quoteId: quote.id, deletedAt: null }, select: { id: true, number: true } });
+      if (existing) {
+        return res.status(409).json({ error: `Invoice ${existing.number} was already created from this quote`, code: 'INVOICE_EXISTS', invoiceId: existing.id });
+      }
+
+      // Invoice items are product, description, quantity, unit price and total;
+      // the name, price and discount these were written with are not columns,
+      // so a quote with lines never became an invoice. A line's total already
+      // has its discount off, and the quote's discount comes off the subtotal.
+      // The invoice's amounts are the quote's; they were left at 0.
+      const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
+        data: {
+          quoteId: quote.id,
+          accountId: quote.accountId,
+          contactId: quote.contactId,
+          subtotal: quote.total - quote.tax,
+          tax: quote.tax,
+          total: quote.total,
+          totalAmount: quote.total,
+          notes: quote.notes,
+          terms: quote.terms,
+          items: {
+            create: quote.items.map(i => ({
+              productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, total: i.total,
+            })),
+          },
         },
-      },
-      include: { items: true },
-    });
-    await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id, details: `Created from ${quote.number}` });
-    res.status(201).json(invoice);
+        include: { items: true },
+      });
+      await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id, details: `Created from ${quote.number}` });
+      res.status(201).json(invoice);
+    } finally {
+      await releaseLease(prisma, leaseName, leaseToken);
+    }
   } catch (err) { next(err); }
 });
 
