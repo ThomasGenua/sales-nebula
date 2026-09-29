@@ -12,6 +12,7 @@
 const { logger } = require('../services/logger');
 const graphMailbox = require('../services/graphMailbox');
 const { notify } = require('../services/notify');
+const { acquireLease, releaseLease } = require('../utils/lease');
 
 let Queue, cron;
 try { Queue = require('bull'); } catch (e) { Queue = null; }
@@ -38,8 +39,42 @@ function addToDeadLetter(jobName, error, data = {}) {
 function getDeadLetterQueue() { return [...deadLetterQueue]; }
 function clearDeadLetterQueue() { deadLetterQueue.length = 0; }
 
-// ─── RETRY WRAPPER ───
+// ─── ONE RUN AT A TIME ───
+
+// Long enough for the slowest job and its retries; short enough that a process
+// that died holding the lease does not silence the job for long.
+const JOB_LEASE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Run a job, retried, unless another run of it is going on: from another
+ * process (every process with node-cron runs the same schedule, and README
+ * suggests `pm2 -i max`), from the admin "run now" button, or from the last
+ * tick if it is still busy. Two runs at once sent a sequence step twice and
+ * raised a stale-deal alert twice. The lease is in the database (utils/lease),
+ * so it holds across processes; with Redis, Bull already runs each tick once.
+ */
 async function withRetry(jobName, fn, maxRetries = 3) {
+  const leaseName = `job:${jobName}`;
+  let token = null;
+  try {
+    token = await acquireLease(prisma, leaseName, JOB_LEASE_TTL_MS);
+    if (!token) {
+      log.info({ job: jobName }, `Job skipped, already running: ${jobName}`);
+      return { skipped: 'already running' };
+    }
+  } catch (err) {
+    // No lease table (or no database yet): run as the job did before leases.
+    log.warn({ job: jobName, error: err.message }, 'Could not take the job lease; running without it');
+  }
+  try {
+    return await runWithRetries(jobName, fn, maxRetries);
+  } finally {
+    if (token) await releaseLease(prisma, leaseName, token);
+  }
+}
+
+// ─── RETRY WRAPPER ───
+async function runWithRetries(jobName, fn, maxRetries = 3) {
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -452,6 +487,12 @@ const handlers = {
           priority: policy.priority,
           // Not while it waits on the customer, which pauses the SLA board's clock too.
           status: { notIn: ['Resolved', 'Closed', 'Rejected', 'Escalated', ...require('../utils/integrity').SLA_PAUSED_STATUSES] },
+          // Once. Excluding only the status "Escalated" meant that an agent who
+          // picked an escalated case up (In Progress) had it escalated again
+          // on every run, half-hourly: another history row and another
+          // case.escalated webhook each time. The flag stays set when the
+          // status moves on; the escalate route sets it too.
+          isEscalated: false,
           createdAt: { lt: threshold },
           deletedAt: null,
         },
@@ -499,73 +540,19 @@ const handlers = {
   },
 
   /**
-   * Send each due step to the enrolled contact or lead.
+   * Send each due step to the enrolled contact or lead (services/sequenceSteps,
+   * which POST /api/sequences/process shares).
    *
    * A step was recorded as 'sent' and handed to no transport, a lead's step
    * failed outright (Email has no leadId), a deleted person was still
-   * "emailed", and pausing the sequence stopped nothing. It now goes through
-   * the mailer to the live person's address, unless that address or its
-   * domain is suppressed, and the email records what came back.
+   * "emailed", and pausing the sequence stopped nothing. It goes through the
+   * mailer to the live person's address, unless that address or its domain is
+   * suppressed. With no SMTP server it does nothing and says so, and a step
+   * moves on only once its mail has gone out.
    */
   async processSequenceSteps() {
-    const { sendEmail } = require('../services/mailer');
-    const due = await prisma.emailSequenceEnrollment.findMany({
-      where: { status: 'Active', nextSendAt: { lte: new Date() }, sequence: { status: 'Active' } },
-      include: { sequence: true },
-    });
-
-    let sent = 0;
-    for (const enrollment of due) {
-      const steps = Array.isArray(enrollment.sequence.steps) ? enrollment.sequence.steps : [];
-      const currentStep = steps[enrollment.currentStep];
-      if (!currentStep) {
-        await prisma.emailSequenceEnrollment.update({
-          where: { id: enrollment.id },
-          data: { status: 'Completed', completedAt: new Date() },
-        });
-        continue;
-      }
-
-      try {
-        const person = enrollment.contactId
-          ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, select: { email: true } })
-          : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null }, select: { email: true } });
-        const to = person?.email ? String(person.email).trim() : null;
-        if (to && !(await addressSuppressed(to))) {
-          // A step may name a template instead of carrying its own text.
-          const template = currentStep.templateId && !(currentStep.subject && currentStep.body)
-            ? await prisma.emailTemplate.findUnique({ where: { id: String(currentStep.templateId) } }).catch(() => null)
-            : null;
-          const subject = currentStep.subject || template?.subject || 'Sequence Email';
-          const body = currentStep.body || template?.body || '';
-          const delivery = await sendEmail(prisma, { to, subject, body });
-          await prisma.email.create({
-            data: {
-              subject, body, toEmail: to, status: delivery.status,
-              sentAt: delivery.delivered ? new Date() : null,
-              ...(enrollment.contactId && { contactId: enrollment.contactId }),
-            },
-          });
-          if (delivery.status !== 'failed') sent++;
-        }
-      } catch (e) { /* Individual send failures don't stop sequence */ }
-
-      const nextStep = enrollment.currentStep + 1;
-      const nextStepDef = steps[nextStep];
-      const nextSendAt = nextStepDef
-        ? new Date(Date.now() + (nextStepDef.delayDays || 1) * 86400000)
-        : null;
-
-      await prisma.emailSequenceEnrollment.update({
-        where: { id: enrollment.id },
-        data: {
-          currentStep: nextStep,
-          nextSendAt,
-          ...(nextStep >= steps.length ? { status: 'Completed', completedAt: new Date() } : {}),
-        },
-      });
-    }
-    return { processed: due.length, sent };
+    const { processDueSteps } = require('../services/sequenceSteps');
+    return processDueSteps(prisma, { isSuppressed: addressSuppressed });
   },
 };
 

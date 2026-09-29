@@ -3,7 +3,7 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere } = require('../middleware/access');
 const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
-const { sendEmail } = require('../services/mailer');
+const { processDueSteps } = require('../services/sequenceSteps');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -266,79 +266,16 @@ async function suppressed(prisma, address) {
   return !!(await prisma.emailSuppression.findFirst({ where: { email: { in: [email, `@${email.split('@')[1]}`] } }, select: { id: true } }));
 }
 
-// POST /process - Process due enrollments (called by job scheduler)
-// Sends each due step as the scheduler's processSequenceSteps job does. Every
-// step was recorded as sent and nothing went out; a lead's was not recorded.
+// POST /process - Process due enrollments (also run by the job scheduler)
+// The scheduler's processSequenceSteps job and this share one implementation
+// (services/sequenceSteps): each used to carry its own copy of the loop, and
+// both counted a step as sent when the mail was only logged and moved the
+// enrollment on whether or not it went. With no SMTP server nothing is sent
+// and the answer says so.
 router.post('/process', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    // Only for sequences that are running: pausing one held nothing back.
-    const due = await prisma.emailSequenceEnrollment.findMany({
-      where: { status: 'Active', nextSendAt: { lte: new Date() }, sequence: { status: 'Active' } },
-      include: { sequence: true },
-    });
-
-    let sent = 0;
-    let completed = 0;
-
-    for (const enrollment of due) {
-      const steps = stepsOf(enrollment.sequence);
-
-      if (enrollment.currentStep >= steps.length) {
-        await prisma.emailSequenceEnrollment.update({
-          where: { id: enrollment.id },
-          data: { status: 'Completed', completedAt: new Date() },
-        });
-        completed++;
-        continue;
-      }
-
-      const step = steps[enrollment.currentStep];
-
-      // To the live contact's or lead's address, unless it or its domain is
-      // suppressed, with the step's template when it carries no text itself.
-      // Email has no lead column, so only a contact's is filed on them.
-      try {
-        const person = enrollment.contactId
-          ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, select: { email: true } })
-          : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null }, select: { email: true } });
-        const to = person?.email ? String(person.email).trim() : null;
-        if (to && !(await suppressed(prisma, to))) {
-          const template = step.templateId && !(step.subject && step.body)
-            ? await prisma.emailTemplate.findUnique({ where: { id: String(step.templateId) } }).catch(() => null)
-            : null;
-          const subject = step.subject || template?.subject || `Sequence step ${enrollment.currentStep + 1}`;
-          const body = step.body || template?.body || '';
-          const delivery = await sendEmail(prisma, { to, subject, body });
-          await prisma.email.create({
-            data: {
-              subject, body, toEmail: to, status: delivery.status,
-              sentAt: delivery.delivered ? new Date() : null,
-              ...(enrollment.contactId && { contactId: enrollment.contactId }),
-            },
-          });
-          if (delivery.status !== 'failed') sent++;
-        }
-      } catch (e) { /* one failed send does not stop the batch, as in the job */ }
-
-      // Advance to next step
-      const nextStep = enrollment.currentStep + 1;
-      if (nextStep >= steps.length) {
-        await prisma.emailSequenceEnrollment.update({
-          where: { id: enrollment.id },
-          data: { currentStep: nextStep, status: 'Completed', completedAt: new Date(), nextSendAt: null },
-        });
-        completed++;
-      } else {
-        const nextDelay = steps[nextStep]?.delayDays || 1;
-        await prisma.emailSequenceEnrollment.update({
-          where: { id: enrollment.id },
-          data: { currentStep: nextStep, nextSendAt: new Date(Date.now() + nextDelay * 86400000) },
-        });
-      }
-    }
-
-    res.json({ processed: due.length, sent, completed });
+    res.json(await processDueSteps(prisma, { isSuppressed: address => suppressed(prisma, address) }));
   } catch (err) { next(err); }
 });
 

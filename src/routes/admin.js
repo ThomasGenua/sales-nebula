@@ -6,6 +6,7 @@ const { hashApiKey } = require('../utils/apiKeys');
 const { permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { LEASE_PREFIX } = require('../utils/lease');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -20,7 +21,9 @@ const USER_PREFS = 'user_prefs:';
 router.get('/config', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const configs = await prisma.adminConfig.findMany({ where: { NOT: { key: { startsWith: USER_PREFS } } } });
+    // Not the leases either (utils/lease): rows the app takes and gives back
+    // to keep two processes from doing one thing twice, not settings.
+    const configs = await prisma.adminConfig.findMany({ where: { NOT: [{ key: { startsWith: USER_PREFS } }, { key: { startsWith: LEASE_PREFIX } }] } });
     const obj = {};
     configs.forEach(c => { obj[c.key] = c.value; });
     res.json(obj);
@@ -33,6 +36,9 @@ router.put('/config', requirePermission('settings', 'edit'), async (req, res, ne
     const entries = Object.entries(req.body);
     if (entries.some(([key]) => key.startsWith(USER_PREFS))) {
       return res.status(400).json({ error: 'user_prefs:* keys are personal preferences; each user sets their own at /api/users/me/preferences' });
+    }
+    if (entries.some(([key]) => key.startsWith(LEASE_PREFIX))) {
+      return res.status(400).json({ error: `${LEASE_PREFIX}* keys belong to the application and cannot be set here` });
     }
     for (const [key, value] of entries) {
       await prisma.adminConfig.upsert({
