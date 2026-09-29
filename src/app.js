@@ -88,19 +88,33 @@ function createApp(rawPrisma) {
   const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:7544')
     .split(',').map(s => s.trim());
 
-  app.use(cors({
-    origin: (origin, cb) => {
-      if (!origin || allowedOrigins.includes(origin) || !isProd) {
-        cb(null, true);
-      } else {
-        cb(new Error('CORS: origin not allowed'));
-      }
-    },
+  // A page talking to the server that served it is not making a cross-origin
+  // request, but the browser still sends its Origin: on POST/PUT/DELETE, and on
+  // the module scripts, styles and fonts a Vite build loads with `crossorigin`.
+  // Only the listed origins passed, so the app opened at any other address of
+  // the same server (127.0.0.1 where FRONTEND_URL says localhost, a LAN name)
+  // had its own scripts and stylesheets refused with "CORS: origin not
+  // allowed" and showed a blank page. Same host as the request is allowed;
+  // any other origin still has to be listed in FRONTEND_URL.
+  const isSameOrigin = (origin, req) => {
+    try { return new URL(origin).host === req.headers.host; } catch (err) { return false; }
+  };
+
+  const corsOptions = {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID', 'If-Match', 'X-CSRF-Token', 'X-Session-Mode'],
     exposedHeaders: ['X-Request-ID', 'X-Cache', 'Retry-After'],
     maxAge: 86400,
+  };
+
+  app.use(cors((req, cb) => {
+    const origin = req.headers.origin;
+    if (!origin || allowedOrigins.includes(origin) || !isProd || isSameOrigin(origin, req)) {
+      cb(null, { ...corsOptions, origin: true });
+    } else {
+      cb(new Error('CORS: origin not allowed'));
+    }
   }));
 
   // ─── BODY PARSING (with size limits) ───
