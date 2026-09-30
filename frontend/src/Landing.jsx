@@ -887,8 +887,8 @@ function AccessForm() {
             </label>
             <select id="dep" style={field} value={form.interestedIn} onChange={set("interestedIn")}>
               <option value="cloud">Hosted for us</option>
-              <option value="self-host">Self-hosted</option>
-              <option value="either">Either</option>
+              <option value="self-hosted">Self-hosted</option>
+              <option value="both">Either</option>
             </select>
           </div>
         </div>
