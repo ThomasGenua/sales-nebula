@@ -119,8 +119,12 @@ body {
   background: var(--sn-void);
   color: var(--sn-body);
   font-family: 'Poppins', system-ui, sans-serif;
-  overflow-x: hidden;
-  overflow-y: auto;
+  /* Not hidden/auto: with html clipping too, body stopped being passed up to
+     the viewport and became a scroll container of its own, which never scrolls
+     (its height is its content), so a sticky element inside it, the landing
+     header, scrolled away with the page. clip trims the same overflow without
+     making a scroll container. */
+  overflow-x: clip;
   touch-action: manipulation;
 }
 

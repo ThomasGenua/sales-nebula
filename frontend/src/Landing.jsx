@@ -67,12 +67,34 @@ function Header({ go }) {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Freeze the page behind an open menu. On <html>, not <body>: a body with an
+  // overflow of its own is a scroll container, and the sticky header would come
+  // unstuck the moment the menu opened.
   useEffect(() => {
-    document.body.style.overflow = menuOpen ? "hidden" : "";
+    document.documentElement.style.overflow = menuOpen ? "hidden" : "";
     return () => {
-      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
     };
   }, [menuOpen]);
+
+  // The menu button is hidden from 641px up. Turn a phone sideways with the menu
+  // open and the page would stay frozen behind a menu that can no longer be closed.
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 641px)");
+    const onChange = (e) => {
+      if (e.matches) setMenuOpen(false);
+    };
+    wide.addEventListener?.("change", onChange);
+    return () => wide.removeEventListener?.("change", onChange);
+  }, []);
+
+  // The menu is part of the header, so it is closed first and the scroll waits
+  // a frame: measured while it is open, a section sits lower than it will once
+  // the menu is gone.
+  const goTo = (id) => {
+    setMenuOpen(false);
+    window.requestAnimationFrame(() => scrollTo(id));
+  };
 
   const links = [
     ["Product", "#product"],
@@ -216,8 +238,7 @@ function Header({ go }) {
               href={href}
               onClick={(e) => {
                 e.preventDefault();
-                setMenuOpen(false);
-                scrollTo(href.slice(1));
+                goTo(href.slice(1));
               }}
               style={{
                 fontFamily: body,
@@ -232,18 +253,35 @@ function Header({ go }) {
           ))}
           <button
             type="button"
+            onClick={() => goTo("access")}
+            style={{
+              marginTop: 8,
+              fontFamily: body,
+              fontSize: 15,
+              fontWeight: 700,
+              color: C.cta,
+              background: C.amber,
+              border: "none",
+              borderRadius: 8,
+              padding: "12px 16px",
+              cursor: "pointer",
+            }}
+          >
+            Request access
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setMenuOpen(false);
               go("/login");
             }}
             style={{
-              marginTop: 8,
               fontFamily: body,
               fontSize: 15,
               fontWeight: 600,
-              color: C.cta,
-              background: C.amber,
-              border: "none",
+              color: C.cream,
+              background: "transparent",
+              border: `1px solid ${C.rule}`,
               borderRadius: 8,
               padding: "12px 16px",
               cursor: "pointer",
@@ -729,7 +767,6 @@ function AccessForm() {
     color: C.cream,
     fontSize: 15,
     fontFamily: body,
-    outline: "none",
   };
   const label = {
     display: "block",
@@ -887,8 +924,8 @@ function AccessForm() {
             </label>
             <select id="dep" style={field} value={form.interestedIn} onChange={set("interestedIn")}>
               <option value="cloud">Hosted for us</option>
-              <option value="self-host">Self-hosted</option>
-              <option value="either">Either</option>
+              <option value="self-hosted">Self-hosted</option>
+              <option value="both">Either</option>
             </select>
           </div>
         </div>
@@ -1331,6 +1368,9 @@ export default function Landing({ go }) {
           .sn-laptop { margin-left: 0; width: 100%; }
         }
         select option { background: var(--sn-raised); color: var(--sn-cream); }
+        /* The header is sticky: an anchor lands its section below it, not under it.
+           (The Request access heading sat 5px behind it at phone width.) */
+        #product, #workflow, #access { scroll-margin-top: 24px; }
       `}</style>
       <Header go={go} />
       <Hero go={go} />
@@ -1481,7 +1521,6 @@ export function AcceptInvitePage({ go }) {
     color: C.cream,
     fontSize: 14,
     fontFamily: body,
-    outline: "none",
   };
   const label = {
     display: "block",

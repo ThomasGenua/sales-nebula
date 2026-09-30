@@ -8,6 +8,8 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 // Pure helpers mirrored from src/routes/signup.js so they can be tested
 // without a database. Any drift between these and the route is a bug.
@@ -154,6 +156,26 @@ describeApi('Public signup', () => {
   test('rejects an unknown interest value', async () => {
     const res = await request(app).post('/api/signup').send({ email: `x${Date.now()}@corp.com`, interestedIn: 'telepathy' });
     expect(res.status).toBe(400);
+  });
+
+  // The landing page's Deploy preference select is where these values come
+  // from. It offered "self-host" and "either" while this route wants
+  // "self-hosted" and "both", so two of its three choices were refused with an
+  // error about a field the visitor never saw. The options are read from the
+  // form's source so the two ends cannot drift apart again.
+  test('accepts every Deploy preference the landing form offers, and records it as chosen', async () => {
+    const source = fs.readFileSync(path.join(__dirname, '../frontend/src/Landing.jsx'), 'utf8');
+    const select = source.match(/<select id="dep"[\s\S]*?<\/select>/);
+    expect(select).not.toBeNull();
+    const values = [...select[0].matchAll(/<option value="([^"]+)"/g)].map(m => m[1]);
+    expect(values.length).toBeGreaterThanOrEqual(3);
+    for (const value of values) {
+      const address = `deploy-${value}-${Date.now()}@examplecorp.com`;
+      const res = await request(app).post('/api/signup').send({ email: address, interestedIn: value });
+      expect([value, res.status, res.body.error]).toEqual([value, 201, undefined]);
+      const stored = await prisma.signupRequest.findFirst({ where: { email: address } });
+      expect([value, stored.interestedIn]).toEqual([value, value]);
+    }
   });
 
   test('accepts a valid request and returns a verification link in dev', async () => {
