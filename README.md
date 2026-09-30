@@ -1088,16 +1088,28 @@ Public signup captures a **request**, never a user:
 
 1. A visitor submits the form. A `SignupRequest` is created and a
    verification token is emailed. No account exists yet.
-2. The visitor confirms the address. The request becomes `Verified`.
-3. An administrator approves it, which issues a `UserInvite`.
+2. The visitor confirms the address. The request becomes `Verified`, and
+   everyone who can approve access (`users: full`) is told: a notification
+   in the app and an email each.
+3. An administrator reviews it under **Access requests** in the app (or
+   through the API) and approves it, which issues a `UserInvite`, or
+   declines it. If the server sent no email (no SMTP, or it refused), the
+   screen shows the invite link so it can be passed on by hand.
 4. The invitee sets a password against the invite token. Only this
    step creates a `User`.
 
-Tokens are stored as SHA-256 hashes, never in plaintext, and are
-single-use. Verification links last 48 hours, invites 7 days. The
-endpoint returns an identical response for known and unknown addresses,
-so it cannot be used to enumerate accounts. Disposable email domains are
-rejected. Public endpoints carry their own tighter rate limits.
+Tokens are stored as SHA-256 hashes, never in plaintext. An invite token
+works once. A verification link can be opened again and says the address
+is already confirmed, and does nothing else. Verification links last 48
+hours, invites 7 days. The endpoint returns an identical response for
+known and unknown addresses, so it cannot be used to enumerate accounts.
+Disposable email domains are rejected. Public endpoints carry their own
+tighter rate limits.
+
+What a visitor typed is shown to reviewers as plain text: in the alert
+email it is one line, cut to 300 characters, with links defused. Alert
+emails are capped at 30 requests an hour per process, after which
+reviewers are told in the app only.
 
 In non-production the API returns `devVerifyUrl` and `devInviteUrl` in
 the response body, so the whole flow is testable without an SMTP server.

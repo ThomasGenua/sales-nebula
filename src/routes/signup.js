@@ -5,6 +5,7 @@ const { authenticate, requirePermission, validatePassword, signAccessToken, sign
 const { wantsCookieSession, setSessionCookies } = require('../utils/sessionCookies');
 const { auditMiddleware } = require('../middleware/audit');
 const { createLimiter } = require('../middleware/rateLimit');
+const { alertReviewers } = require('../services/accessRequestAlerts');
 const {
   sendVerificationEmail,
   sendInviteEmail,
@@ -173,16 +174,31 @@ router.post('/verify', verifyLimiter, async (req, res, next) => {
     // in the review queue.
     if (request.status === 'Rejected') return res.status(409).json({ error: 'This request is no longer open. Request access again if you still need an account.' });
     if (request.verifiedAt) {
-      return res.json({ verified: true, alreadyVerified: true, email: request.email, message: 'Your email is already confirmed. We will be in touch once your account is ready.' });
+      // A second click, or the same link opened on another device: say the
+      // address is confirmed rather than call the link invalid. The address is
+      // not echoed back; whoever holds the token only learns where it stands.
+      return res.json({
+        verified: true, alreadyVerified: true,
+        message: request.status === 'Approved'
+          ? 'Your request was approved. Check your inbox for your invitation.'
+          : 'Your email is already confirmed. We will be in touch once your account is ready.',
+      });
     }
     if (request.verifyExpiresAt && new Date() > new Date(request.verifyExpiresAt)) {
       return res.status(410).json({ error: 'That verification link has expired. Request a new one.', expired: true });
     }
 
+    // The token stays (only its expiry goes): a second click on the link is then
+    // answered by the branches above, where clearing it made every replay "not
+    // valid", including those for a request already approved or declined.
     const updated = await prisma.signupRequest.update({
       where: { id: request.id },
-      data: { status: 'Verified', verifiedAt: new Date(), verifyTokenHash: null, verifyExpiresAt: null },
+      data: { status: 'Verified', verifiedAt: new Date(), verifyExpiresAt: null },
     });
+
+    // The request can be reviewed now: tell those who can review it. The
+    // visitor's confirmation does not wait for that, or fail with it.
+    alertReviewers(prisma, updated).catch(err => console.error('[access-request-alert]', err.message));
 
     res.json({
       verified: true, email: updated.email,
@@ -278,6 +294,7 @@ router.get('/requests/stats', authenticate, requirePermission('users', 'read'), 
       inPeriod: recent.length,
       pendingReview: all.filter(r => r.status === 'Verified').length,
       awaitingEmailConfirmation: all.filter(r => r.status === 'Pending').length,
+      approved: all.filter(r => r.status === 'Approved').length,
       converted: all.filter(r => r.status === 'Converted').length,
       rejected: all.filter(r => r.status === 'Rejected').length,
       verificationRate: all.length ? +((verified.length / all.length) * 100).toFixed(1) : 0,

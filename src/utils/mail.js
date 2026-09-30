@@ -138,6 +138,60 @@ async function sendPasswordResetEmail({ to, firstName, resetUrl }) {
   return sendMail({ to, subject, text, html });
 }
 
+/**
+ * A visitor's words as one short line, for a message an administrator reads.
+ * Nobody has vetted them, so no line breaks to lay out a fake instruction, no
+ * control characters, and links defused (the scheme's "://" is bracketed) so a
+ * mail client will not turn them into something to click.
+ */
+function oneLine(value, max = 300) {
+  const line = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/:\/\//g, '[://]');
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+const DEPLOY_LABELS = { cloud: 'Hosted for them', 'self-hosted': 'Self-hosted', both: 'Either' };
+
+/** The one-line name an access request goes by: their name, else their address. */
+function requesterName(request) {
+  return oneLine([request.firstName, request.lastName].filter(Boolean).join(' ') || request.email, 80);
+}
+
+/**
+ * Tell someone who can approve access that a visitor has confirmed their
+ * address and is waiting. Everything the visitor typed is shown as plain text.
+ */
+async function sendAccessRequestAlert({ to, firstName, request }) {
+  const name = firstName || 'there';
+  const who = requesterName(request);
+  const subject = `New access request: ${oneLine(request.company ? `${who}, ${request.company}` : who, 100)}`;
+  const reviewUrl = appUrl('/app/accessRequests');
+  const details = [
+    ['Name', who],
+    ['Email', oneLine(request.email, 120)],
+    ['Company', request.company && oneLine(request.company, 120)],
+    ['Company size', request.companySize && oneLine(request.companySize, 20)],
+    ['Deploy preference', DEPLOY_LABELS[request.interestedIn] || (request.interestedIn && oneLine(request.interestedIn, 20))],
+    ['Replacing', request.useCase && oneLine(request.useCase, 300)],
+  ].filter(([, value]) => value);
+  const text = `Hi ${name},\n\n${who} asked for access to Sales Nebula and has confirmed their email address. The request is waiting for your review.\n\n${details.map(([label, value]) => `${label}: ${value}`).join('\n')}\n\nReview it in Sales Nebula: ${reviewUrl}\n`;
+  const rows = details
+    .map(([label, value]) => `<tr><td style="padding:4px 14px 4px 0;color:#7E8598;white-space:nowrap;vertical-align:top;">${escapeHtml(label)}</td><td style="padding:4px 0;color:#F0EDE5;">${escapeHtml(value)}</td></tr>`)
+    .join('');
+  const html = wrapHtml(
+    'New access request',
+    `<p>Hi ${escapeHtml(name)},</p>
+     <p><strong style="color:#F0EDE5">${escapeHtml(who)}</strong> asked for access to Sales Nebula and has confirmed their email address. The request is waiting for your review.</p>
+     <table role="presentation" cellspacing="0" cellpadding="0" style="margin:8px 0 4px;font-size:14px;">${rows}</table>
+     <p style="padding:18px 0;"><a href="${reviewUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Review the request</a></p>
+     <p style="font-size:13px;color:#7E8598;">What they typed is shown as plain text, with links defused. You are told because you can approve access.</p>`
+  );
+  return sendMail({ to, subject, text, html });
+}
+
 /** Tell the old address that the account's email has changed. */
 async function sendEmailChangedNotice({ to, firstName, newEmail }) {
   const name = firstName || 'there';
@@ -171,6 +225,9 @@ module.exports = {
   sendInviteEmail,
   sendWelcomeEmail,
   sendPasswordResetEmail,
+  sendAccessRequestAlert,
+  requesterName,
+  oneLine,
   appUrl,
   appBaseUrl,
 };
