@@ -82,6 +82,13 @@ function parseAppPath(pathname) {
 }
 function useAuth() { return useContext(AuthContext); }
 
+const PERMISSION_LEVELS = { none: 0, read: 1, edit: 2, full: 3 };
+/** Whether the user's role grants at least `level` on `module`, as the API decides it. */
+function can(user, module, level) {
+  const held = user?.role?.permissions?.find(p => p.module === module)?.level;
+  return (PERMISSION_LEVELS[held] || 0) >= (PERMISSION_LEVELS[level] || 0);
+}
+
 /** The CSRF token the server set beside the session cookies. */
 function csrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)sn_csrf=([^;]+)/);
@@ -3080,6 +3087,260 @@ function ApprovalsPage() {
   );
 }
 
+// ── Access requests ──
+// People who asked for access from the website. They confirm their address from
+// the link they are emailed and then wait here: approving one issues an invite
+// (the only way an account is made) and declining closes it. Everything goes
+// through /api/signup, where approving and declining take users: full.
+const ACCESS_TABS = [
+  ["Verified", "Awaiting review", "pendingReview"],
+  ["Approved", "Invited", "approved"],
+  ["Converted", "Joined", "converted"],
+  ["Rejected", "Declined", "rejected"],
+  ["Pending", "Unconfirmed", "awaitingEmailConfirmation"],
+  ["", "All", "total"],
+];
+const ACCESS_STATUS = {
+  Verified: { label: "Awaiting review", color: "warning" },
+  Approved: { label: "Invited", color: "info" },
+  Converted: { label: "Joined", color: "success" },
+  Rejected: { label: "Declined", color: "danger" },
+  Pending: { label: "Email not confirmed", color: "neutral" },
+};
+const ACCESS_DEPLOY = { cloud: "Hosted for them", "self-hosted": "Self-hosted", both: "Either" };
+
+function AccessRequestsPage() {
+  const { apiFetch, user } = useAuth();
+  const canDecide = can(user, "users", "full");
+  const [tab, setTab] = useState("Verified");
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState(null);
+  const [invites, setInvites] = useState([]);
+  const [roles, setRoles] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [approving, setApproving] = useState(null);
+  const [declining, setDeclining] = useState(null);
+  const [link, setLink] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      apiFetch(`/signup/requests?limit=100${tab ? `&status=${tab}` : ""}`),
+      apiFetch("/signup/requests/stats"),
+      apiFetch("/signup/invites?status=Pending"),
+    ])
+      .then(([list, counts, pending]) => {
+        setRows(list.data || []);
+        setTotal(list.total || 0);
+        setStats(counts);
+        setInvites(Array.isArray(pending) ? pending : []);
+      })
+      .catch(e => setError(e.message || "Could not load access requests"))
+      .finally(() => setLoading(false));
+  }, [apiFetch, tab]);
+  useEffect(() => { load(); }, [load]);
+
+  // Roles are listed only to people who may see roles; anyone else's approvals
+  // simply take the default role, which the API chooses.
+  const openApprove = request => {
+    if (roles === null) apiFetch("/users/roles/all").then(d => setRoles(d.data || [])).catch(() => setRoles([]));
+    setApproving({ request, roleId: "", message: "" });
+  };
+  const defaultRoleId = roles?.find(r => r.name === "Sales Rep")?.id || roles?.[0]?.id || "";
+
+  // When the server could not send the email, the invite's link is shown to
+  // the person who made it, to pass on. It cannot be fetched again.
+  const invited = (result, email) => {
+    if (result.emailSent) {
+      setToast({ message: `Invite emailed to ${email}`, type: "success" });
+    } else {
+      setCopied(false);
+      setLink({ email, url: result.inviteUrl, expiresAt: result.expiresAt });
+    }
+  };
+
+  const approve = async () => {
+    setBusy(true);
+    try {
+      const { request, roleId, message } = approving;
+      const result = await apiFetch(`/signup/requests/${request.id}/approve`, {
+        method: "POST",
+        body: { roleId: roleId || defaultRoleId || undefined, message: message.trim() || undefined },
+      });
+      setApproving(null);
+      invited(result, request.email);
+      load();
+    } catch (e) { setToast({ message: e.message, type: "error" }); }
+    finally { setBusy(false); }
+  };
+
+  const decline = async () => {
+    setBusy(true);
+    try {
+      await apiFetch(`/signup/requests/${declining.request.id}/reject`, {
+        method: "POST",
+        body: { reason: declining.reason.trim() || undefined },
+      });
+      setDeclining(null);
+      setToast({ message: "Request declined", type: "success" });
+      load();
+    } catch (e) { setToast({ message: e.message, type: "error" }); }
+    finally { setBusy(false); }
+  };
+
+  const resend = async (request, invite) => {
+    setBusy(true);
+    try {
+      const result = await apiFetch(`/signup/invites/${invite.id}/resend`, { method: "POST", body: {} });
+      invited(result, request.email);
+      load();
+    } catch (e) { setToast({ message: e.message, type: "error" }); }
+    finally { setBusy(false); }
+  };
+
+  // Where the clipboard is not available the field is still selectable.
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(link.url); setCopied(true); } catch { /* nothing more to do */ }
+  };
+
+  const inviteFor = email => invites.find(i => String(i.email).toLowerCase() === String(email).toLowerCase());
+  const date = value => (value ? new Date(value).toLocaleDateString(...fmt()) : "");
+
+  return (
+    <div>
+      <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-1">Access requests</h1>
+      <p className="text-xs text-[#7E8598] mb-4">
+        People who asked for access from the website. Approving one sends them an invite.
+        {!canDecide && " You can see requests; approving or declining takes permission to manage users."}
+      </p>
+
+      <div className="flex flex-wrap gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit max-w-full">
+        {ACCESS_TABS.map(([status, label, key]) => (
+          <button key={label} type="button" aria-pressed={tab === status} onClick={() => setTab(status)}
+            className={`px-3 py-2 rounded-md text-sm font-medium transition-colors touch-manipulation ${tab === status ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623]" : "text-[#7E8598]"}`}>
+            {label}{" "}
+            {stats && stats[key] > 0 && (status === "Verified"
+              ? <span className="ml-1.5 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{stats[key]}</span>
+              : <span className="ml-1.5 text-xs text-[#4A5168]">{stats[key]}</span>)}
+          </button>
+        ))}
+      </div>
+
+      {loading ? <Spinner /> : error ? <ErrorState message={error} onRetry={load} /> : rows.length === 0 ? (
+        <EmptyState icon={Inbox}
+          title={tab === "Verified" ? "Nothing is waiting for review" : "No requests here"}
+          subtitle={tab === "Verified" ? "New requests show up here once the visitor has confirmed their email." : undefined} />
+      ) : (
+        <div className="space-y-2">
+          {rows.map(r => {
+            const status = ACCESS_STATUS[r.status] || { label: r.status, color: "neutral" };
+            const name = [r.firstName, r.lastName].filter(Boolean).join(" ");
+            const invite = r.status === "Approved" ? inviteFor(r.email) : null;
+            const about = [r.company, r.companySize && `${r.companySize} people`, ACCESS_DEPLOY[r.interestedIn], r.createdAt && `Asked ${date(r.createdAt)}`].filter(Boolean);
+            return (
+              <div key={r.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-[#F0EDE5] break-words">{name || r.email}</span>
+                      <Badge color={status.color}>{status.label}</Badge>
+                      {r.emailClass?.freeProvider && <span title="A free email provider, not a company address"><Badge color="neutral">Personal email</Badge></span>}
+                    </div>
+                    <div className="text-xs text-[#7E8598] mt-1 break-all">{name ? `${r.email}` : ""}</div>
+                    {about.length > 0 && <div className="text-xs text-[#4A5168] mt-0.5">{about.join(" · ")}</div>}
+                    {r.useCase && <p className="text-sm text-[#C8C2B4] mt-2 break-words line-clamp-3" title={r.useCase}>Replacing: {r.useCase}</p>}
+                    {r.status === "Rejected" && r.rejectionReason && <p className="text-xs text-[#7E8598] mt-2">Declined: {r.rejectionReason}</p>}
+                    {r.status === "Pending" && <p className="text-xs text-[#4A5168] mt-2">Waiting for them to confirm their email. Nothing to review yet.</p>}
+                    {r.status === "Approved" && (
+                      <p className="text-xs text-[#4A5168] mt-2">
+                        {invite ? (invite.expired ? "The invite has expired; resending gives it a new link." : `Invite sent, valid until ${date(invite.expiresAt)}.`) : "No invite is pending: it was accepted, revoked or has lapsed."}
+                      </p>
+                    )}
+                  </div>
+                  {canDecide && (
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {(r.status === "Verified" || r.status === "Rejected") && <Button size="sm" onClick={() => openApprove(r)}>Approve</Button>}
+                      {(r.status === "Verified" || r.status === "Pending") && <Button size="sm" variant="danger" onClick={() => setDeclining({ request: r, reason: "" })}>Decline</Button>}
+                      {invite && <Button size="sm" variant="secondary" disabled={busy} onClick={() => resend(r, invite)}>Resend invite</Button>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {total > rows.length && <p className="text-xs text-[#4A5168] pt-1">Showing the newest {rows.length} of {total}.</p>}
+        </div>
+      )}
+
+      <Modal open={!!approving} onClose={() => !busy && setApproving(null)} title="Approve access request">
+        {approving && (
+          <div className="space-y-4">
+            <p className="text-sm text-[#C8C2B4]">
+              Send <strong className="text-[#F0EDE5] break-all">{approving.request.email}</strong> an invite to Sales Nebula.
+              They choose a password from the link, and their account is made then.
+            </p>
+            {roles?.length > 0 && (
+              <Select label="Role" value={approving.roleId || defaultRoleId}
+                onChange={v => setApproving(a => ({ ...a, roleId: v }))}
+                options={roles.map(r => ({ value: r.id, label: r.name }))} />
+            )}
+            {roles !== null && roles.length === 0 && <p className="text-xs text-[#7E8598]">They will be given the default role, Sales Rep.</p>}
+            <TextArea label="Note in the invite (optional)" value={approving.message}
+              onChange={v => setApproving(a => ({ ...a, message: v }))} rows={3} />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => setApproving(null)} disabled={busy}>Cancel</Button>
+              <Button onClick={approve} disabled={busy}>{busy ? "Sending..." : "Approve and send invite"}</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!declining} onClose={() => !busy && setDeclining(null)} title="Decline access request">
+        {declining && (
+          <div className="space-y-4">
+            <p className="text-sm text-[#C8C2B4]">
+              Close the request from <strong className="text-[#F0EDE5] break-all">{declining.request.email}</strong>.
+              They are not emailed about it.
+            </p>
+            <TextArea label="Reason (optional, kept on the request for your team)" value={declining.reason}
+              onChange={v => setDeclining(d => ({ ...d, reason: v }))} rows={3} />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => setDeclining(null)} disabled={busy}>Cancel</Button>
+              <Button variant="danger" onClick={decline} disabled={busy}>{busy ? "Declining..." : "Decline request"}</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!link} onClose={() => setLink(null)} title="Send them this link">
+        {link && (
+          <div className="space-y-3">
+            <p className="text-sm text-[#C8C2B4]">
+              This server did not email the invite (email may not be set up), so nothing has been sent.
+              Give <strong className="text-[#F0EDE5] break-all">{link.email}</strong> this link.
+              It works once{link.expiresAt ? ` and expires ${date(link.expiresAt)}` : ""}, and it is not shown again.
+            </p>
+            <input readOnly value={link.url || ""} onFocus={e => e.target.select()} aria-label="Invite link"
+              className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-xs font-mono text-[#F0EDE5] focus:outline-none focus:border-[#F5A623]" />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" icon={Copy} onClick={copyLink}>{copied ? "Copied" : "Copy link"}</Button>
+              <Button onClick={() => setLink(null)}>Done</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
 // ── Analytics ──
 function AnalyticsPage() {
   const { data, loading } = useApi("/analytics/overview");
@@ -5468,6 +5729,7 @@ const NAV_ITEMS = [
       },
     ],
   },
+  { id: "accessRequests", label: "Access requests", icon: Inbox, hideInDemo: true, requires: { module: "users", level: "read" } },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true },
 ];
@@ -5479,10 +5741,10 @@ function navContainsPage(item, page) {
 }
 
 function useVisibleNavItems() {
-  const { demoMode } = useAuth();
+  const { demoMode, user } = useAuth();
   return useMemo(
-    () => NAV_ITEMS.filter((item) => !(item.hideInDemo && demoMode)),
-    [demoMode],
+    () => NAV_ITEMS.filter((item) => !(item.hideInDemo && demoMode) && (!item.requires || can(user, item.requires.module, item.requires.level))),
+    [demoMode, user],
   );
 }
 
@@ -5943,7 +6205,7 @@ function AppShell({ go }) {
     reports: ReportsPage, surveys: SurveysPage, territories: TerritoriesPage,
     documents: DocumentsPage, tags: TagsPage, webhooks: WebhooksPage,
     partners: PartnersPage, assets: AssetsPage, notes: NotesPage,
-    sequences: SequencesPage, approvals: ApprovalsPage, analytics: AnalyticsPage,
+    sequences: SequencesPage, approvals: ApprovalsPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
     copilot: CopilotPage, chatter: ChatterPage, recycleBin: RecycleBinPage,
     import: ImportPage,
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,
