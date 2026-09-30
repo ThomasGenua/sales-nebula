@@ -77,6 +77,17 @@ function Header({ go }) {
     };
   }, [menuOpen]);
 
+  // The menu button is hidden from 641px up. Turn a phone sideways with the menu
+  // open and the page would stay frozen behind a menu that can no longer be closed.
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 641px)");
+    const onChange = (e) => {
+      if (e.matches) setMenuOpen(false);
+    };
+    wide.addEventListener?.("change", onChange);
+    return () => wide.removeEventListener?.("change", onChange);
+  }, []);
+
   // The menu is part of the header, so it is closed first and the scroll waits
   // a frame: measured while it is open, a section sits lower than it will once
   // the menu is gone.
