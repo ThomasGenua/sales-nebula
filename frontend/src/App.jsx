@@ -810,12 +810,16 @@ function MiniBarChart({ data = [], height = 120, label, valueKey = "value", labe
         {data.map((d, i) => {
           const pct = ((d[valueKey] || 0) / max) * 100;
           return (
-            <div key={i} className="flex-1 flex flex-col items-center gap-1 group">
+            // h-full, and the bar inside a flex-1 track: a percentage height needs a parent
+            // whose height is definite, and the column's was its content, so every bar was 0px tall.
+            <div key={i} className="flex-1 min-w-0 h-full flex flex-col items-center gap-1 group">
               <div className="text-[9px] text-[#4A5168] opacity-0 group-hover:opacity-100 transition-opacity font-mono">
                 {typeof d[valueKey] === "number" ? d[valueKey].toLocaleString(...fmt()) : d[valueKey]}
               </div>
-              <div className="w-full rounded-t" style={{ height: `${Math.max(pct, 2)}%`, backgroundColor: color, opacity: 0.7 + (pct / 300), transition: "height 0.3s ease" }} />
-              <div className="text-[8px] sm:text-[9px] text-[#4A5168] truncate w-full text-center">{d[labelKey]}</div>
+              <div className="flex-1 min-h-0 w-full flex items-end">
+                <div className="w-full rounded-t" style={{ height: `${Math.max(pct, 2)}%`, backgroundColor: color, opacity: 0.7 + (pct / 300), transition: "height 0.3s ease" }} />
+              </div>
+              <div className="text-[8px] sm:text-[9px] text-[#4A5168] truncate w-full text-center" title={d[labelKey]}>{d[labelKey]}</div>
             </div>
           );
         })}
@@ -1798,7 +1802,7 @@ function DashboardPage() {
   const rev = s.revenue || {};
 
   // Prepare chart data
-  const pipelineChartData = pipeline.slice(0, 8).map(st => ({ label: (st.stage || st._id || "").substring(0, 8), value: st.value || 0 }));
+  const pipelineChartData = pipeline.slice(0, 8).map(st => ({ label: st.stage || st._id || "", value: st.value || 0 }));
   const donutData = [
     { label: "Won", value: counts.wonDeals || 0 },
     { label: "Open", value: counts.openDeals || pipe.dealCount || 0 },
