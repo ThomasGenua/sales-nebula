@@ -223,8 +223,9 @@ describeApi('Public signup', () => {
 
   test('reports an already-confirmed email without erroring', async () => {
     const res = await request(app).post('/api/signup/verify').send({ token: verifyToken });
-    // The token is cleared on first use, so a replay is simply not found
-    expect([200, 404]).toContain(res.status);
+    // The token's hash is kept, so a replay finds the request and says so
+    expect(res.status).toBe(200);
+    expect(res.body.alreadyVerified).toBe(true);
   });
 
   test('does not reveal whether an address is already registered', async () => {
