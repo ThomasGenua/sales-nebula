@@ -47,7 +47,6 @@ export default function ResetPasswordPage({ go }) {
     color: "var(--sn-cream)",
     fontFamily: body,
     fontSize: 14,
-    outline: "none",
   };
 
   return (

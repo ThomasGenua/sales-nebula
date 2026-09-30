@@ -756,7 +756,6 @@ function AccessForm() {
     color: C.cream,
     fontSize: 15,
     fontFamily: body,
-    outline: "none",
   };
   const label = {
     display: "block",
@@ -1511,7 +1510,6 @@ export function AcceptInvitePage({ go }) {
     color: C.cream,
     fontSize: 14,
     fontFamily: body,
-    outline: "none",
   };
   const label = {
     display: "block",
