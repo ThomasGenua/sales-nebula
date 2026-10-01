@@ -10,12 +10,16 @@ Two paths, both of which end with the public site at `/` and the product at `/ap
 **Docker:**
 
 ```bash
-export JWT_SECRET=$(openssl rand -base64 48)   # signs sessions; keep it, and do not reuse one from an example
-docker compose up
+cp .env.example .env
+# Edit .env: set POSTGRES_PASSWORD, JWT_SECRET, INITIAL_ADMIN_EMAIL,
+# INITIAL_ADMIN_PASSWORD and your public FRONTEND_URL. Configure SMTP.
+docker compose up --build -d
 ```
 
-The image builds the front end during the Docker build, so nothing else is
-needed. In production the app refuses to start without a real `JWT_SECRET`
+The image builds the frontend and waits for migrations and first-administrator
+creation before starting the API. Production creates no demo users or records.
+See [Sales pilot setup](docs/SALES_PILOT.md) for credentials, workflows and backup
+verification. In production the app refuses to start without a real `JWT_SECRET`
 (at least 32 characters, and not a placeholder such as the one in `.env.example`),
 and `docker compose up` stops with a message if it is not set.
 
@@ -37,7 +41,8 @@ npm run build        # compile the React app
 npm start            # site and API together on :7544
 ```
 
-Sign in at `/login`. The seeded administrator is `thomas@salesnebula.com`
+Sign in at `/login` with the administrator configured during production setup.
+In a local development install, the seeded administrator is `thomas@salesnebula.com`
 with the password from `prisma/seed.js`. Staff credentials are never
 pre-filled on the public login form.
 
@@ -52,6 +57,18 @@ reached, the API creates and uses `data/sales-nebula.sqlite`. With
 blip cannot bring the app up on an empty SQLite file. Set
 `ALLOW_SQLITE_FALLBACK=true` to allow the fallback in production anyway, for
 example on a single-machine demo.
+
+## Sales pilot workflows
+
+The app now exposes lead conversion (contact, optional account and deal), email
+composition and sending from contacts/deals or saved drafts, quote product-line
+editing and totals, document preview/print, acceptance recording, and invoice
+creation from a quote. Related records can be opened from detail screens.
+Actions respect role permissions and the browser demo remains read-only.
+
+`npm run verify` runs the local release gate, including browser tests with a real
+API, PostgreSQL and a local SMTP server. GitHub Actions remains disabled. See
+[Sales pilot setup and verification](docs/SALES_PILOT.md).
 
 ## At a Glance
 
@@ -113,7 +130,8 @@ The API starts on `http://localhost:7544`. The seed script creates a demo admin 
 
 ```bash
 # Set required secrets
-export JWT_SECRET="your-production-secret"
+# Set POSTGRES_PASSWORD, JWT_SECRET, INITIAL_ADMIN_EMAIL and
+# INITIAL_ADMIN_PASSWORD in .env before the first startup.
 
 # Start all services (Postgres, Redis, API)
 docker compose up -d
@@ -122,7 +140,7 @@ docker compose up -d
 # API available at http://localhost:7544
 ```
 
-Docker Compose provisions PostgreSQL 16 with persistent volumes, Redis 7 for caching, the API server with health checks, and a one-shot migration container that applies schema and seeds demo data on first boot.
+Docker Compose provisions PostgreSQL 16 with persistent volumes, Redis 7 for caching, the API server with health checks, and a one-shot migration container that applies the schema and creates the first administrator without demo records.
 
 ---
 

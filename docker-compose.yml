@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ─── PostgreSQL Database ───
   postgres:
@@ -8,10 +6,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: salesnebula
-      POSTGRES_PASSWORD: snpassword
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a strong database password}"
       POSTGRES_DB: sales_nebula
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,8 +21,6 @@ services:
     image: redis:7-alpine
     container_name: sn-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -47,12 +41,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "7544:7544"
     environment:
       NODE_ENV: production
       PORT: 7544
-      DATABASE_URL: postgresql://salesnebula:snpassword@postgres:5432/sales_nebula?schema=public
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: salesnebula
+      PGPASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+      PGDATABASE: sales_nebula
       REDIS_URL: redis://redis:6379
       # Sessions are signed with this. There is deliberately no default: the
       # one that used to be here is published in this repository, and anyone
@@ -90,7 +90,7 @@ services:
       start_period: 15s
       retries: 3
 
-  # ─── Database Migration & Seed (run once) ───
+  # ─── Migrations and first administrator (no demo records) ───
   migrate:
     build:
       context: .
@@ -100,12 +100,20 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://salesnebula:snpassword@postgres:5432/sales_nebula?schema=public
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: salesnebula
+      PGPASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+      PGDATABASE: sales_nebula
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      NODE_ENV: production
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      INITIAL_ADMIN_FIRST_NAME: ${INITIAL_ADMIN_FIRST_NAME:-Administrator}
+      INITIAL_ADMIN_LAST_NAME: ${INITIAL_ADMIN_LAST_NAME:-}
     command: >
       sh -c "
         npx prisma migrate deploy &&
-        node prisma/seed.js &&
-        echo 'Migration and seed complete!'
+        node scripts/bootstrap-admin.js
       "
     restart: "no"
 

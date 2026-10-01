@@ -15,7 +15,11 @@
  */
 
 require('dotenv').config();
-const { execSync } = require('child_process');
+const { spawn } = require('child_process');
+const { pipeline } = require('stream/promises');
+const { createGzip } = require('zlib');
+const { databaseUrl } = require('./database-url');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -25,7 +29,7 @@ const UPLOAD_S3 = process.argv.includes('--upload-s3');
 
 async function backup() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const filename = `sn-backup-${timestamp}.sql.gz`;
+  const filename = `sn-backup-${timestamp}-${randomUUID().slice(0, 8)}.sql.gz`;
   const filepath = path.join(BACKUP_DIR, filename);
 
   // Ensure backup directory exists
@@ -34,21 +38,28 @@ async function backup() {
   console.log(`[Backup] Starting: ${filename}`);
 
   // Parse DATABASE_URL
-  const dbUrl = new URL(process.env.DATABASE_URL);
+  const dbUrl = new URL(databaseUrl());
   const pgHost = dbUrl.hostname;
   const pgPort = dbUrl.port || 5432;
-  const pgUser = dbUrl.username;
-  const pgPass = dbUrl.password;
-  const pgDb = dbUrl.pathname.slice(1).split('?')[0];
+  const pgUser = decodeURIComponent(dbUrl.username);
+  const pgPass = decodeURIComponent(dbUrl.password);
+  const pgDb = decodeURIComponent(dbUrl.pathname.slice(1));
 
   // Run pg_dump
   const env = { ...process.env, PGPASSWORD: pgPass };
   try {
-    execSync(
-      `pg_dump -h ${pgHost} -p ${pgPort} -U ${pgUser} -d ${pgDb} --no-owner --no-privileges | gzip > "${filepath}"`,
-      { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: 300000 }
-    );
+    const child = spawn('pg_dump', ['-h', pgHost, '-p', String(pgPort), '-U', pgUser, '-d', pgDb, '--no-owner', '--no-privileges'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000 });
+    let diagnostic = '';
+    child.stderr.on('data', chunk => { diagnostic += chunk.toString(); });
+    const completed = new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', code => code === 0 ? resolve() : reject(new Error(`pg_dump exited ${code}: ${diagnostic.trim()}`)));
+    });
+    const outcomes = await Promise.allSettled([completed, pipeline(child.stdout, createGzip(), fs.createWriteStream(filepath, { flags: 'wx' }))]);
+    const failure = outcomes.find(outcome => outcome.status === 'rejected');
+    if (failure) throw failure.reason;
   } catch (err) {
+    fs.rmSync(filepath, { force: true });
     console.error(`[Backup] pg_dump failed: ${err.message}`);
     process.exit(1);
   }
