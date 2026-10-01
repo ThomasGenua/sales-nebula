@@ -1,4 +1,7 @@
 node_modules
+src/generated
+*.db
+*.db-journal
 frontend/node_modules
 frontend/dist
 .git
@@ -7,3 +10,7 @@ frontend/dist
 dist
 .next
 coverage
+test-results
+playwright-report
+backups
+e2e

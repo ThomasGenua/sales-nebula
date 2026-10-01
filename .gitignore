@@ -8,3 +8,6 @@ prisma/schema.sqlite.prisma
 uploads/
 coverage/
 private-exports/
+test-results/
+playwright-report/
+backups/

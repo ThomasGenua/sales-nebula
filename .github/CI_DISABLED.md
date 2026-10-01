@@ -10,6 +10,16 @@ pull request as a passing build — there is no build.
 
 ## Verifying a change locally
 
+Use `npm run verify` for the complete local gate. Set `DATABASE_URL` to the
+throwaway test database and `MIGRATE_URL` to a separate empty test database.
+Install root and frontend dependencies with `npm ci` and Chromium with
+`npx playwright install chromium` first. The gate verifies migrations and drift,
+runs the schema checker and Jest, builds the frontend and runs browser journeys.
+It applies the schema once and preserves each suite's data cleanup. See
+[`docs/SALES_PILOT.md`](../docs/SALES_PILOT.md) for setup and ports.
+
+For backend-only checks:
+
 The suite needs PostgreSQL. Point `DATABASE_URL` at a throwaway database, build
 its schema from the migrations, and run each suite on its own:
 

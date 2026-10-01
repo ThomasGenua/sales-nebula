@@ -39,65 +39,83 @@ const router = createCrudRouter('lead', 'leads', {
         for (const [asked, module] of [[createAccount, 'accounts'], [createDeal, 'deals']]) {
           if (asked && !permits(req, module, 'edit')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
         }
-        const result = {};
-
-        // Create account from lead company if requested
-        let accountId = null;
-        if (createAccount && lead.company) {
-          // Owned by whoever converted the lead, as the deal is: with no
-          // owner, a Private default hid the account and contact from them.
-          result.account = await prisma.account.create({
-            data: {
-              name: lead.company,
-              type: 'Prospect',
-              phone: lead.phone,
-              ownerId: req.userId,
-              createdById: req.userId,
-            },
-          });
-          accountId = result.account.id;
+        let closeDate;
+        if (createDeal && req.body.dealCloseDate) {
+          closeDate = new Date(req.body.dealCloseDate);
+          if (!Number.isFinite(closeDate.getTime())) return res.status(400).json({ error: 'A valid deal close date is required' });
         }
+        if (createDeal && req.body.dealValue !== undefined && (!Number.isFinite(Number(dealValue)) || Number(dealValue) < 0)) {
+          return res.status(400).json({ error: 'Deal value must be zero or more' });
+        }
+        const result = await prisma.$transaction(async tx => {
+          // Claim the unconverted lead in this transaction. A concurrent click
+          // waits for this write and then sees no row to claim; any failed
+          // contact/account/deal write rolls the claim and all records back.
+          const claimed = await tx.lead.updateMany({ where: { id: lead.id, convertedAt: null, deletedAt: null }, data: { convertedAt: new Date(), status: 'Converted' } });
+          if (!claimed.count) { const error = new Error('This lead has already been converted'); error.status = 409; throw error; }
+          const result = {};
 
-        // Create contact from lead
-        result.contact = await prisma.contact.create({
-          data: {
-            firstName: lead.firstName,
-            lastName: lead.lastName,
-            email: lead.email,
-            phone: lead.phone,
-            title: lead.title,
-            source: lead.source,
-            status: 'Active',
-            description: `Converted from lead. Company: ${lead.company}`,
-            accountId,
-            ownerId: req.userId,
-          },
-        });
+          // Create account from lead company if requested
+          let accountId = null;
+          if (createAccount && lead.company) {
+            // Owned by whoever converted the lead, as the deal is: with no
+            // owner, a Private default hid the account and contact from them.
+            result.account = await tx.account.create({
+              data: {
+                name: lead.company,
+                type: 'Prospect',
+                phone: lead.phone,
+                ownerId: req.userId,
+                createdById: req.userId,
+              },
+            });
+            accountId = result.account.id;
+          }
 
-        // Create deal if requested
-        if (createDeal) {
-          result.deal = await prisma.deal.create({
+          // Create contact from lead
+          result.contact = await tx.contact.create({
             data: {
-              name: dealName || `${lead.company} - New Deal`,
-              value: Number(dealValue) || lead.value || 0,
-              currency: await resolveDealCurrency(prisma, req.body.dealCurrency),
-              stage: 'Qualification',
-              contactId: result.contact.id,
+              firstName: lead.firstName,
+              lastName: lead.lastName,
+              email: lead.email,
+              phone: lead.phone,
+              title: lead.title,
+              source: lead.source,
+              status: 'Active',
+              description: `Converted from lead. Company: ${lead.company}`,
               accountId,
               ownerId: req.userId,
             },
           });
-        }
 
-        // Update lead as converted
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { convertedAt: new Date(), contactId: result.contact.id, status: 'Converted' },
-        });
+          // Create deal if requested
+          if (createDeal) {
+            result.deal = await tx.deal.create({
+              data: {
+                name: dealName || `${lead.company} - New Deal`,
+                value: dealValue == null ? lead.value || 0 : Number(dealValue),
+                currency: await resolveDealCurrency(tx, req.body.dealCurrency),
+                stage: 'Qualification',
+                ...(closeDate && { closeDate }),
+                contactId: result.contact.id,
+                accountId,
+                ownerId: req.userId,
+              },
+            });
+          }
+
+          // Update lead as converted
+          await tx.lead.update({
+            where: { id: lead.id },
+            data: { convertedAt: new Date(), contactId: result.contact.id, status: 'Converted' },
+          });
+
+          return result;
+        }, { timeout: 30000 });
 
         await req.audit({ action: 'update', module: 'leads', recordId: lead.id, details: `Converted lead to contact ${result.contact.id}` });
         // The webhook events list offers lead.converted; nothing fired it.
-        await fireWebhookEvent(prisma, 'lead.converted', { id: lead.id, contactId: result.contact.id, accountId: accountId || null, dealId: result.deal?.id || null });
+        await fireWebhookEvent(prisma, 'lead.converted', { id: lead.id, contactId: result.contact.id, accountId: result.account?.id || null, dealId: result.deal?.id || null });
         res.json(result);
       } catch (err) { next(err); }
     });
