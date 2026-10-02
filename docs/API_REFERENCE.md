@@ -47,7 +47,7 @@ Authentication and session management
 
 ### `/api/oauth`
 
-OAuth provider (Google, Microsoft) login
+Provider-specific Google and Microsoft sign-in APIs for existing, active accounts. Require `OAUTH_LOGIN_ENABLED=true` and provider credentials; Microsoft additionally requires a directory GUID in `MICROSOFT_TENANT_ID`. These are separate from the unavailable generic SAML/OIDC login under `/api/security/sso/login`. The current browser login has no provider buttons or OAuth callback flow.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -490,11 +490,11 @@ CSAT/NPS/CES surveys with analytics
 
 ### `/api/campaigns` -- **[CRUD]**
 
-Campaign management with members, recipients, ROI
+Campaign planning with members, recipients and ROI. Bulk campaign delivery is unavailable; individual sales email uses the separate email API.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/campaigns/:id/send` | Send campaign |
+| POST | `/api/campaigns/:id/send` | Unavailable: returns 501 with code `CAMPAIGN_DELIVERY_UNAVAILABLE` without sending mail or changing campaign/recipient delivery state |
 | POST | `/api/campaigns/:id/recipients` | Add recipients to campaign |
 | GET | `/api/campaigns/:id/recipients` | List recipients for campaign |
 | GET | `/api/campaigns/stats/overview` | Get campaign statistics overview |
@@ -943,20 +943,25 @@ Outbound webhooks with HMAC signing and retry
 
 ### `/api/integrations`
 
-Third-party integrations with email sync
+Generic third-party integration configuration storage. No sync connectors or connection tests are implemented: those actions return 501. Saving configuration, mappings or a schedule does not connect a provider or start a sync worker. Stored status, dates and log summaries are not a live connectivity check. The separate Microsoft mailbox APIs under `/api/inbound-email` are unaffected.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/integrations` | List configured integrations |
+| GET | `/api/integrations/:id` | Get stored integration configuration, with secrets redacted |
 | POST | `/api/integrations` | Create new integration |
 | PUT | `/api/integrations/:id` | Update integration |
 | DELETE | `/api/integrations/:id` | Delete integration |
-| POST | `/api/integrations/:id/test` | Test integration |
-| POST | `/api/integrations/slack/notify` | Create new integration |
-| GET | `/api/integrations/email-sync` | Get email sync status |
-| POST | `/api/integrations/email-sync` | Create new integration |
-| POST | `/api/integrations/email-sync/:id/sync` | Add sync to integration |
-| DELETE | `/api/integrations/email-sync/:id` | Delete integration |
+| POST | `/api/integrations/:id/test` | Unavailable: returns 501; no connection is tested |
+| POST | `/api/integrations/:id/sync` | Unavailable: records a failed attempt and returns 501; no data is synced |
+| GET | `/api/integrations/:id/logs` | List recorded sync attempts |
+| GET | `/api/integrations/email-sync` | List stored email-type integration records and their status |
+| GET | `/api/integrations/health` | Summarize stored statuses and recent sync logs |
+| GET | `/api/integrations/:id/health` | Summarize recent log errors for an integration |
+| GET | `/api/integrations/:id/schedule` | Read stored schedule settings |
+| PUT | `/api/integrations/:id/schedule` | Store schedule settings; does not schedule delivery or sync |
+| GET | `/api/integrations/:id/mappings` | List stored field mappings |
+| PUT | `/api/integrations/:id/mappings` | Replace stored field mappings |
 
 ### `/api/connected-apps`
 
@@ -1025,18 +1030,18 @@ Device registration, push notifications, sync
 
 ### `/api/security`
 
-SSO, MFA, encryption policies
+SSO configuration storage, authenticator-app MFA and encryption policies. Generic SAML/OIDC sign-in is unavailable; stored SSO configuration does not enable it. The separate provider-specific Google and Microsoft sign-in APIs are documented under `/api/oauth`.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/security/sso` | List SSO configurations |
 | POST | `/api/security/sso` | Create SSO configuration |
 | PUT | `/api/security/sso/:id` | Update SSO configuration |
-| POST | `/api/security/sso/login` | Initiate SSO login flow |
+| POST | `/api/security/sso/login` | Unavailable: returns 501; use password sign-in |
 | GET | `/api/security/mfa/devices` | List MFA devices |
-| POST | `/api/security/mfa/enroll` | Enroll MFA device |
+| POST | `/api/security/mfa/enroll` | Enroll an authenticator-app (TOTP) device; SMS/email types are unsupported |
 | POST | `/api/security/mfa/verify` | Verify MFA code |
-| POST | `/api/security/mfa/challenge` | Issue MFA challenge |
+| POST | `/api/security/mfa/challenge` | Legacy challenge storage only; no SMS/email code is delivered. Use authenticator-app MFA |
 | DELETE | `/api/security/mfa/devices/:id` | Remove devices from security |
 | GET | `/api/security/encryption/policies` | List encryption policies |
 | POST | `/api/security/encryption/policies` | Create encryption policy |
@@ -1297,3 +1302,4 @@ System health, record counts, security metrics, recent activity
 | 409 | Conflict |
 | 429 | Rate limited |
 | 500 | Server error |
+| 501 | Feature not implemented |
