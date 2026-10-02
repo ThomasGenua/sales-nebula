@@ -3,6 +3,7 @@ import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
 import { AuthContext, RouteContext, useAuth, can } from "./contexts";
 import { LeadActions, EmailActions, QuoteActions, QuoteFormExtras, RelatedRecords, LineItems, validateQuoteForm } from "./SalesWorkflows";
+import { FeatureAvailability } from "./FeatureAvailability";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
 import { fmt, money, setUserPrefs, timeZones, LOCALES } from "./prefs";
@@ -1350,7 +1351,9 @@ function InvoicesPage() {
 }
 
 function CampaignsPage() {
-  return <ModulePage title="Campaigns" icon={Send} endpoint="/campaigns"
+  return <div className="space-y-4">
+    <FeatureAvailability features={["campaigns"]} />
+    <ModulePage title="Campaigns" icon={Send} endpoint="/campaigns" permissionModule="campaigns"
     columns={[
       { key: "name", label: "Campaign" }, { key: "type", label: "Type" }, { key: "status", label: "Status" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
@@ -1363,7 +1366,8 @@ function CampaignsPage() {
       { key: "startDate", label: "Start", type: "date" }, { key: "endDate", label: "End", type: "date" },
       { key: "budget", label: "Budget", type: "number" },
       { key: "description", label: "Description", type: "textarea" },
-    ]} />;
+    ]} />
+  </div>;
 }
 
 function EmailsPage() {
@@ -2018,6 +2022,7 @@ function SettingsPage() {
             {demoMode && <p className="text-xs mt-2" style={dim}>Password changes are unavailable in demo mode.</p>}
           </div>
           <TwoFactorPanel className={panel} style={panelStyle} setToast={setToast} />
+          <div className="lg:col-span-2"><FeatureAvailability features={["sso"]} /></div>
           <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
@@ -2255,6 +2260,7 @@ function AdminDashboardPage() {
           {health.database === 'connected' ? 'All Systems Operational' : 'Degraded'}
         </div>
       </div>
+      <div className="mb-4 sm:mb-6"><FeatureAvailability /></div>
       <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-6 gap-2 sm:gap-3 mb-4 sm:mb-6">
         <Pill label="Uptime" value={`${upHrs}h`} color="green" />
         <Pill label="Memory" value={`${memMB}MB`} color={memMB > 500 ? "red" : "blue"} />

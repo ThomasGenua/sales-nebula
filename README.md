@@ -224,7 +224,7 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Campaigns | `/api/campaigns` | Campaign management with members, recipients, target lists, ROI tracking |
+| Campaigns | `/api/campaigns` | Campaign planning, members, recipients, target lists and ROI tracking; bulk delivery unavailable |
 | Campaign Influence | `/api/campaign-influence` | Multi-touch revenue attribution models |
 | Email Templates | `/api/emails` | Template management, sync, sending |
 | Email Sequences | `/api/sequences` | Multi-step drip campaigns with enrollment tracking |
@@ -276,9 +276,9 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Export | `/api/export` + `/api/data-export` | Data export in CSV, JSON, XLSX formats |
 | Bulk API | `/api/bulk` | High-volume batch insert/update/delete/upsert operations |
 | Webhooks | `/api/webhooks` | Outbound webhooks with HMAC-SHA256 signing, exponential retry, delivery logs |
-| Integrations | `/api/integrations` | Third-party integration configuration and credential storage |
+| Integrations | `/api/integrations` | Configuration and credential storage only; generic sync and connection tests unavailable |
 | Connected Apps | `/api/connected-apps` | OAuth2 client application management |
-| OAuth Provider | `/api/oauth` | OAuth2 authorization server (authorization code grant) |
+| OAuth Sign-In | `/api/oauth` | Provider-specific Google and Microsoft sign-in APIs, when configured |
 | Marketplace | `/api/marketplace` | App listings, installs, reviews (public browsing, auth for install) |
 | CDP | `/api/cdp` | Customer Data Platform: data streams, unified profiles, segments |
 
@@ -291,8 +291,8 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Sharing Rules | `/api/sharing` | Record sharing rules and org-wide defaults |
 | Field-Level Security | (via configuration) | Per-field read/edit permissions by role |
 | Org-Wide Defaults | (via configuration) | Default record visibility (Private/Public Read/Public Read-Write) |
-| SSO | `/api/security` | SAML 2.0 and OIDC configuration |
-| MFA | `/api/security` | TOTP and SMS multi-factor authentication |
+| SSO | `/api/security` | SAML 2.0 and OIDC configuration storage; sign-in unavailable |
+| MFA | `/api/security` | Authenticator-app (TOTP) multi-factor authentication |
 | Encryption (Shield) | `/api/security` | Platform encryption policies and key management |
 | Consent | `/api/consent` | GDPR consent records with opt-in/opt-out, self-service opt-out endpoint |
 | Monitoring | `/api/monitoring` | Login history, event logs, 24h summary |
@@ -512,7 +512,15 @@ Each key allows `rateLimit` requests per hour (default 1000). Responses carry `X
 
 ### SSO and OAuth
 
-SSO providers (SAML 2.0 and OIDC) are configured via `/api/security/sso`. Google and Microsoft sign-in (`/api/oauth`) come pre-wired through environment variables.
+`/api/security/sso` stores SAML 2.0 and OIDC configuration, but does not enable sign-in. `POST /api/security/sso/login` returns **501 Not Implemented**; use password sign-in in the browser. SMS and email MFA are also unavailable; use an authenticator app (TOTP).
+
+The separate Google and Microsoft sign-in APIs (`/api/oauth`) are implemented and require `OAUTH_LOGIN_ENABLED=true` plus provider credentials. Microsoft also requires your directory's GUID in `MICROSOFT_TENANT_ID`. These APIs sign in existing, active accounts only. The current browser login does not include provider buttons or an OAuth callback flow; enabling environment variables alone does not add them.
+
+### Feature availability for a sales pilot
+
+Campaigns support planning, recipient lists and response tracking. Bulk campaign delivery is unavailable: `POST /api/campaigns/:id/send` returns **501** without changing campaign or recipient delivery state. Individual sales emails remain available through the email workflow when SMTP is configured.
+
+Generic integration records under `/api/integrations` store configuration only. Their sync and connection-test actions return **501**; saving a schedule does not start a sync worker. Stored status, dates and log summaries do not establish a live connection. This limitation does not apply to the separate Microsoft mailbox APIs under `/api/inbound-email`, outbound webhooks or Connected Apps.
 
 ### Connected Apps (OAuth 2.0)
 

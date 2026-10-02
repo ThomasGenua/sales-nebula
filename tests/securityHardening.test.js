@@ -184,27 +184,88 @@ describe('SSO sign-in no longer issues sessions without an assertion', () => {
   });
 });
 
-describe('Campaign send reports only what it knows', () => {
-  it('records no engagement and invents no revenue', async () => {
-    const user = await createTestUser({ email: 'marketer@test.com' });
+describe('Campaign delivery is unavailable', () => {
+  const snapshot = id => prisma.campaign.findUnique({
+    where: { id }, include: { recipients: { orderBy: { id: 'asc' } } },
+  });
+
+  it('preserves campaign and recipient history, counts and statistics on repeated attempts', async () => {
+    const role = await createTestRole('Campaign editor', [{ module: 'campaigns', level: 'edit' }]);
+    const user = await createTestUser({ email: 'marketer@test.com', roleId: role.id });
     const campaign = await prisma.campaign.create({ data: { name: 'Spring Push', status: 'Draft' } });
-    const contact = await prisma.contact.create({ data: { firstName: 'Lead', lastName: 'One' } });
-    await prisma.campaignRecipient.create({ data: { campaignId: campaign.id, contactId: contact.id } });
+    await prisma.campaignRecipient.createMany({ data: [
+      { campaignId: campaign.id, email: 'pending@example.test', status: 'pending' },
+      { campaignId: campaign.id, email: 'engaged@example.test', status: 'clicked',
+        sentAt: new Date('2025-01-01T10:00:00Z'), openedAt: new Date('2025-01-01T11:00:00Z'), clickedAt: new Date('2025-01-01T12:00:00Z') },
+      { campaignId: campaign.id, email: 'opted-out@example.test', status: 'unsubscribed' },
+    ] });
+    const before = await snapshot(campaign.id);
+    const statsBefore = await request(app).get(`/api/campaigns/${campaign.id}/email-stats`).set(authHeader(user.token));
+    const overviewBefore = await request(app).get('/api/campaigns/stats/overview').set(authHeader(user.token));
+    expect(statsBefore.status).toBe(200);
+    expect(overviewBefore.status).toBe(200);
 
-    const res = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token)).send({});
-    expect(res.status).toBe(200);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token)).send({});
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('CAMPAIGN_DELIVERY_UNAVAILABLE');
+      expect(res.body.error).toMatch(/No messages were sent or queued/);
+      expect(res.body.delivery).toBeUndefined();
+      // Includes campaign updatedAt, every recipient timestamp/status and the
+      // full recipient list, so neither overwrites nor new rows pass unnoticed.
+      expect(await snapshot(campaign.id)).toEqual(before);
+      const statsAfter = await request(app).get(`/api/campaigns/${campaign.id}/email-stats`).set(authHeader(user.token));
+      const overviewAfter = await request(app).get('/api/campaigns/stats/overview').set(authHeader(user.token));
+      expect(statsAfter.status).toBe(200);
+      expect(overviewAfter.status).toBe(200);
+      expect(statsAfter.body).toEqual(statsBefore.body);
+      expect(overviewAfter.body).toEqual(overviewBefore.body);
+    }
+  });
 
-    const saved = await prisma.campaign.findUnique({ where: { id: campaign.id } });
-    expect(saved.status).toBe('Sent');
-    expect(res.body.delivery.queued).toBe(1);
-    expect(res.body.delivery.implemented).toBe(false);
-    expect(JSON.stringify(res.body)).not.toMatch(/revenue/);   // was Math.random() dollars
+  it('does not mark an empty campaign as sent', async () => {
+    const user = await createTestUser();
+    const campaign = await prisma.campaign.create({ data: { name: 'Empty', status: 'Planned' } });
+    const before = await snapshot(campaign.id);
+    const res = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token));
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('CAMPAIGN_DELIVERY_UNAVAILABLE');
+    expect(await snapshot(campaign.id)).toEqual(before);
+  });
 
-    const recipients = await prisma.campaignRecipient.findMany({ where: { campaignId: campaign.id } });
-    expect(recipients.every(r => r.status === 'queued')).toBe(true);
-    expect(recipients.every(r => r.sentAt)).toBe(true);
-    // Nothing is claimed as opened or clicked, because nothing measured it.
-    expect(recipients.some(r => r.openedAt || r.clickedAt)).toBe(false);
+  it('still requires authentication and campaign edit permission', async () => {
+    const campaign = await prisma.campaign.create({ data: { name: 'Restricted', status: 'Draft' } });
+    const before = await snapshot(campaign.id);
+    const anonymous = await request(app).post(`/api/campaigns/${campaign.id}/send`);
+    expect(anonymous.status).toBe(401);
+    for (const level of ['none', 'read']) {
+      const role = await createTestRole(`Campaign ${level}`, [{ module: 'campaigns', level }]);
+      const user = await createTestUser({ email: `${level}@test.com`, roleId: role.id });
+      const denied = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token));
+      expect(denied.status).toBe(403);
+    }
+    expect(await snapshot(campaign.id)).toEqual(before);
+  });
+
+  it('keeps missing, deleted and unreachable campaigns indistinguishable', async () => {
+    const role = await createTestRole('Campaign editor', [{ module: 'campaigns', level: 'edit' }]);
+    const user = await createTestUser({ email: 'editor@test.com', roleId: role.id });
+    const other = await createTestUser({ email: 'other@test.com', roleId: role.id });
+    const hidden = await prisma.campaign.create({ data: { name: 'Hidden', ownerId: other.user.id } });
+    const deleted = await prisma.campaign.create({ data: { name: 'Deleted', deletedAt: new Date() } });
+    const group = await prisma.securityGroup.create({ data: { name: 'Other campaign team', active: true } });
+    await prisma.securityGroupUser.create({ data: { securityGroupId: group.id, userId: other.user.id } });
+    await prisma.securityGroupRecord.create({ data: { securityGroupId: group.id, module: 'campaigns', recordId: hidden.id, accessLevel: 'Full' } });
+    const hiddenBefore = await snapshot(hidden.id);
+    const deletedBefore = await snapshot(deleted.id);
+
+    for (const id of ['00000000-0000-4000-8000-000000000000', deleted.id, hidden.id]) {
+      const res = await request(app).post(`/api/campaigns/${id}/send`).set(authHeader(user.token));
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'Not found' });
+    }
+    expect(await snapshot(hidden.id)).toEqual(hiddenBefore);
+    expect(await snapshot(deleted.id)).toEqual(deletedBefore);
   });
 });
 

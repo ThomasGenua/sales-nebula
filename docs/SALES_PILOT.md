@@ -1,5 +1,21 @@
 # Sales pilot setup and workflows
 
+## Current feature availability
+
+- **Campaigns:** planning, recipient lists and response tracking are available.
+  Bulk campaign delivery is unavailable; the send API returns 501 without
+  changing campaign or recipient delivery state. Use the individual sales-email
+  workflow for messages when SMTP is configured.
+- **Generic integrations:** configuration, mappings and schedule settings can be
+  stored, but sync and connection tests return 501. Saving a schedule does not
+  start a sync worker. This does not disable the separate Microsoft mailbox
+  APIs, outbound webhooks or Connected Apps.
+- **Sign-in:** use password sign-in and optional authenticator-app MFA in the
+  browser. Generic SAML/OIDC configuration does not enable sign-in; that login
+  endpoint returns 501. SMS/email MFA is unavailable. The separate Google and
+  Microsoft sign-in APIs require explicit provider configuration and an existing
+  active account; the browser has no provider buttons or OAuth callback flow.
+
 ## First production install
 
 Copy `.env.example` to `.env`. Set `POSTGRES_PASSWORD` to a unique database

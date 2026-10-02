@@ -112,6 +112,7 @@ test('read-only users cannot use sales mutation actions', async ({ page, request
   const contact = await create(request, 'contacts', { firstName: 'Read', lastName: suffix, email: 'read@example.com' }, headers);
   const deal = await create(request, 'deals', { name: `Read deal ${suffix}`, value: 0 }, headers);
   const quote = await create(request, 'quotes', { name: `Read ${suffix}` }, headers);
+  const campaign = await create(request, 'campaigns', { name: `Read campaign ${suffix}`, status: 'Planned' }, headers);
   await signIn(page, true); await page.goto(`/app/leads/${lead.id}`);
   await expect(page.getByText('Lead and contact edit permission is required to convert a lead.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Convert lead', exact: true })).toHaveCount(0);
@@ -122,6 +123,13 @@ test('read-only users cannot use sales mutation actions', async ({ page, request
   await page.goto(`/app/quotes/${quote.id}`); await expect(page.getByRole('button', { name: 'Preview quote' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create invoice', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Record acceptance' })).toHaveCount(0);
+  await page.goto(`/app/campaigns/${campaign.id}`);
+  await expect(page.getByRole('heading', { name: `Read campaign ${suffix}`, exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Campaign email delivery', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^(Edit|Delete)$/ })).toHaveCount(0);
+  await page.goto('/app/campaigns');
+  await expect(page.getByRole('heading', { name: 'Campaigns', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'New Campaigns', exact: true })).toHaveCount(0);
 });
 
 test('request access, verify, approve, accept invite and sign in', async ({ page, request, browser }) => {
@@ -151,4 +159,47 @@ test('quote editor works at phone width in the light theme', async ({ page, requ
   await expect(dialog.getByLabel('Quantity for line 1')).toBeVisible();
   expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   await dialog.getByLabel('Quote Name').press('Escape'); await expect(dialog).toHaveCount(0);
+});
+
+test('campaign planning works while delivery is clearly unavailable', async ({ page, request }) => {
+  const headers = await auth(request); const name = `Planned campaign ${unique()}`;
+  await signIn(page); await page.goto('/app/campaigns');
+  const notice = page.getByRole('region', { name: 'Campaign email delivery', exact: true });
+  await expect(notice).toContainText('Unavailable');
+  await expect(notice).toContainText('Bulk email sending and automatic engagement tracking are unavailable.');
+  await page.getByRole('button', { name: 'New Campaigns', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New Campaign', exact: true });
+  await dialog.getByLabel(/^Name/).fill(name);
+  await dialog.getByRole('combobox', { name: 'Type', exact: true }).selectOption('Email');
+  await dialog.getByRole('combobox', { name: 'Status', exact: true }).selectOption('Planned');
+  await expect(dialog.getByRole('combobox', { name: 'Status', exact: true }).locator('option[value="Sent"]')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByText(name, { exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  await expect(notice).toBeVisible();
+  await expect(page.getByRole('button', { name: /Send campaign|Send email/i })).toHaveCount(0);
+  const campaigns = await (await request.get('/api/campaigns', { headers })).json();
+  expect(campaigns.data.find(c => c.name === name).status).toBe('Planned');
+  await page.screenshot({ path: test.info().outputPath('campaign-availability.png'), fullPage: true });
+});
+
+test('settings and administration explain unsupported features without blocking supported security', async ({ page }) => {
+  await signIn(page); await page.goto('/app/settings');
+  await page.getByRole('button', { name: 'Security', exact: true }).click();
+  const sso = page.getByRole('region', { name: 'Custom SSO providers', exact: true });
+  await expect(sso).toContainText('Unavailable');
+  await expect(sso).toContainText('Use password sign-in');
+  await expect(page.getByRole('button', { name: 'Update Password', exact: true })).toBeEnabled();
+  await expect(page.getByRole('heading', { name: 'Authorized apps', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Enable 2FA', exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => localStorage.setItem('sn_theme', 'light'));
+  await page.goto('/app/admin');
+  for (const title of ['Campaign email delivery', 'Third-party synchronization', 'Custom SSO providers']) {
+    const notice = page.getByRole('region', { name: title, exact: true });
+    await expect(notice).toContainText('Unavailable');
+    expect(await notice.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+  }
+  await page.screenshot({ path: test.info().outputPath('feature-availability-mobile.png'), fullPage: true });
 });
