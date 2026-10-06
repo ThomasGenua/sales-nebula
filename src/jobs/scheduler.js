@@ -9,6 +9,7 @@
  * - Failure alerting (creates notifications for admins)
  */
 
+const crypto = require('crypto');
 const { logger } = require('../services/logger');
 const graphMailbox = require('../services/graphMailbox');
 const { notify } = require('../services/notify');
@@ -117,8 +118,34 @@ async function runWithRetries(jobName, fn, maxRetries = 3) {
 
 // ─── JOB HANDLERS ───
 
-/** A scheduled rule sweeps its whole module; do not let one run the table. */
+/**
+ * A scheduled rule sweeps its whole module, a page at a time: it acts on at
+ * most SCHEDULED_WORKFLOW_LIMIT records a run and looks at no more than
+ * SCHEDULED_WORKFLOW_SCAN rows, so no one rule runs the table. Each run starts
+ * at a random id and wraps round, so a module larger than one run's scan is
+ * still covered, over several runs, rather than only ever its first rows.
+ */
 const SCHEDULED_WORKFLOW_LIMIT = 500;
+const SCHEDULED_WORKFLOW_SCAN = 10000;
+const SCHEDULED_WORKFLOW_PAGE = 500;
+
+// A scheduled rule's log for a record: it acted ('scheduled'), or the record
+// stopped matching after it had ('scheduled-unmatched'), which lets the rule
+// act on it again the next time it matches.
+const SCHEDULED_ACTED = 'scheduled';
+const SCHEDULED_UNMATCHED = 'scheduled-unmatched';
+
+/** Which of the two a scheduled rule last logged for each of these records. */
+async function scheduledStates(workflowId, recordIds) {
+  if (!recordIds.length) return new Map();
+  const rows = await prisma.workflowLog.findMany({
+    where: { workflowId, trigger: { in: [SCHEDULED_ACTED, SCHEDULED_UNMATCHED] }, recordId: { in: recordIds } },
+    orderBy: [{ recordId: 'asc' }, { createdAt: 'desc' }],
+    distinct: ['recordId'],
+    select: { recordId: true, trigger: true },
+  });
+  return new Map(rows.map(row => [row.recordId, row.trigger]));
+}
 
 /**
  * Whether a reminder's user may still see its event, by the rule of
@@ -352,6 +379,13 @@ const handlers = {
    * success: true and increment runCount, without evaluating a single
    * condition or running a single action — a green audit trail for work that
    * never happened, which is worse than no automation at all.
+   *
+   * A rule acts on a record once while it matches, and again only after it
+   * has stopped matching and matches again (a deal that leaves Negotiation
+   * and comes back gets a second follow-up). It acted on every matching
+   * record on every run, every 15 minutes: a rule that emails, creates a task
+   * or notifies did so 96 times a day for each record, for as long as the
+   * record matched. And it only ever looked at the same first 500 rows.
    */
   async runScheduledWorkflows() {
     const { resolveModel, evaluateConditions, runActions, triggersFor } = require('../services/workflowEngine');
@@ -361,7 +395,10 @@ const handlers = {
     const workflows = (await prisma.workflow.findMany({ where: { active: true } }))
       .filter(w => scheduled.includes(String(w.trigger || '').toLowerCase()));
 
-    let executed = 0, matched = 0, failed = 0;
+    // matched: records acted on this run; alreadyActed: matching records the
+    // rule acted on before and that have matched ever since; actionErrors:
+    // records whose actions threw (logged, and not retried while they match).
+    let executed = 0, matched = 0, failed = 0, alreadyActed = 0, actionErrors = 0;
 
     for (const wf of workflows) {
       const modelName = resolveModel(wf.module);
@@ -378,23 +415,64 @@ const handlers = {
       }
 
       try {
-        // A scheduled rule sweeps its module, so cap the batch: a rule with no
-        // conditions would otherwise act on the entire table every run.
         const where = modelHasDeletedAt(modelName) ? { deletedAt: null } : {};
-        const records = await prisma[modelName].findMany({ where, take: SCHEDULED_WORKFLOW_LIMIT });
+        let scanned = 0, acted = 0;
+        // From a random id to the end, then from the start up to it.
+        const start = crypto.randomUUID();
+        for (const idRange of [{ gt: start }, { lte: start }]) {
+          let cursor = null;
+          while (acted < SCHEDULED_WORKFLOW_LIMIT && scanned < SCHEDULED_WORKFLOW_SCAN) {
+            const page = await prisma[modelName].findMany({
+              where: { ...where, id: idRange }, orderBy: { id: 'asc' }, take: SCHEDULED_WORKFLOW_PAGE,
+              ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+            });
+            if (!page.length) break;
+            scanned += page.length;
+            cursor = page[page.length - 1].id;
 
-        for (const record of records) {
-          if (!evaluateConditions(wf.conditions, record, null)) continue;
-          matched++;
-          const actionsRun = await runActions(prisma, wf, {
-            moduleName: wf.module, modelName, record, userId: null,
-          });
-          await prisma.workflowLog.create({
-            data: {
-              workflowId: wf.id, workflowName: wf.name, module: wf.module,
-              trigger: 'scheduled', recordId: record.id, actionsRun, success: true,
-            },
-          }).catch(() => {});
+            const states = await scheduledStates(wf.id, page.map(record => record.id));
+            const leftSince = [];
+            for (const record of page) {
+              const actedBefore = states.get(record.id) === SCHEDULED_ACTED;
+              if (!evaluateConditions(wf.conditions, record, null)) {
+                // It has left the rule's records: matching again is a new occasion.
+                if (actedBefore) leftSince.push(record.id);
+                continue;
+              }
+              if (actedBefore) { alreadyActed++; continue; }
+              if (acted >= SCHEDULED_WORKFLOW_LIMIT) continue;   // the next run takes it
+              acted++; matched++;
+
+              // One record's failure is its own: it is logged, the rest of the
+              // module still runs, and it is not retried while the record
+              // matches, so a broken action does not log an error every 15
+              // minutes. (A throw used to stop the rule for the whole run.)
+              let actionsRun = [], error = null;
+              try {
+                actionsRun = await runActions(prisma, wf, {
+                  moduleName: wf.module, modelName, record, userId: null,
+                });
+              } catch (e) {
+                error = String(e.message).slice(0, 400);
+                actionErrors++;
+              }
+              await prisma.workflowLog.create({
+                data: {
+                  workflowId: wf.id, workflowName: wf.name, module: wf.module,
+                  trigger: SCHEDULED_ACTED, recordId: record.id, actionsRun, success: !error, error,
+                },
+              }).catch(() => {});
+            }
+            if (leftSince.length) {
+              await prisma.workflowLog.createMany({
+                data: leftSince.map(recordId => ({
+                  workflowId: wf.id, workflowName: wf.name, module: wf.module,
+                  trigger: SCHEDULED_UNMATCHED, recordId, actionsRun: [], success: true,
+                })),
+              }).catch(() => {});
+            }
+            if (page.length < SCHEDULED_WORKFLOW_PAGE) break;
+          }
         }
 
         await prisma.workflow.update({
@@ -414,7 +492,7 @@ const handlers = {
       }
     }
 
-    return { workflows: workflows.length, executed, matched, failed };
+    return { workflows: workflows.length, executed, matched, failed, alreadyActed, actionErrors };
   },
 
   async cleanupAuditLogs() {
