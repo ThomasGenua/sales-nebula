@@ -255,6 +255,12 @@ describe('Scheduled rules', () => {
     await handlers.runScheduledWorkflows();
     expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(2);
     expect([await acted(chase.id), await acted(tag.id)]).toEqual([2, 2]);
+
+    // The log of runs lists the four runs, not the marks made when it left.
+    expect(await prisma.workflowLog.count({ where: { trigger: 'scheduled-unmatched' } })).toBe(2);
+    const listed = await request(app).get('/api/workflows/logs/all').set(authHeader(user.token));
+    expect(listed.status).toBe(200);
+    expect(listed.body.data.map(l => l.trigger)).toEqual(['scheduled', 'scheduled', 'scheduled', 'scheduled']);
   });
 
   it('reaches every matching record, at most 500 a run, not only the first 500 rows', async () => {
