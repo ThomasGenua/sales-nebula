@@ -1128,6 +1128,18 @@ Public signup captures a **request**, never a user:
 4. The invitee sets a password against the invite token. Only this
    step creates a `User`.
 
+An administrator can also invite someone directly from the **Users**
+screen. The same screen lists everyone who can sign in, and pending
+invites. From it, someone with `users: full` can:
+- change a person's name, email or role
+- deactivate an account, which takes effect on their next request, or reactivate it
+- email a one-time password reset link
+- resend or revoke an invite
+
+The API holds each change to the manager's own access. You can't
+deactivate your own account, and the last active administrator can't
+step down.
+
 Tokens are stored as SHA-256 hashes, never in plaintext. An invite token
 works once. A verification link can be opened again and says the address
 is already confirmed, and does nothing else. Verification links last 48

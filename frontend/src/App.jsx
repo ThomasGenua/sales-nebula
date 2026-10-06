@@ -3195,6 +3195,335 @@ function AccessRequestsPage() {
   );
 }
 
+// ── Users ──
+// Everyone with an account: the team, and customers' portal accounts. Anyone
+// who may read users sees them; inviting, editing, deactivating and sending a
+// reset link take users: full. The API holds each change to the manager's own
+// access (nobody grants more than they hold, and the last administrator stays
+// one), so a refusal is shown as it says it.
+const USER_TABS = [
+  ["active", "Active"],
+  ["invited", "Invited"],
+  ["deactivated", "Deactivated"],
+  ["portal", "Customer portal"],
+];
+const fullName = u => [u.firstName, u.lastName].filter(Boolean).join(" ");
+// Portal accounts have this role (routes/portal.js); it is no role for staff.
+const PORTAL_ROLE = "Customer Portal";
+
+function UsersPage() {
+  const { apiFetch, user: me } = useAuth();
+  const canManage = can(me, "users", "full");
+  // Roles are listed to whoever may see roles; anyone else's invites take the
+  // default role, which the API chooses.
+  const canSeeRoles = can(me, "roles", "read");
+  const [tab, setTab] = useState("active");
+  const [query, setQuery] = useState("");
+  const [users, setUsers] = useState([]);
+  const [invites, setInvites] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [inviting, setInviting] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [link, setLink] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      apiFetch("/users"),
+      apiFetch("/signup/invites?status=Pending"),
+      canSeeRoles ? apiFetch("/users/roles/all").catch(() => ({ data: [] })) : Promise.resolve({ data: [] }),
+    ])
+      .then(([list, pending, roleList]) => {
+        setUsers(list.data || []);
+        setInvites(Array.isArray(pending) ? pending : []);
+        setRoles(roleList.data || []);
+      })
+      .catch(e => setError(e.message || "Could not load users"))
+      .finally(() => setLoading(false));
+  }, [apiFetch, canSeeRoles]);
+  useEffect(() => { load(); }, [load]);
+
+  const staffRoles = roles.filter(r => r.name !== PORTAL_ROLE);
+  const defaultRoleId = staffRoles.find(r => r.name === "Sales Rep")?.id || "";
+  const date = value => (value ? new Date(value).toLocaleDateString(...fmt()) : "");
+  const matches = (...fields) => {
+    const q = query.trim().toLowerCase();
+    return !q || fields.some(f => String(f || "").toLowerCase().includes(q));
+  };
+  const groups = {
+    active: users.filter(u => u.active && !u.isPortalUser),
+    invited: invites,
+    deactivated: users.filter(u => !u.active && !u.isPortalUser),
+    portal: users.filter(u => u.isPortalUser),
+  };
+  const rows = tab === "invited"
+    ? invites.filter(i => matches(i.email, fullName(i), i.roleName))
+    : groups[tab].filter(u => matches(u.email, fullName(u), u.role?.name));
+
+  // Where this server sends no email, the link comes back to whoever asked,
+  // to pass on; it is not shown again.
+  const handOver = (result, email, kind) => {
+    if (result.emailSent) {
+      setToast({ message: kind === "invite" ? `Invite emailed to ${email}` : `Password reset link emailed to ${email}`, type: "success" });
+    } else {
+      setCopied(false);
+      setLink({ kind, email, url: result.inviteUrl || result.resetUrl, expiresAt: result.expiresAt });
+    }
+  };
+  const act = async (work, done) => {
+    setBusy(true);
+    try { await work(); done?.(); load(); }
+    catch (e) { setToast({ message: e.message, type: "error" }); }
+    finally { setBusy(false); }
+  };
+
+  const sendInvite = () => act(async () => {
+    const { email, firstName, lastName, roleId, message } = inviting;
+    const result = await apiFetch("/signup/invites", {
+      method: "POST",
+      body: {
+        email: email.trim(), firstName: firstName.trim() || undefined, lastName: lastName.trim() || undefined,
+        roleId: roleId || defaultRoleId || undefined, message: message.trim() || undefined,
+      },
+    });
+    setInviting(null);
+    setTab("invited");
+    handOver(result, email.trim(), "invite");
+  });
+
+  const saveEdit = () => act(async () => {
+    const { user, firstName, lastName, email, roleId } = editing;
+    const changes = {};
+    if (firstName.trim() !== (user.firstName || "")) changes.firstName = firstName.trim();
+    if (lastName.trim() !== (user.lastName || "")) changes.lastName = lastName.trim();
+    if (email.trim().toLowerCase() !== user.email) changes.email = email.trim();
+    if (roleId && roleId !== user.roleId) changes.roleId = roleId;
+    if (Object.keys(changes).length) await apiFetch(`/users/${user.id}`, { method: "PUT", body: changes });
+    setEditing(null);
+    setToast({ message: `Saved ${fullName({ firstName, lastName }) || email}`, type: "success" });
+  });
+
+  const setActive = (user, active) => act(async () => {
+    await apiFetch(`/users/${user.id}`, { method: "PUT", body: { active } });
+    setConfirm(null);
+    setToast({ message: `${fullName(user) || user.email} ${active ? "can sign in again" : "is deactivated"}`, type: "success" });
+  });
+
+  const sendReset = user => act(async () => {
+    const result = await apiFetch(`/users/${user.id}/password-reset`, { method: "POST", body: {} });
+    setConfirm(null);
+    handOver({ ...result, expiresAt: null }, user.email, "reset");
+  });
+
+  const resend = invite => act(async () => {
+    const result = await apiFetch(`/signup/invites/${invite.id}/resend`, { method: "POST", body: {} });
+    handOver(result, invite.email, "invite");
+  });
+
+  const revoke = invite => act(async () => {
+    await apiFetch(`/signup/invites/${invite.id}/revoke`, { method: "POST", body: {} });
+    setConfirm(null);
+    setToast({ message: `Invite to ${invite.email} revoked`, type: "success" });
+  });
+
+  // Where the clipboard is not available the field is still selectable.
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(link.url); setCopied(true); } catch { /* nothing more to do */ }
+  };
+
+  const openEdit = user => setEditing({
+    user, firstName: user.firstName || "", lastName: user.lastName || "", email: user.email, roleId: user.roleId,
+  });
+  const openInvite = () => setInviting({ email: "", firstName: "", lastName: "", roleId: "", message: "" });
+  const roleOptions = staffRoles.map(r => ({ value: r.id, label: r.name }));
+  const empty = {
+    active: "No one matches", invited: "No invites are waiting", deactivated: "Nobody is deactivated", portal: "No customer has a portal account",
+  };
+
+  return (
+    <div>
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 mb-4">
+        <div>
+          <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-1">Users</h1>
+          <p className="text-xs text-[#7E8598]">
+            Everyone who can sign in, and the invites waiting for an answer.
+            {!canManage && " You can see users; managing them takes permission to manage users."}
+          </p>
+        </div>
+        {canManage && <Button icon={UserPlus} onClick={openInvite}>Invite user</Button>}
+      </div>
+
+      <div className="flex flex-col md:flex-row md:items-center gap-3 mb-4">
+        <div className="flex flex-wrap gap-1 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit max-w-full">
+          {USER_TABS.map(([key, label]) => (
+            <button key={key} type="button" aria-pressed={tab === key} onClick={() => setTab(key)}
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors touch-manipulation ${tab === key ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623]" : "text-[#7E8598]"}`}>
+              {label} <span className="ml-1 text-xs text-[#4A5168]">{loading ? "" : groups[key].length}</span>
+            </button>
+          ))}
+        </div>
+        <Input placeholder="Search by name, email or role" value={query} onChange={setQuery} className="md:max-w-xs w-full" />
+      </div>
+
+      {loading ? <Spinner /> : error ? <ErrorState message={error} onRetry={load} /> : rows.length === 0 ? (
+        <EmptyState icon={Users} title={query.trim() ? "No one matches" : empty[tab]}
+          subtitle={tab === "invited" && canManage && !query.trim() ? "Invite someone and they will show here until they accept." : undefined} />
+      ) : tab === "invited" ? (
+        <ul className="space-y-2" aria-label="Invites">
+          {rows.map(i => (
+            <li key={i.id} aria-label={fullName(i) || i.email} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-[#F0EDE5] break-all">{fullName(i) || i.email}</span>
+                  {i.roleName && <Badge color="info">{i.roleName}</Badge>}
+                  {i.expired && <Badge color="warning">Expired</Badge>}
+                </div>
+                {fullName(i) && <div className="text-xs text-[#7E8598] mt-1 break-all">{i.email}</div>}
+                <div className="text-xs text-[#4A5168] mt-0.5">
+                  {i.expired ? "The link has expired; resending gives it a new one." : `Invited ${date(i.createdAt)}, valid until ${date(i.expiresAt)}`}
+                </div>
+              </div>
+              {canManage && (
+                <div className="flex flex-wrap gap-2 shrink-0">
+                  <Button size="sm" variant="secondary" disabled={busy} onClick={() => resend(i)}>Resend</Button>
+                  <Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm({ kind: "revoke", invite: i })}>Revoke</Button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <ul className="space-y-2" aria-label="Users">
+          {rows.map(u => {
+            const name = fullName(u) || u.email;
+            const self = u.id === me?.id;
+            return (
+              <li key={u.id} aria-label={name} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-[#F0EDE5] break-all">{name}</span>
+                    {self && <Badge color="neutral">You</Badge>}
+                    {u.role?.name && <Badge color={u.isPortalUser ? "cyan" : "info"}>{u.role.name}</Badge>}
+                    {!u.active && <Badge color="danger">Deactivated</Badge>}
+                  </div>
+                  {fullName(u) && <div className="text-xs text-[#7E8598] mt-1 break-all">{u.email}</div>}
+                  <div className="text-xs text-[#4A5168] mt-0.5">
+                    {u.lastLoginAt ? `Last signed in ${date(u.lastLoginAt)}` : "Has not signed in yet"}
+                  </div>
+                </div>
+                {canManage && (
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    {!u.isPortalUser && <Button size="sm" variant="secondary" disabled={busy} onClick={() => openEdit(u)}>Edit</Button>}
+                    {u.active && <Button size="sm" variant="secondary" disabled={busy} onClick={() => setConfirm({ kind: "reset", user: u })}>Send password reset</Button>}
+                    {u.active && !self && <Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm({ kind: "deactivate", user: u })}>Deactivate</Button>}
+                    {!u.active && <Button size="sm" disabled={busy} onClick={() => setActive(u, true)}>Reactivate</Button>}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <Modal open={!!inviting} onClose={() => !busy && setInviting(null)} title="Invite user">
+        {inviting && (
+          <div className="space-y-4">
+            <p className="text-sm text-[#C8C2B4]">They get an email with a link to choose a password; their account is made then.</p>
+            <Input label="Email" type="email" required value={inviting.email} onChange={v => setInviting(f => ({ ...f, email: v }))} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input label="First name" value={inviting.firstName} onChange={v => setInviting(f => ({ ...f, firstName: v }))} />
+              <Input label="Last name" value={inviting.lastName} onChange={v => setInviting(f => ({ ...f, lastName: v }))} />
+            </div>
+            {roleOptions.length > 0
+              ? <Select label="Role" value={inviting.roleId || defaultRoleId} onChange={v => setInviting(f => ({ ...f, roleId: v }))} options={roleOptions} />
+              : <p className="text-xs text-[#7E8598]">They will be given the default role, Sales Rep.</p>}
+            <TextArea label="Note in the invite (optional)" value={inviting.message} onChange={v => setInviting(f => ({ ...f, message: v }))} rows={3} />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => setInviting(null)} disabled={busy}>Cancel</Button>
+              <Button onClick={sendInvite} disabled={busy || !inviting.email.trim()}>{busy ? "Sending..." : "Send invite"}</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!editing} onClose={() => !busy && setEditing(null)} title={editing ? `Edit ${fullName(editing.user) || editing.user.email}` : ""}>
+        {editing && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input label="First name" value={editing.firstName} onChange={v => setEditing(f => ({ ...f, firstName: v }))} />
+              <Input label="Last name" value={editing.lastName} onChange={v => setEditing(f => ({ ...f, lastName: v }))} />
+            </div>
+            {/* Your own address changes from Settings, where it takes your password. */}
+            <Input label="Email" type="email" value={editing.email} onChange={v => setEditing(f => ({ ...f, email: v }))} disabled={editing.user.id === me?.id} />
+            {roleOptions.length > 0 && (
+              <Select label="Role" value={editing.roleId} onChange={v => setEditing(f => ({ ...f, roleId: v }))} options={roleOptions} />
+            )}
+            {editing.user.id === me?.id && <p className="text-xs text-[#7E8598]">This is your own account. Change your email from Settings, where it takes your password. A role with less access applies as soon as you save.</p>}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => setEditing(null)} disabled={busy}>Cancel</Button>
+              <Button onClick={saveEdit} disabled={busy || !editing.email.trim() || !editing.firstName.trim()}>{busy ? "Saving..." : "Save"}</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!confirm} onClose={() => !busy && setConfirm(null)}
+        title={confirm?.kind === "deactivate" ? "Deactivate user" : confirm?.kind === "reset" ? "Send password reset" : "Revoke invite"}>
+        {confirm && (
+          <div className="space-y-4">
+            <p className="text-sm text-[#C8C2B4]">
+              {confirm.kind === "deactivate" && <>
+                <strong className="text-[#F0EDE5] break-all">{fullName(confirm.user) || confirm.user.email}</strong> is signed out at once and cannot sign in until reactivated.
+                Their records, and the history of what they did, stay as they are.
+              </>}
+              {confirm.kind === "reset" && <>
+                Send <strong className="text-[#F0EDE5] break-all">{confirm.user.email}</strong> a link to choose a new password.
+                It works once, for an hour; their current password keeps working until they use it.
+              </>}
+              {confirm.kind === "revoke" && <>
+                The invite to <strong className="text-[#F0EDE5] break-all">{confirm.invite.email}</strong> stops working. You can invite them again later.
+              </>}
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={() => setConfirm(null)} disabled={busy}>Cancel</Button>
+              {confirm.kind === "deactivate" && <Button variant="danger" disabled={busy} onClick={() => setActive(confirm.user, false)}>{busy ? "Deactivating..." : "Deactivate"}</Button>}
+              {confirm.kind === "reset" && <Button disabled={busy} onClick={() => sendReset(confirm.user)}>{busy ? "Sending..." : "Send reset link"}</Button>}
+              {confirm.kind === "revoke" && <Button variant="danger" disabled={busy} onClick={() => revoke(confirm.invite)}>{busy ? "Revoking..." : "Revoke invite"}</Button>}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!link} onClose={() => setLink(null)} title="Send them this link">
+        {link && (
+          <div className="space-y-3">
+            <p className="text-sm text-[#C8C2B4]">
+              This server did not email the {link.kind === "invite" ? "invite" : "reset link"} (email may not be set up), so nothing has been sent.
+              Give <strong className="text-[#F0EDE5] break-all">{link.email}</strong> this link.
+              It works once{link.kind === "reset" ? " and expires in an hour" : link.expiresAt ? ` and expires ${date(link.expiresAt)}` : ""}, and it is not shown again.
+            </p>
+            <input readOnly value={link.url || ""} onFocus={e => e.target.select()} aria-label={link.kind === "invite" ? "Invite link" : "Password reset link"}
+              className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-xs font-mono text-[#F0EDE5] focus:outline-none focus:border-[#F5A623]" />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" icon={Copy} onClick={copyLink}>{copied ? "Copied" : "Copy link"}</Button>
+              <Button onClick={() => setLink(null)}>Done</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
 // ── Analytics ──
 function AnalyticsPage() {
   const { data, loading } = useApi("/analytics/overview");
@@ -5583,6 +5912,7 @@ const NAV_ITEMS = [
       },
     ],
   },
+  { id: "users", label: "Users", icon: Users, hideInDemo: true, requires: { module: "users", level: "read" } },
   { id: "accessRequests", label: "Access requests", icon: Inbox, hideInDemo: true, requires: { module: "users", level: "read" } },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true, requires: [{ module: "admin", level: "read" }, { module: "users", level: "read" }] },
@@ -6070,7 +6400,7 @@ function AppShell({ go }) {
     reports: ReportsPage, surveys: SurveysPage, territories: TerritoriesPage,
     documents: DocumentsPage, tags: TagsPage, webhooks: WebhooksPage,
     partners: PartnersPage, assets: AssetsPage, notes: NotesPage,
-    sequences: SequencesPage, approvals: ApprovalsPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
+    sequences: SequencesPage, approvals: ApprovalsPage, users: UsersPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
     copilot: CopilotPage, chatter: ChatterPage, recycleBin: RecycleBinPage,
     import: ImportPage,
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,
