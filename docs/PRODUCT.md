@@ -46,7 +46,7 @@ Sales Nebula is an enterprise CRM platform that provides complete Salesforce fea
 
 ### 3. Marketing and Campaigns
 
-**Campaign Management** -- Create campaigns with member lists, track responses (Sent, Responded, Attended), and measure ROI. Multi-touch attribution models show which campaigns influenced which deals and what percentage of revenue each campaign drove.
+**Campaign Management** -- Plan campaigns with member and recipient lists, record responses and measure ROI. Multi-touch attribution models show which campaigns influenced which deals and what percentage of revenue each campaign drove. Bulk campaign delivery is unavailable: the send action returns 501 and does not change delivery state. Individual sales emails can be sent through the separate email workflow when SMTP is configured.
 
 **Email Automation** -- Build multi-step drip sequences with enrollment tracking. Templates support merge fields. Sending tracks opens (tracking pixel), clicks, and bounces via the EmailTracking model. Sequences can be activated, paused, and processed on schedule.
 
@@ -72,6 +72,8 @@ Sales Nebula is an enterprise CRM platform that provides complete Salesforce fea
 
 **Marketplace** -- AppExchange-equivalent for third-party integrations. Browse listings publicly, install with authentication. Track installs and reviews.
 
+**Generic Integrations** -- Store third-party integration configuration, field mappings and schedule settings. Generic sync and connection tests are unavailable and return 501; saving settings does not connect a provider or start a sync worker. The separate Microsoft mailbox APIs, outbound webhooks and Connected Apps remain available.
+
 **Environments** -- Create sandbox environments for testing. Export metadata (custom fields, validation rules, workflows, record types, page layouts, roles, sharing rules) and import into another environment. Change sets bundle related metadata for deployment.
 
 ### 6. Security and Compliance
@@ -86,7 +88,7 @@ Sales Nebula is an enterprise CRM platform that provides complete Salesforce fea
 
 **Encryption** -- Platform encryption policies for sensitive fields with key management and rotation.
 
-**Authentication Security** -- Bcrypt password hashing (cost 10), account lockout after configurable failed attempts, MFA enrollment (TOTP, SMS), SSO via SAML 2.0 and OIDC, and API key authentication for server-to-server integrations.
+**Authentication Security** -- Bcrypt password hashing, account lockout after configurable failed attempts, authenticator-app MFA (TOTP), and API key authentication for server-to-server integrations. SMS/email MFA and generic SAML/OIDC sign-in are unavailable; SSO configuration is stored only. Separate Google and Microsoft sign-in APIs work for existing active accounts when explicitly enabled and configured, but the current browser login uses password sign-in and has no provider buttons or OAuth callback flow.
 
 ---
 
@@ -98,7 +100,7 @@ The admin dashboard provides a real-time command center with:
 
 **Data Volume** -- Record counts for 29 key modules (users, contacts, leads, deals, accounts, cases, activities, products, campaigns, invoices, contracts, orders, and more) with total record count.
 
-**Security Metrics** -- SSO providers, MFA devices enrolled, encryption policies, active API keys, logins in last 24 hours, events in last 24 hours, active duplicate records. Color-coded: green for healthy, red for issues.
+**Security Metrics** -- Stored SSO configurations (not working sign-in providers), MFA devices enrolled, encryption policies, active API keys, logins in last 24 hours, events in last 24 hours, active duplicate records. Color-coded: green for healthy, red for issues.
 
 **Revenue Pipeline** -- Pipeline value, won value, open deals, won deals.
 

@@ -10,12 +10,16 @@ Two paths, both of which end with the public site at `/` and the product at `/ap
 **Docker:**
 
 ```bash
-export JWT_SECRET=$(openssl rand -base64 48)   # signs sessions; keep it, and do not reuse one from an example
-docker compose up
+cp .env.example .env
+# Edit .env: set POSTGRES_PASSWORD, JWT_SECRET, INITIAL_ADMIN_EMAIL,
+# INITIAL_ADMIN_PASSWORD and your public FRONTEND_URL. Configure SMTP.
+docker compose up --build -d
 ```
 
-The image builds the front end during the Docker build, so nothing else is
-needed. In production the app refuses to start without a real `JWT_SECRET`
+The image builds the frontend and waits for migrations and first-administrator
+creation before starting the API. Production creates no demo users or records.
+See [Sales pilot setup](docs/SALES_PILOT.md) for credentials, workflows and backup
+verification. In production the app refuses to start without a real `JWT_SECRET`
 (at least 32 characters, and not a placeholder such as the one in `.env.example`),
 and `docker compose up` stops with a message if it is not set.
 
@@ -37,7 +41,8 @@ npm run build        # compile the React app
 npm start            # site and API together on :7544
 ```
 
-Sign in at `/login`. The seeded administrator is `thomas@salesnebula.com`
+Sign in at `/login` with the administrator configured during production setup.
+In a local development install, the seeded administrator is `thomas@salesnebula.com`
 with the password from `prisma/seed.js`. Staff credentials are never
 pre-filled on the public login form.
 
@@ -52,6 +57,18 @@ reached, the API creates and uses `data/sales-nebula.sqlite`. With
 blip cannot bring the app up on an empty SQLite file. Set
 `ALLOW_SQLITE_FALLBACK=true` to allow the fallback in production anyway, for
 example on a single-machine demo.
+
+## Sales pilot workflows
+
+The app now exposes lead conversion (contact, optional account and deal), email
+composition and sending from contacts/deals or saved drafts, quote product-line
+editing and totals, document preview/print, acceptance recording, and invoice
+creation from a quote. Related records can be opened from detail screens.
+Actions respect role permissions and the browser demo remains read-only.
+
+`npm run verify` runs the local release gate, including browser tests with a real
+API, PostgreSQL and a local SMTP server. GitHub Actions remains disabled. See
+[Sales pilot setup and verification](docs/SALES_PILOT.md).
 
 ## At a Glance
 
@@ -113,7 +130,8 @@ The API starts on `http://localhost:7544`. The seed script creates a demo admin 
 
 ```bash
 # Set required secrets
-export JWT_SECRET="your-production-secret"
+# Set POSTGRES_PASSWORD, JWT_SECRET, INITIAL_ADMIN_EMAIL and
+# INITIAL_ADMIN_PASSWORD in .env before the first startup.
 
 # Start all services (Postgres, Redis, API)
 docker compose up -d
@@ -122,7 +140,7 @@ docker compose up -d
 # API available at http://localhost:7544
 ```
 
-Docker Compose provisions PostgreSQL 16 with persistent volumes, Redis 7 for caching, the API server with health checks, and a one-shot migration container that applies schema and seeds demo data on first boot.
+Docker Compose provisions PostgreSQL 16 with persistent volumes, Redis 7 for caching, the API server with health checks, and a one-shot migration container that applies the schema and creates the first administrator without demo records.
 
 ---
 
@@ -206,7 +224,7 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Campaigns | `/api/campaigns` | Campaign management with members, recipients, target lists, ROI tracking |
+| Campaigns | `/api/campaigns` | Campaign planning, members, recipients, target lists and ROI tracking; bulk delivery unavailable |
 | Campaign Influence | `/api/campaign-influence` | Multi-touch revenue attribution models |
 | Email Templates | `/api/emails` | Template management, sync, sending |
 | Email Sequences | `/api/sequences` | Multi-step drip campaigns with enrollment tracking |
@@ -258,9 +276,9 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Export | `/api/export` + `/api/data-export` | Data export in CSV, JSON, XLSX formats |
 | Bulk API | `/api/bulk` | High-volume batch insert/update/delete/upsert operations |
 | Webhooks | `/api/webhooks` | Outbound webhooks with HMAC-SHA256 signing, exponential retry, delivery logs |
-| Integrations | `/api/integrations` | Third-party integration configuration and credential storage |
+| Integrations | `/api/integrations` | Configuration and credential storage only; generic sync and connection tests unavailable |
 | Connected Apps | `/api/connected-apps` | OAuth2 client application management |
-| OAuth Provider | `/api/oauth` | OAuth2 authorization server (authorization code grant) |
+| OAuth Sign-In | `/api/oauth` | Provider-specific Google and Microsoft sign-in APIs, when configured |
 | Marketplace | `/api/marketplace` | App listings, installs, reviews (public browsing, auth for install) |
 | CDP | `/api/cdp` | Customer Data Platform: data streams, unified profiles, segments |
 
@@ -273,8 +291,8 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Sharing Rules | `/api/sharing` | Record sharing rules and org-wide defaults |
 | Field-Level Security | (via configuration) | Per-field read/edit permissions by role |
 | Org-Wide Defaults | (via configuration) | Default record visibility (Private/Public Read/Public Read-Write) |
-| SSO | `/api/security` | SAML 2.0 and OIDC configuration |
-| MFA | `/api/security` | TOTP and SMS multi-factor authentication |
+| SSO | `/api/security` | SAML 2.0 and OIDC configuration storage; sign-in unavailable |
+| MFA | `/api/security` | Authenticator-app (TOTP) multi-factor authentication |
 | Encryption (Shield) | `/api/security` | Platform encryption policies and key management |
 | Consent | `/api/consent` | GDPR consent records with opt-in/opt-out, self-service opt-out endpoint |
 | Monitoring | `/api/monitoring` | Login history, event logs, 24h summary |
@@ -494,7 +512,15 @@ Each key allows `rateLimit` requests per hour (default 1000). Responses carry `X
 
 ### SSO and OAuth
 
-SSO providers (SAML 2.0 and OIDC) are configured via `/api/security/sso`. Google and Microsoft sign-in (`/api/oauth`) come pre-wired through environment variables.
+`/api/security/sso` stores SAML 2.0 and OIDC configuration, but does not enable sign-in. `POST /api/security/sso/login` returns **501 Not Implemented**; use password sign-in in the browser. SMS and email MFA are also unavailable; use an authenticator app (TOTP).
+
+The separate Google and Microsoft sign-in APIs (`/api/oauth`) are implemented and require `OAUTH_LOGIN_ENABLED=true` plus provider credentials. Microsoft also requires your directory's GUID in `MICROSOFT_TENANT_ID`. These APIs sign in existing, active accounts only. The current browser login does not include provider buttons or an OAuth callback flow; enabling environment variables alone does not add them.
+
+### Feature availability for a sales pilot
+
+Campaigns support planning, recipient lists and response tracking. Bulk campaign delivery is unavailable: `POST /api/campaigns/:id/send` returns **501** without changing campaign or recipient delivery state. Individual sales emails remain available through the email workflow when SMTP is configured.
+
+Generic integration records under `/api/integrations` store configuration only. Their sync and connection-test actions return **501**; saving a schedule does not start a sync worker. Stored status, dates and log summaries do not establish a live connection. This limitation does not apply to the separate Microsoft mailbox APIs under `/api/inbound-email`, outbound webhooks or Connected Apps.
 
 ### Connected Apps (OAuth 2.0)
 

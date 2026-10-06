@@ -1,4 +1,9 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
+import { T } from "./tokens";
+import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
+import { AuthContext, RouteContext, useAuth, can } from "./contexts";
+import { LeadActions, EmailActions, QuoteActions, QuoteFormExtras, RelatedRecords, LineItems, validateQuoteForm } from "./SalesWorkflows";
+import { FeatureAvailability } from "./FeatureAvailability";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
 import { fmt, money, setUserPrefs, timeZones, LOCALES } from "./prefs";
@@ -19,22 +24,6 @@ import {
 // ========================================================================
 // THEME
 // ========================================================================
-const T = {
-  base: "#060B1A", sidebar: "#081024", sidebarHover: "#0F1A38",
-  card: "#0B1228", cardHover: "#101B3A", surface: "#0E1630",
-  border: "#182550", borderLight: "#203060",
-  heading: "#F0EDE5", body: "#C8C2B4", muted: "#7E8598", dim: "#4A5168",
-  accent: "#F5A623", accentHover: "#E8961A",
-  accentBg: "rgba(245,166,35,0.08)", accentBorder: "rgba(245,166,35,0.20)",
-  action: "#4F8EF7",
-  emerald: "#34D399", emeraldBg: "rgba(52,211,153,0.10)",
-  ruby: "#F87171", rubyBg: "rgba(248,113,113,0.10)",
-  amber: "#FBBF24", amberBg: "rgba(251,191,36,0.10)",
-  sapphire: "#60A5FA", sapphireBg: "rgba(96,165,250,0.10)",
-  amethyst: "#A78BFA", amethystBg: "rgba(167,139,250,0.10)",
-  teal: "#2DD4BF", tealBg: "rgba(45,212,191,0.10)",
-};
-
 const API = "/api";
 
 // ========================================================================
@@ -63,7 +52,7 @@ function clickable(onClick, label) {
   };
 }
 
-const AuthContext = createContext();
+
 
 /**
  * Where we are inside /app, mirrored into the address bar.
@@ -72,7 +61,7 @@ const AuthContext = createContext();
  * to, bookmarked, or closed with the browser's back button, and a refresh
  * dropped you back on the dashboard.
  */
-const RouteContext = createContext({ module: "dashboard", recordId: null, openRecord: () => {}, closeRecord: () => {}, navigate: () => {} });
+
 
 /** "/app/contacts/abc123" -> { module: "contacts", recordId: "abc123" } */
 function parseAppPath(pathname) {
@@ -80,15 +69,6 @@ function parseAppPath(pathname) {
   if (parts[0] !== "app") return { module: "dashboard", recordId: null };
   return { module: parts[1] || "dashboard", recordId: parts[2] || null };
 }
-function useAuth() { return useContext(AuthContext); }
-
-const PERMISSION_LEVELS = { none: 0, read: 1, edit: 2, full: 3 };
-/** Whether the user's role grants at least `level` on `module`, as the API decides it. */
-function can(user, module, level) {
-  const held = user?.role?.permissions?.find(p => p.module === module)?.level;
-  return (PERMISSION_LEVELS[held] || 0) >= (PERMISSION_LEVELS[level] || 0);
-}
-
 /** The CSRF token the server set beside the session cookies. */
 function csrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)sn_csrf=([^;]+)/);
@@ -276,153 +256,6 @@ function useMediaQuery(query) {
 // SHARED COMPONENTS -- ALL MOBILE-FIRST
 // ========================================================================
 
-function Badge({ children, color = "primary", className = "" }) {
-  const colors = {
-    primary: `bg-[${T.accentBg}] text-[${T.accent}] border-[${T.accentBorder}]`,
-    success: `bg-[${T.emeraldBg}] text-[${T.emerald}]`, danger: `bg-[${T.rubyBg}] text-[${T.ruby}]`,
-    warning: `bg-[${T.amberBg}] text-[${T.amber}]`, info: `bg-[${T.sapphireBg}] text-[${T.sapphire}]`,
-    purple: `bg-[${T.amethystBg}] text-[${T.amethyst}]`, cyan: `bg-[${T.tealBg}] text-[${T.teal}]`,
-    neutral: `bg-[${T.surface}] text-[${T.muted}]`,
-  };
-  return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${colors[color] || colors.primary} ${className}`}>{children}</span>;
-}
-
-function Button({ children, variant = "primary", size = "md", onClick, disabled, className = "", icon: Icon, fullWidth, type = "button", ariaLabel }) {
-  const variants = {
-    primary: `bg-[${T.accent}] hover:bg-[${T.accentHover}] text-[${T.base}] font-semibold`,
-    secondary: `bg-[${T.surface}] hover:bg-[${T.card}] text-[${T.body}] border border-[${T.border}]`,
-    ghost: `hover:bg-[${T.surface}] text-[${T.muted}] hover:text-[${T.body}]`,
-    danger: `bg-[${T.rubyBg}] hover:bg-[rgba(248,113,113,0.20)] text-[${T.ruby}]`,
-  };
-  const sizes = { sm: "px-2.5 py-1.5 text-xs min-h-[32px]", md: "px-3.5 py-2 text-sm min-h-[40px]", lg: "px-5 py-2.5 text-sm min-h-[44px]" };
-  return (
-    <button onClick={onClick} disabled={disabled} type={type} aria-label={ariaLabel}
-      className={`inline-flex items-center justify-center gap-2 rounded-lg transition-all disabled:opacity-40 active:scale-[0.97] touch-manipulation ${variants[variant]} ${sizes[size]} ${fullWidth ? "w-full" : ""} ${className}`}>
-      {Icon && <Icon size={size === "sm" ? 14 : 16} className="shrink-0" />}
-      {children}
-    </button>
-  );
-}
-
-function Input({ label, value, onChange, type = "text", placeholder, required, className = "", ...props }) {
-  // A saved date comes back as a full ISO timestamp, which a date input shows
-  // as blank, so editing a record hid its dates; and 0 is a value, not blank.
-  const shown = typeof value === "string" && type === "date" ? value.slice(0, 10)
-    : typeof value === "string" && type === "datetime-local" ? value.slice(0, 16)
-    : value ?? "";
-  return (
-    <label className={`block ${className}`}>
-      {label && <span className="block text-xs font-medium mb-1.5" style={{ color: "var(--sn-slate)" }}>{label}{required && <span className="text-[#F87171] ml-0.5">*</span>}</span>}
-      <input type={type} value={shown} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        aria-label={label ? undefined : placeholder}
-        {...props}
-        className="w-full px-3 py-2.5 rounded-lg text-sm focus:outline-none focus:ring-1 transition-colors min-h-[44px]"
-        style={{
-          background: "var(--sn-raised)",
-          border: "1px solid var(--sn-rule)",
-          color: "var(--sn-cream)",
-        }}
-      />
-    </label>
-  );
-}
-
-function Select({ label, value, onChange, options = [], placeholder, className = "" }) {
-  return (
-    <label className={`block ${className}`}>
-      {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
-      <select value={value || ""} onChange={e => onChange(e.target.value)}
-        aria-label={label ? undefined : (placeholder || "Select an option")}
-        className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] focus:outline-none focus:border-[#F5A623] transition-colors appearance-none min-h-[44px]">
-        {placeholder && <option value="">{placeholder}</option>}
-        {options.map(o => typeof o === "string" ? <option key={o} value={o}>{o}</option> : <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </label>
-  );
-}
-
-function TextArea({ label, value, onChange, rows = 3, placeholder, className = "" }) {
-  return (
-    <label className={`block ${className}`}>
-      {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
-      <textarea value={value || ""} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder}
-        aria-label={label ? undefined : placeholder}
-        className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] transition-colors resize-none" />
-    </label>
-  );
-}
-
-// Modal: bottom sheet on mobile, centered on desktop
-function Modal({ open, onClose, title, children, wide }) {
-  const panelRef = useRef(null);
-  const titleId = useMemo(() => `modal-${Math.random().toString(36).slice(2, 9)}`, []);
-
-  // Escape closes, focus moves into the dialog and returns to whatever opened
-  // it, and Tab is kept inside while it is open.
-  useEffect(() => {
-    if (!open) return undefined;
-    const previouslyFocused = document.activeElement;
-
-    const onKeyDown = e => {
-      if (e.key === 'Escape') { e.stopPropagation(); onClose?.(); return; }
-      if (e.key !== 'Tab' || !panelRef.current) return;
-
-      const focusable = panelRef.current.querySelectorAll(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    };
-
-    document.addEventListener('keydown', onKeyDown);
-    const firstField = panelRef.current?.querySelector('input, select, textarea, button');
-    firstField?.focus();
-
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
-    };
-  }, [open, onClose]);
-
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-      {/* Clicking away closes; it is a mouse convenience, so Escape covers the
-          same ground for anyone else and this stays out of the tab order. */}
-      <div className="absolute inset-0 bg-[rgba(4,6,16,0.85)] backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className={`relative bg-[#0B1228] border border-[#182550] w-full
-        rounded-t-2xl sm:rounded-xl shadow-2xl
-        ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}
-        max-h-[92vh] sm:max-h-[85vh] flex flex-col
-        animate-[slideUp_0.25s_ease-out] sm:animate-[fadeScale_0.2s_ease-out]`}>
-        <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden="true">
-          <div className="w-10 h-1 rounded-full bg-[#203060]" />
-        </div>
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-[#182550]">
-          <h3 id={titleId} className="text-base sm:text-lg font-semibold text-[#F0EDE5]">{title}</h3>
-          <button type="button" onClick={onClose} aria-label="Close dialog"
-            className="text-[#4A5168] hover:text-[#C8C2B4] p-1.5 -mr-1 rounded-lg hover:bg-[#0E1630] transition-colors">
-            <X size={18} aria-hidden="true" />
-          </button>
-        </div>
-        <div className="px-4 sm:px-6 py-4 overflow-y-auto flex-1 overscroll-contain">{children}</div>
-      </div>
-      <style>{`
-        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-        @keyframes fadeScale { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
-      `}</style>
-    </div>
-  );
-}
-
 function StatCard({ label, value, change, changeHint, icon: Icon, color = "primary" }) {
   const bgColors = { primary: "bg-[rgba(245,166,35,0.08)]", success: "bg-[rgba(52,211,153,0.10)]", warning: "bg-[rgba(251,191,36,0.10)]", danger: "bg-[rgba(248,113,113,0.10)]", purple: "bg-[rgba(167,139,250,0.10)]", cyan: "bg-[rgba(45,212,191,0.10)]" };
   const iconColors = { primary: "text-[#F5A623]", success: "text-[#34D399]", warning: "text-[#FBBF24]", danger: "text-[#F87171]", purple: "text-[#A78BFA]", cyan: "text-[#2DD4BF]" };
@@ -481,16 +314,6 @@ function Spinner({ label = "Loading" }) {
     <div className="flex items-center justify-center py-12" role="status">
       <div className="w-7 h-7 border-2 border-[#182550] border-t-[#F5A623] rounded-full animate-spin" aria-hidden="true" />
       <span className="sr-only">{label}</span>
-    </div>
-  );
-}
-
-function Toast({ message, type = "success", onClose }) {
-  useEffect(() => { const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, [onClose]);
-  const colors = { success: "bg-[#34D399]/10 border-[#34D399]/30 text-[#34D399]", error: "bg-[#F87171]/10 border-[#F87171]/30 text-[#F87171]" };
-  return (
-    <div role={type === "error" ? "alert" : "status"} aria-live={type === "error" ? "assertive" : "polite"} className={`fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl border ${colors[type]} text-sm font-medium shadow-lg backdrop-blur-sm animate-[fadeScale_0.2s_ease-out]`}>
-      {message}
     </div>
   );
 }
@@ -1080,8 +903,12 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
 }
 // `recordActions` are buttons on a record's detail page beside Edit and Delete:
 // [{ label, icon, run: async (record, apiFetch) => "message shown on success" }].
-function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [] }) {
-  const { apiFetch } = useAuth();
+function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [], detailExtras, formExtras, validateForm, wideForm = false, permissionModule = null }) {
+  const { apiFetch, user, demoMode } = useAuth();
+  const mayEdit = !permissionModule || (!demoMode && can(user, permissionModule, 'edit'));
+  const mayDelete = !permissionModule || (!demoMode && can(user, permissionModule, 'full'));
+  const savingRef = useRef(false);
+  const [saving, setSaving] = useState(false);
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -1150,7 +977,11 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   }, [recordId, endpoint, apiFetch]);
 
   const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true; setSaving(true);
     try {
+      const problem = validateForm?.(form);
+      if (problem) throw new Error(problem);
       if (editing) {
         // The form sends the whole record back, so a save over someone else's
         // change put their change back to what this form held, and answered
@@ -1176,6 +1007,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         type: "error",
       });
     }
+    finally { savingRef.current = false; setSaving(false); }
   };
 
   const remove = async (row) => {
@@ -1205,9 +1037,9 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
           title={detailRecord[nameField] || detailRecord.firstName || detailRecord.subject}
           fields={detailFields || formFields?.map(f => ({ key: f.key, label: f.label, render: f.render })) || columns}
           onBack={() => { setDetailRecord(null); closeRecord(); }}
-          onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
-          onDelete={remove}
-          actions={recordActions.map(a => ({
+          onEdit={mayEdit ? row => { setEditing(row); setForm({ ...row }); setModalOpen(true); } : undefined}
+          onDelete={mayDelete ? remove : undefined}
+          actions={(mayEdit ? recordActions : []).map(a => ({
             ...a,
             onClick: async row => {
               try { setToast({ message: (await a.run(row, apiFetch)) || "Done", type: "success" }); }
@@ -1215,7 +1047,11 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             },
           }))}
         />
-        <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }}
+        <React.Fragment key={detailRecord.id}>
+          {detailExtras?.(detailRecord, () => { apiFetch(`${endpoint}/${detailRecord.id}`).then(setDetailRecord).catch(e => setToast({ message: e.message, type: "error" })); load(); })}
+        </React.Fragment>
+        <RelatedRecords record={detailRecord} />
+        <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
           title={`Edit ${title.slice(0, -1)}`}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
             {(formFields || []).map(f => {
@@ -1224,9 +1060,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
               return <Input key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
             })}
           </div>
+          {formExtras?.(form, setForm)}
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]">
             <Button variant="secondary" onClick={() => { setModalOpen(false); setEditing(null); }} fullWidth className="sm:w-auto">Cancel</Button>
-            <Button onClick={save} fullWidth className="sm:w-auto">Update</Button>
+            <Button onClick={save} disabled={saving} fullWidth className="sm:w-auto">Update</Button>
           </div>
         </Modal>
         {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
@@ -1265,7 +1102,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             </Button>
           )}
           {headerActions}
-          {canCreate && <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
+          {canCreate && mayEdit && <Button icon={Plus} onClick={() => { setEditing(null); setForm({}); setModalOpen(true); }} size="md" ariaLabel={`New ${title || "record"}`}>
             <span className="hidden sm:inline">New</span>
           </Button>}
         </div>
@@ -1290,15 +1127,15 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         <div className="p-2 sm:p-0">
           <DataTable columns={columns} data={items} loading={loading} error={loadError} onRetry={load}
             onRowClick={row => { setDetailRecord(row); openRecord(row.id); }}
-            onEdit={row => { setEditing(row); setForm({ ...row }); setModalOpen(true); }}
-            onDelete={remove} selected={selected} onSelect={setSelected}
+            onEdit={mayEdit ? row => { setEditing(row); setForm({ ...row }); setModalOpen(true); } : undefined}
+            onDelete={mayDelete ? remove : undefined} selected={selected} onSelect={mayDelete ? setSelected : undefined}
             emptyTitle={emptyTitle || `No ${title.toLowerCase()} yet`} />
         </div>
         <Pagination page={page} total={total} limit={limit} onChange={setPage} />
       </div>
 
       {/* Create/Edit Modal */}
-      <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }}
+      <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
         title={editing ? (editTitle || `Edit ${title.slice(0, -1)}`) : (createTitle || `New ${title.slice(0, -1)}`)}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
           {(formFields || []).map(f => {
@@ -1307,9 +1144,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             return <Input key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
           })}
         </div>
+        {formExtras?.(form, setForm)}
         <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]">
           <Button variant="secondary" onClick={() => { setModalOpen(false); setEditing(null); }} fullWidth className="sm:w-auto">Cancel</Button>
-          <Button onClick={save} fullWidth className="sm:w-auto">{editing ? "Update" : "Create"}</Button>
+          <Button onClick={save} disabled={saving} fullWidth className="sm:w-auto">{editing ? "Update" : "Create"}</Button>
         </div>
       </Modal>
 
@@ -1323,7 +1161,8 @@ function ContactsPage() {
     const c = { Active: "success", Inactive: "neutral", Lead: "info" };
     return <Badge color={c[v] || "primary"}>{v || "Active"}</Badge>;
   };
-  return <ModulePage title="Contacts" icon={Users} endpoint="/contacts" nameField="lastName"
+  return <ModulePage title="Contacts" icon={Users} endpoint="/contacts" permissionModule="contacts" nameField="lastName"
+    detailExtras={(record, onChanged) => <EmailActions record={record} module="contacts" onChanged={onChanged} />}
     columns={[
       { key: "firstName", label: "First Name" }, { key: "lastName", label: "Last Name" },
       { key: "email", label: "Email" }, { key: "phone", label: "Phone" },
@@ -1352,7 +1191,8 @@ function ContactsPage() {
 
 function LeadsPage() {
   const statusBadge = v => { const c = { New: "info", Contacted: "warning", Qualified: "success", Unqualified: "danger" }; return <Badge color={c[v] || "primary"}>{v || "New"}</Badge>; };
-  return <ModulePage title="Leads" icon={UserPlus} endpoint="/leads"
+  return <ModulePage title="Leads" icon={UserPlus} endpoint="/leads" permissionModule="leads"
+    detailExtras={(record, onChanged) => <LeadActions record={record} onChanged={onChanged} />}
     columns={[
       { key: "firstName", label: "Name", render: (v, r) => `${r.firstName || ""} ${r.lastName || ""}` },
       { key: "company", label: "Company" }, { key: "email", label: "Email" },
@@ -1374,7 +1214,8 @@ function DealsPage() {
   const { data: currencies } = useApi("/deals/currencies");
   const base = currencies?.base || "USD";
   const currencyOptions = (currencies?.data || []).map(c => ({ value: c.code, label: `${c.code} (${c.name})` }));
-  return <ModulePage title="Deals" icon={Target} endpoint="/deals"
+  return <ModulePage title="Deals" icon={Target} endpoint="/deals" permissionModule="deals"
+    detailExtras={(record, onChanged) => <EmailActions record={record} module="deals" onChanged={onChanged} />}
     columns={[
       { key: "name", label: "Deal" }, { key: "stage", label: "Stage", render: stageBadge },
       { key: "value", label: "Value", render: (v, row) => <span className="font-mono">{money(v, row?.currency || base)}</span> },
@@ -1477,7 +1318,9 @@ function ProductsPage() {
 }
 
 function QuotesPage() {
-  return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes"
+  return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes" permissionModule="quotes" wideForm validateForm={validateQuoteForm}
+    formExtras={(form, setForm) => <QuoteFormExtras form={form} setForm={setForm} />}
+    detailExtras={(record, onChanged) => <><QuoteActions record={record} onChanged={onChanged} /><LineItems record={record} /></>}
     columns={[
       { key: "name", label: "Quote" }, { key: "number", label: "#" }, { key: "status", label: "Status" },
       { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
@@ -1487,12 +1330,14 @@ function QuotesPage() {
       { key: "name", label: "Quote Name", required: true },
       { key: "status", label: "Status", type: "select", options: ["Draft","Sent","Pending Approval","Accepted","Rejected","Expired"] },
       { key: "validUntil", label: "Expiration", type: "date" }, { key: "discount", label: "Discount", type: "number" },
+      { key: "tax", label: "Tax amount", type: "number" },
       { key: "terms", label: "Terms", type: "textarea" },
     ]} />;
 }
 
 function InvoicesPage() {
-  return <ModulePage title="Invoices" icon={DollarSign} endpoint="/invoices"
+  return <ModulePage title="Invoices" icon={DollarSign} endpoint="/invoices" permissionModule="invoices"
+    detailExtras={record => <LineItems record={record} />}
     columns={[
       { key: "number", label: "#" }, { key: "status", label: "Status" },
       { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
@@ -1506,7 +1351,9 @@ function InvoicesPage() {
 }
 
 function CampaignsPage() {
-  return <ModulePage title="Campaigns" icon={Send} endpoint="/campaigns"
+  return <div className="space-y-4">
+    <FeatureAvailability features={["campaigns"]} />
+    <ModulePage title="Campaigns" icon={Send} endpoint="/campaigns" permissionModule="campaigns"
     columns={[
       { key: "name", label: "Campaign" }, { key: "type", label: "Type" }, { key: "status", label: "Status" },
       { key: "startDate", label: "Start", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
@@ -1519,11 +1366,13 @@ function CampaignsPage() {
       { key: "startDate", label: "Start", type: "date" }, { key: "endDate", label: "End", type: "date" },
       { key: "budget", label: "Budget", type: "number" },
       { key: "description", label: "Description", type: "textarea" },
-    ]} />;
+    ]} />
+  </div>;
 }
 
 function EmailsPage() {
-  return <ModulePage title="Emails" icon={Mail} endpoint="/emails"
+  return <ModulePage title="Emails" icon={Mail} endpoint="/emails" permissionModule="emails"
+    detailExtras={(record, onChanged) => <EmailActions record={record} module="emails" onChanged={onChanged} />}
     columns={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To", render: (v, row) => v || row?.toEmail || "-" },
       { key: "status", label: "Status", render: v => { const s = (v || 'draft').toLowerCase(); return <Badge color={s==='sent'?'success':s==='queued'?'info':s==='failed'?'danger':'neutral'}>{s}</Badge>; } },
@@ -2173,6 +2022,7 @@ function SettingsPage() {
             {demoMode && <p className="text-xs mt-2" style={dim}>Password changes are unavailable in demo mode.</p>}
           </div>
           <TwoFactorPanel className={panel} style={panelStyle} setToast={setToast} />
+          <div className="lg:col-span-2"><FeatureAvailability features={["sso"]} /></div>
           <AuthorizedAppsPanel className={`${panel} lg:col-span-2`} style={panelStyle} setToast={setToast} />
         </div>
       )}
@@ -2410,6 +2260,7 @@ function AdminDashboardPage() {
           {health.database === 'connected' ? 'All Systems Operational' : 'Degraded'}
         </div>
       </div>
+      <div className="mb-4 sm:mb-6"><FeatureAvailability /></div>
       <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-6 gap-2 sm:gap-3 mb-4 sm:mb-6">
         <Pill label="Uptime" value={`${upHrs}h`} color="green" />
         <Pill label="Memory" value={`${memMB}MB`} color={memMB > 500 ? "red" : "blue"} />

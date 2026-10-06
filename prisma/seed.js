@@ -4,6 +4,9 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error('Demo seeding is disabled in production. Run scripts/bootstrap-admin.js to create the initial administrator. ALLOW_DEMO_SEED=true is for an isolated demo deployment only.');
+  }
   // Seeding twice used to die on a unique-constraint violation half way
   // through, leaving a partly-populated database behind. `npm run setup` runs
   // this, so a second setup on an existing install failed.

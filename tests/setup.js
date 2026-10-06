@@ -60,6 +60,14 @@ async function setup() {
   prisma = new PrismaClient();
   app = createApp(prisma);
 
+  // The local verify gate already applied and checked production migrations.
+  // Rebuilding 286 tables for every Jest file is unnecessary in that mode;
+  // each suite still clears its data through cleanDatabase().
+  if (process.env.TEST_SCHEMA_READY === 'true') {
+    await prisma.$queryRaw`SELECT 1 FROM "Role" LIMIT 1`;
+    return { prisma, app };
+  }
+
   // Push schema to test DB (fresh tables)
   const { execSync } = require('child_process');
   try {

@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { mockPublicExampleDns } = require('./publicDnsFixture');
 const {
   setup, teardown, cleanDatabase,
   createTestUser, createTestContact, createTestDeal,
@@ -14,11 +15,13 @@ beforeAll(async () => {
 afterAll(async () => { await teardown(); });
 
 beforeEach(async () => {
+  mockPublicExampleDns();
   await cleanDatabase();
   const { user, token: t } = await createTestUser();
   token = t;
   userId = user.id;
 });
+afterEach(() => jest.restoreAllMocks());
 
 // ─── WEBHOOKS ───
 

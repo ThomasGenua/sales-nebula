@@ -37,50 +37,16 @@ const router = createCrudRouter('campaign', 'campaigns', {
     return { valid: Object.keys(errors).length === 0, errors };
   },
   customRoutes: (router) => {
-    /**
-     * Mark a campaign as sent.
-     *
-     * This used to invent its own results: delivered, opened, clicked and
-     * converted were each derived from Math.random(), and revenue was
-     * `converted * (1000 + Math.random() * 9000)` — fabricated dollar amounts
-     * written to the database and read back by /:id/stats as if measured.
-     * Recipients were assigned random statuses the same way. Someone would
-     * eventually have made a budget decision on those numbers.
-     *
-     * It never actually stored them: Campaign has no `metrics` column, so the
-     * update threw "Unknown argument `metrics`" and this route answered 500 on
-     * every call. Engagement now comes from the CampaignRecipient rows, which
-     * is where /:id/stats already reads it from, so there is nothing to invent
-     * and no new column to add.
-     *
-     * Actual delivery is still not implemented: queueing, throttling and
-     * unsubscribe handling are a separate piece of work, so no mail is sent.
-     */
+    // Delivery has no worker, throttling or unsubscribe handling yet. Keep
+    // the API explicit and leave campaign and recipient history untouched.
     router.post('/:id/send', requirePermission('campaigns', 'edit'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { recipients: true } });
+        const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true } });
         if (!campaign) return res.status(404).json({ error: 'Not found' });
-
-        const queued = campaign.recipients.length;
-        const sentAt = new Date();
-
-        await prisma.$transaction([
-          prisma.campaign.update({ where: { id: req.params.id }, data: { status: 'Sent' } }),
-          prisma.campaignRecipient.updateMany({
-            where: { campaignId: req.params.id },
-            data: { status: 'queued', sentAt },
-          }),
-        ]);
-
-        const updated = await prisma.campaign.findUnique({ where: { id: req.params.id }, include: { recipients: true } });
-        res.json({
-          ...updated,
-          delivery: {
-            queued,
-            implemented: false,
-            detail: 'Recipients are queued. No mail is dispatched and no engagement is tracked yet.',
-          },
+        res.status(501).json({
+          code: 'CAMPAIGN_DELIVERY_UNAVAILABLE',
+          error: 'Campaign email delivery is not available yet. No messages were sent or queued, and the campaign and recipients were not changed.',
         });
       } catch (err) { next(err); }
     });

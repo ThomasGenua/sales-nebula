@@ -1,0 +1,15 @@
+export const T = {
+  base: "#060B1A", sidebar: "#081024", sidebarHover: "#0F1A38",
+  card: "#0B1228", cardHover: "#101B3A", surface: "#0E1630",
+  border: "#182550", borderLight: "#203060",
+  heading: "#F0EDE5", body: "#C8C2B4", muted: "#7E8598", dim: "#4A5168",
+  accent: "#F5A623", accentHover: "#E8961A",
+  accentBg: "rgba(245,166,35,0.08)", accentBorder: "rgba(245,166,35,0.20)",
+  action: "#4F8EF7",
+  emerald: "#34D399", emeraldBg: "rgba(52,211,153,0.10)",
+  ruby: "#F87171", rubyBg: "rgba(248,113,113,0.10)",
+  amber: "#FBBF24", amberBg: "rgba(251,191,36,0.10)",
+  sapphire: "#60A5FA", sapphireBg: "rgba(96,165,250,0.10)",
+  amethyst: "#A78BFA", amethystBg: "rgba(167,139,250,0.10)",
+  teal: "#2DD4BF", tealBg: "rgba(45,212,191,0.10)",
+};

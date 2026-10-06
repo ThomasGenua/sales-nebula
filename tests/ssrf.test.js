@@ -8,6 +8,7 @@
  */
 
 const request = require('supertest');
+const { mockPublicExampleDns } = require('./publicDnsFixture');
 const {
   setup, teardown, cleanDatabase,
   createTestRole, createTestUser, authHeader,
@@ -19,10 +20,12 @@ let app, prisma, admin;
 beforeAll(async () => { ({ prisma, app } = await setup()); });
 afterAll(async () => { await teardown(); });
 beforeEach(async () => {
+  mockPublicExampleDns();
   await cleanDatabase();
   const role = await createTestRole('Admin');
   admin = await createTestUser({ email: 'ssrf-admin@test.com', roleId: role.id });
 });
+afterEach(() => jest.restoreAllMocks());
 
 describe('Reserved address detection', () => {
   it.each([
@@ -69,6 +72,14 @@ describe('Outbound URL validation', () => {
 });
 
 describe('Webhook configuration', () => {
+  it('refuses a public-looking hostname that resolves to a private address', async () => {
+    require('dns').promises.lookup.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+    const res = await request(app).post('/api/webhooks').set(authHeader(admin.token))
+      .send({ name: 'Private DNS', url: 'https://example.com/hook', events: ['deals.created'] });
+    expect(res.status).toBe(400); expect(res.body.code).toBe('UNSAFE_WEBHOOK_URL');
+    expect(await prisma.webhook.count()).toBe(0);
+  });
+
   it('refuses a webhook pointing at the metadata endpoint', async () => {
     const res = await request(app).post('/api/webhooks').set(authHeader(admin.token))
       .send({ name: 'Metadata', url: 'http://169.254.169.254/latest/meta-data/', events: ['deals.created'] });

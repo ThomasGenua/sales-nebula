@@ -118,7 +118,7 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
     if (badLine) return res.status(400).json({ error: badLine, code: 'LINK_NOT_VISIBLE' });
     const quote = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
       data: {
-        ...quoteAmounts(data, lines.length ? lines : null),
+        ...quoteAmounts(data, Array.isArray(items) ? lines : null),
         items: { create: lines },
       },
       include,
@@ -156,7 +156,7 @@ router.put('/:id', requirePermission('quotes', 'edit'), async (req, res, next) =
     if (lines) writes.push(prisma.quoteItem.deleteMany({ where: { quoteId: req.params.id } }));
     writes.push(prisma.quote.update({
       where: { id: req.params.id },
-      data: { ...quoteAmounts(data, lines && lines.length ? lines : null, current), ...(lines && { items: { create: lines } }) },
+      data: { ...quoteAmounts(data, lines, current), ...(lines && { items: { create: lines } }) },
       include,
     }));
     const quote = (await prisma.$transaction(writes)).pop();
