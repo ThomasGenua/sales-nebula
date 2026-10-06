@@ -238,9 +238,10 @@ describe('POST /api/contacts/:id/merge', () => {
     expect(res.body.phone).toBe('555-1234');
     expect(res.body.firstName).toBe('Primary'); // Primary keeps its values
 
-    // Duplicate should be deleted
+    // The duplicate is deleted as a delete is: soft, and in the recycle bin.
     const dupe = await prisma.contact.findUnique({ where: { id: duplicate.id } });
-    expect(dupe).toBeNull();
+    expect(dupe.deletedAt).not.toBeNull();
+    expect(await prisma.recycleBinItem.count({ where: { module: 'contacts', recordId: duplicate.id } })).toBe(1);
   });
 });
 

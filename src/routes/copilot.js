@@ -6,6 +6,7 @@ const { complete, isConfigured, AiError } = require('../services/claude');
 // The tighter limit meant for model calls was defined and attached to nothing.
 const { limiters } = require('../middleware/rateLimit');
 const { VALID_STAGES } = require('../utils/integrity');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 
 const router = Router();
 
@@ -128,31 +129,28 @@ router.post('/actions', authenticate, async (req, res, next) => {
     // An action sent without params failed as a 500 reading params.subject.
     const { action, params = {} } = req.body;
     if (!action) return res.status(400).json({ error: 'action required' });
+    // Each action writes as the record's own page would
+    // (services/recordWrites): the module's rules and hooks, its workflows and
+    // webhooks, none of which a copilot action ran.
+    const write = { req, userId: req.userId, source: 'copilot' };
     const actions = {
       'create_task': async () => {
         // Status left to its default (Scheduled); 'Open' was a status no activity screen or count knows.
-        const task = await prisma.activity.create({ data: { type: 'Task', subject: params.subject || 'New Task', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null } });
+        const { record: task } = await createRecord(prisma, 'activities', { type: 'Task', subject: params.subject || 'New Task', ownerId: req.user.id, dueDate: params.dueDate ? new Date(params.dueDate) : null }, write);
         return { message: 'Task created', task };
       },
       'log_call': async () => {
-        const call = await prisma.activity.create({ data: { type: 'Call', subject: params.subject || 'Phone Call', status: 'Completed', ownerId: req.user.id, duration: params.duration || 0, description: params.notes } });
+        const { record: call } = await createRecord(prisma, 'activities', { type: 'Call', subject: params.subject || 'Phone Call', status: 'Completed', ownerId: req.user.id, duration: params.duration || 0, description: params.notes }, write);
         return { message: 'Call logged', activity: call };
       },
       'update_deal_stage': async () => {
         if (!params.dealId || !params.stage) return { error: 'dealId and stage required' };
-        // A stage the pipeline has, recorded in the deal's stage history and
-        // announced as an edit is: this wrote any text as the stage, unrecorded.
+        // A stage the pipeline has: this wrote any text as the stage. The
+        // deal's own hook keeps its stage history and announces the move.
         if (!VALID_STAGES.includes(params.stage)) return { error: `Invalid stage. Must be one of: ${VALID_STAGES.join(', ')}` };
-        const before = await prisma.deal.findFirst({ where: { id: String(params.dealId), deletedAt: null }, select: { stage: true } });
+        const before = await prisma.deal.findFirst({ where: { id: String(params.dealId), deletedAt: null } });
         if (!before) return { error: 'Deal not found' };
-        const deal = await prisma.deal.update({ where: { id: String(params.dealId) }, data: { stage: params.stage } });
-        if (before.stage !== deal.stage) {
-          const last = await prisma.dealStageHistory.findFirst({ where: { dealId: deal.id }, orderBy: { createdAt: 'desc' } });
-          await prisma.dealStageHistory.create({
-            data: { dealId: deal.id, fromStage: before.stage, toStage: deal.stage, changedById: req.userId, duration: last ? Math.round((Date.now() - last.createdAt.getTime()) / 86400000) : null },
-          });
-          req.app.locals.emit?.dealStageChanged?.(deal, before.stage, deal.stage);
-        }
+        const { record: deal } = await updateRecord(prisma, 'deals', before, { stage: params.stage }, write);
         return { message: `Deal moved to ${params.stage}`, deal };
       },
     };

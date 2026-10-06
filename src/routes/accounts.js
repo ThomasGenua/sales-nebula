@@ -3,6 +3,7 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { createRecord, updateRecord, deleteRecord } = require('../services/recordWrites');
 
 /**
  * `find(where)` over another module's rows matching `where`, narrowed to the
@@ -119,7 +120,9 @@ const router = createCrudRouter('account', 'accounts', {
           data.parentId = null;
         }
 
-        const clone = await prisma.account.create({ data });
+        // Made as an account is on its own page (services/recordWrites): its
+        // rules, workflows and webhooks; its links were settled above.
+        const { record: clone } = await createRecord(prisma, 'accounts', data, { userId: req.userId, source: 'clone', emit: req.app.locals.emit });
         res.status(201).json(clone);
       } catch (err) { next(err); }
     });
@@ -199,7 +202,8 @@ router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), a
       prisma.account.findUnique({ where: { id: req.params.id } }),
       prisma.account.findUnique({ where: { id: mergeFromId } }),
     ]);
-    if (!primary || !secondary) return res.status(404).json({ error: 'Account not found' });
+    // Live ones: a deleted account cannot take records, or give them up.
+    if (!primary || !secondary || primary.deletedAt || secondary.deletedAt) return res.status(404).json({ error: 'Account not found' });
     // Transfer all related records
     await Promise.all([
       prisma.contact.updateMany({ where: { accountId: mergeFromId }, data: { accountId: primary.id } }),
@@ -214,8 +218,13 @@ router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), a
     for (const field of ['phone','website','industry','billingCity','billingState','billingCountry','description','annualRevenue']) {
       if (!primary[field] && secondary[field]) updates[field] = secondary[field];
     }
-    if (Object.keys(updates).length) await prisma.account.update({ where: { id: primary.id }, data: updates });
-    await prisma.account.update({ where: { id: mergeFromId }, data: { deletedAt: new Date() } });
+    // The survivor changes as an edit would and the merged account is deleted
+    // as a delete is (services/recordWrites): rules, workflows and webhooks,
+    // and a recycle bin entry. It was only marked deleted, with nothing in the
+    // bin and no delete webhook.
+    const write = { req, userId: req.userId, source: `merge of ${mergeFromId}` };
+    if (Object.keys(updates).length) await updateRecord(prisma, 'accounts', primary, updates, write);
+    await deleteRecord(prisma, 'accounts', secondary, { ...write, source: `merged into ${primary.id}` });
     await req.audit({ action: 'merge', module: 'accounts', recordId: primary.id, details: `Merged ${mergeFromId} into ${primary.id}` });
     res.json({ merged: true, primaryId: primary.id, mergedFromId: mergeFromId });
   } catch (err) { next(err); }

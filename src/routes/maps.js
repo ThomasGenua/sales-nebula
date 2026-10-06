@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { columnsFrom } = require('../utils/modelFields');
+const { updateRecord, batchClient, isRecordModule } = require('../services/recordWrites');
 const {
   haversineDistance, isValidPoint, boundingBox, pointInPolygon, polygonBounds,
   polygonArea, polygonCentroid, circleToPolygon, encodeGeohash, clusterByGeohash,
@@ -525,8 +526,23 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
       // rewrote the owner of every record in the area, deleted ones included.
       if (!permits(req, permissionFor(module), 'edit')) { summary.push({ module, error: `Insufficient permissions for ${permissionFor(module)}` }); continue; }
       try {
-        const result = await prisma[model].updateMany({ where: await reachableRecords(req, module, { id: { in: ids } }, 'Edit'), data: { ownerId } });
-        summary.push({ module, updated: result.count });
+        const where = await reachableRecords(req, module, { id: { in: ids } }, 'Edit');
+        if (!isRecordModule(module)) {
+          const result = await prisma[model].updateMany({ where, data: { ownerId } });
+          summary.push({ module, updated: result.count });
+          continue;
+        }
+        // Each record's new owner as an edit would set it
+        // (services/recordWrites): its security groups, the rules and
+        // workflows on its owner, its webhooks. One a rule refuses keeps its
+        // owner and is counted as failed.
+        const db = batchClient(prisma);
+        const write = { req, userId: req.userId, source: `map area ${area.name}` };
+        let updated = 0, failed = 0;
+        for (const record of await prisma[model].findMany({ where })) {
+          try { await updateRecord(db, module, record, { ownerId }, write); updated++; } catch (e) { failed++; }
+        }
+        summary.push({ module, updated, ...(failed ? { failed } : {}) });
       } catch (e) { summary.push({ module, error: String(e.message).slice(0, 100) }); }
     }
 

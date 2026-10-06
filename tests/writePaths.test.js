@@ -279,3 +279,91 @@ describe('Conversions and the channels customers write through', () => {
     expect(await firedFor(onMove)).toEqual([closed.id]);
   });
 });
+
+describe("The modules' own actions", () => {
+  test('escalating a case runs its status rules and keeps one history entry, not two', async () => {
+    const cs = await prisma.case.create({ data: { subject: 'Slow', caseNumber: 'CS-0100', status: 'Open', priority: 'Medium' } });
+    const onMove = await ruleOn('cases', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Escalated' }]);
+
+    const res = await post(`/api/cases/${cs.id}/escalate`, { reason: 'Waited a week' });
+
+    expect(res.status).toBe(200);
+    expect([res.body.status, res.body.priority, res.body.isEscalated]).toEqual(['Escalated', 'High', true]);
+    expect(await firedFor(onMove)).toEqual([cs.id]);
+    const history = await prisma.caseStatusHistory.findMany({ where: { caseId: cs.id } });
+    expect(history.map(h => [h.fromStatus, h.toStatus])).toEqual([['Open', 'Escalated']]);
+  });
+
+  test('activating an order, and renewing a contract, run the rules on what they change and make', async () => {
+    const account = await createTestAccount();
+    const order = await prisma.order.create({ data: { orderNumber: 'ORD-9001', accountId: account.id, status: 'Draft' } });
+    const contract = await prisma.contract.create({
+      data: { contractNumber: 'CON-9001', name: 'Support', accountId: account.id, startDate: new Date('2026-01-01'), endDate: new Date('2026-12-31'), status: 'Activated' },
+    });
+    const onActivate = await ruleOn('orders', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Activated' }]);
+    const onContract = await ruleOn('contracts', 'create');
+
+    const activated = await post(`/api/orders/${order.id}/activate`, {});
+    const renewed = await post(`/api/contracts/${contract.id}/renew`, { months: 12 });
+
+    expect([activated.status, renewed.status]).toEqual([200, 201]);
+    expect(await firedFor(onActivate)).toEqual([order.id]);
+    expect(renewed.body.contractNumber).toMatch(/^CON-\d+$/);
+    expect(await firedFor(onContract)).toEqual([renewed.body.id]);
+  });
+
+  test("a macro's field updates are one edit: a case it closes gets closedAt, its history and the status rules", async () => {
+    const cs = await prisma.case.create({ data: { subject: 'Done', caseNumber: 'CS-0101', status: 'Open' } });
+    const onMove = await ruleOn('cases', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Closed' }]);
+    const macro = await post('/api/macros', {
+      name: 'Close it', module: 'cases',
+      actions: [{ type: 'updateField', field: 'status', value: 'Closed' }, { type: 'updateField', field: 'priority', value: 'Low' }],
+    });
+
+    const res = await post(`/api/macros/${macro.body.id}/execute`, { recordId: cs.id });
+
+    expect(res.body.results.map(r => [r.field, r.success])).toEqual([['status', true], ['priority', true]]);
+    const closed = await prisma.case.findUnique({ where: { id: cs.id } });
+    expect([closed.status, closed.priority, closed.closedAt instanceof Date]).toEqual(['Closed', 'Low', true]);
+    expect(await prisma.caseStatusHistory.count({ where: { caseId: cs.id } })).toBe(1);
+    expect(await firedFor(onMove)).toEqual([cs.id]);
+  });
+
+  test("the copilot's stage move keeps one stage history entry and runs the deal's rules", async () => {
+    const account = await createTestAccount();
+    const deal = await prisma.deal.create({ data: { name: 'Copilot deal', value: 10, stage: 'Prospecting', accountId: account.id, ownerId: admin.user.id } });
+    const onMove = await ruleOn('deals', 'statusChange');
+
+    const res = await post('/api/copilot/actions', { action: 'update_deal_stage', params: { dealId: deal.id, stage: 'Negotiation' } });
+
+    expect(res.status).toBe(200);
+    expect(await firedFor(onMove)).toEqual([deal.id]);
+    expect(await prisma.dealStageHistory.count({ where: { dealId: deal.id } })).toBe(1);
+  });
+
+  test('merging contacts edits the survivor as an edit would and deletes the other as a delete does', async () => {
+    const primary = await prisma.contact.create({ data: { firstName: 'Pri', lastName: 'Mary', email: 'pri@merge.test' } });
+    const dupe = await prisma.contact.create({ data: { firstName: 'Du', lastName: 'Plicate', phone: '555-0199' } });
+    const onUpdate = await ruleOn('contacts', 'update');
+
+    const res = await post(`/api/contacts/${primary.id}/merge`, { mergeId: dupe.id, fields: { phone: '555-0199' } });
+
+    expect(res.status).toBe(200);
+    expect(await firedFor(onUpdate)).toEqual([primary.id]);
+    expect((await prisma.contact.findUnique({ where: { id: dupe.id } })).deletedAt).not.toBeNull();
+    expect(await prisma.recycleBinItem.count({ where: { recordId: dupe.id } })).toBe(1);
+  });
+
+  test('completing an activity runs its status rules, and its follow-up is made as a new activity is', async () => {
+    const task = await prisma.activity.create({ data: { type: 'Call', subject: 'Ring them', status: 'Scheduled', ownerId: admin.user.id } });
+    const onDone = await ruleOn('activities', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Completed' }]);
+    const onCreate = await ruleOn('activities', 'create');
+
+    const res = await post(`/api/activities/${task.id}/complete`, { followUp: { subject: 'Ring again' } });
+
+    expect(res.status).toBe(200);
+    expect(await firedFor(onDone)).toEqual([task.id]);
+    const followUp = await prisma.activity.findFirst({ where: { subject: 'Ring again' } });
+    expect(await firedFor(onCreate)).toEqual([followUp.id]);
+  });
+});

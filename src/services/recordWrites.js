@@ -25,6 +25,9 @@
  *           record is looked up once (an import's accounts)
  *   source  what made the write ('import', 'web-to-lead'), for the audit trail
  *   include what the written record comes back with
+ *   nested  rows made with the record that the caller built itself, from
+ *           checked fields (an order's lines, copied from its quote); for
+ *           one made from a request, the module's nestedWrites builds them
  *   hydrate (record) => ..., run on the record before the automation sees it
  *   emit    real-time senders; the request's, or else the WebSocket's
  *   after   inside a transaction: a list the automation is added to rather
@@ -267,7 +270,7 @@ async function createRecord(db, moduleName, input, ctx = {}) {
     const problem = await linkRefusal(ctx.req, modelName, picked, null, ctx.linkCache);
     if (problem) throw new RecordWriteError(400, { error: problem, code: 'LINK_NOT_VISIBLE' });
   }
-  const nested = hooks.nestedWrites && ctx.req ? await hooks.nestedWrites(ctx.req, 'create') : {};
+  const nested = ctx.nested || (hooks.nestedWrites && ctx.req ? await hooks.nestedWrites(ctx.req, 'create') : {});
   const createData = { ...picked, ...nested };
   const record = hooks.numbering
     ? await createNumbered(db, modelName, hooks.numbering, { data: createData, include: ctx.include })
@@ -358,7 +361,8 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
 /**
  * Delete a record: into the recycle bin where the model keeps deleted rows,
  * gone where it does not, with a recycle bin snapshot either way.
- * `target` is its id or the record. Returns the record as it was.
+ * `target` is its id or the record. `ctx.alsoSet` is set with a soft delete
+ * (a merged record's mergedIntoId). Returns the record as it was.
  */
 async function deleteRecord(db, moduleName, target, ctx = {}) {
   const { modelName } = moduleDefinition(moduleName);
@@ -372,7 +376,7 @@ async function deleteRecord(db, moduleName, target, ctx = {}) {
   }
 
   if (softDeletes(modelName)) {
-    await db[modelName].update({ where: { id: record.id }, data: { deletedAt: new Date() } });
+    await db[modelName].update({ where: { id: record.id }, data: { deletedAt: new Date(), ...(ctx.alsoSet || {}) } });
   } else {
     await db[modelName].delete({ where: { id: record.id } });
   }

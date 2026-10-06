@@ -4,6 +4,7 @@ const { reachableWhere } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { columnsFrom, modelHasField } = require('../utils/modelFields');
+const { updateRecord, deleteRecord } = require('../services/recordWrites');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -117,10 +118,13 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
     const master = await prisma[modelName].findFirst({ where: { id: String(masterId), deletedAt: null } });
     if (!master) return res.status(404).json({ error: 'Master record not found' });
 
-    // Apply field overrides to master
+    // Apply field overrides to master, as an edit would
+    // (services/recordWrites): its rules, links the caller can see, its
+    // workflows and webhooks. Its own columns, not its deleted marker:
+    // overrides went to Prisma whole.
     if (fieldOverrides && Object.keys(fieldOverrides).length > 0) {
-      // The master's own columns: overrides went to Prisma whole.
-      await prisma[modelName].update({ where: { id: master.id }, data: columnsFrom(modelName, fieldOverrides) });
+      const { deletedAt, ...overrides } = columnsFrom(modelName, fieldOverrides);
+      await updateRecord(prisma, module, master, overrides, { req, userId: req.userId, source: 'duplicate merge' });
     }
 
     // Reassign child records from merge targets to master. An account's
@@ -143,15 +147,13 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
       // bin expects. It was deleted outright: that emptied the account link of
       // every contact left pointing at it, or failed on a linked contract,
       // unseen, and left the duplicate in place while reporting it merged.
+      // Deleted as a delete is (services/recordWrites), so its webhook fires.
       try {
         const record = await prisma[modelName].findFirst({ where: { id: mergeId, deletedAt: null } });
         if (record) {
-          await prisma.recycleBinItem.create({
-            data: { module, recordId: mergeId, recordData: record, deletedById: req.userId, expiresAt: new Date(Date.now() + 30 * 86400000) },
-          });
-          await prisma[modelName].update({
-            where: { id: mergeId },
-            data: { deletedAt: new Date(), ...(modelHasField(modelName, 'mergedIntoId') && { mergedIntoId: master.id }) },
+          await deleteRecord(prisma, module, record, {
+            req, userId: req.userId, source: `merged into ${master.id}`,
+            alsoSet: modelHasField(modelName, 'mergedIntoId') ? { mergedIntoId: master.id } : {},
           });
           merged++;
         }

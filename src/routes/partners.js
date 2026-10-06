@@ -1,10 +1,11 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { linkRefusal, reachableWhere } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
-const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
+const { currencyContext, sumInBase } = require('../utils/currency');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 
 const router = createCrudRouter('partner', 'partners', {
   include: {
@@ -62,7 +63,8 @@ router.post('/:id/certifications', authenticate, requirePermission('partners', '
     if (!partner) return res.status(404).json({ error: 'Partner not found' });
     const certs = Array.isArray(partner.certifications) ? partner.certifications : [];
     certs.push({ name: req.body.name, issuedAt: new Date(), expiresAt: req.body.expiresAt || null });
-    const updated = await prisma.partner.update({ where: { id: req.params.id }, data: { certifications: certs } });
+    // As an edit (services/recordWrites): rules, audit trail, workflows, webhooks.
+    const { record: updated } = await updateRecord(prisma, 'partners', partner, { certifications: certs }, { req, userId: req.userId, source: 'certification added' });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -75,19 +77,17 @@ router.post('/:id/register-deal', authenticate, requirePermission('partners', 'e
     const prisma = req.app.locals.prisma;
     const { dealName, value, currency, accountId, notes } = req.body;
     if (!dealName) return res.status(400).json({ error: 'dealName required' });
-    const linkProblem = await linkRefusal(req, 'deal', { accountId });
-    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-    const deal = await prisma.deal.create({
-      data: {
-        name: `[Partner] ${dealName}`, value: value || 0, currency: await resolveDealCurrency(prisma, currency), stage: 'Qualification',
-        partnerId: req.params.id, source: 'Partner Referral',
-        ...(accountId && { accountId }), description: notes || '',
-        // Owned by whoever registered it: with no owner, a Private deals
-        // default hid it from them. (Deal has no createdById.)
-        ownerId: req.user.id,
-      },
-    });
-    await req.audit({ action: 'create', module: 'deals', recordId: deal.id, details: 'Partner deal registration' });
+    // Made as a deal is on its own page (services/recordWrites): on an
+    // account the caller can see (the write's link check), in a currency the
+    // deal's own rules accept, then the workflows and webhooks for new deals.
+    const { record: deal } = await createRecord(prisma, 'deals', {
+      name: `[Partner] ${dealName}`, value: value || 0, currency, stage: 'Qualification',
+      partnerId: req.params.id, source: 'Partner Referral',
+      ...(accountId && { accountId }), description: notes || '',
+      // Owned by whoever registered it: with no owner, a Private deals
+      // default hid it from them. (Deal has no createdById.)
+      ownerId: req.user.id,
+    }, { req, userId: req.userId, source: 'partner registration' });
     res.status(201).json(deal);
   } catch (err) { next(err); }
 });
@@ -107,8 +107,11 @@ router.post('/:id/evaluate-tier', authenticate, requirePermission('partners', 'e
     if (revenue >= 500000 || deals.length >= 20) newTier = 'Platinum';
     else if (revenue >= 200000 || deals.length >= 10) newTier = 'Gold';
     else if (revenue >= 50000 || deals.length >= 5) newTier = 'Silver';
-    const updated = await prisma.partner.update({ where: { id: req.params.id }, data: { tier: newTier } });
-    await req.audit({ action: 'update', module: 'partners', recordId: partner.id, details: `Tier changed to ${newTier}` });
+    // As an edit, so a rule on the tier sees the change; one that stays the
+    // same is no change, and was audited as one.
+    if (newTier !== partner.tier) {
+      await updateRecord(prisma, 'partners', partner, { tier: newTier }, { req, userId: req.userId, source: 'tier evaluated' });
+    }
     res.json({ previousTier: partner.tier, newTier, revenue, dealCount: deals.length });
   } catch (err) { next(err); }
 });

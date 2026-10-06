@@ -2,6 +2,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { requirePermission, authenticate, permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { currencyContext } = require('../utils/currency');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 
 const router = createCrudRouter('product', 'products', {
   searchFilter: (q) => ({
@@ -65,7 +66,9 @@ const router = createCrudRouter('product', 'products', {
         data.name = `${data.name} (Copy)`;
         data.sku = `${data.sku}-COPY-${Date.now().toString(36).slice(-4)}`;
 
-        const clone = await prisma.product.create({ data });
+        // Made as a product is on its own page (services/recordWrites): its
+        // rules, audit trail, workflows and webhooks.
+        const { record: clone } = await createRecord(prisma, 'products', data, { userId: req.userId, source: 'clone', emit: req.app.locals.emit });
         res.status(201).json(clone);
       } catch (err) { next(err); }
     });
@@ -76,9 +79,8 @@ const router = createCrudRouter('product', 'products', {
         const prisma = req.app.locals.prisma;
         const product = await prisma.product.findUnique({ where: { id: req.params.id } });
         if (!product) return res.status(404).json({ error: 'Not found' });
-        const updated = await prisma.product.update({
-          where: { id: req.params.id },
-          data: { active: !product.active },
+        const { record: updated } = await updateRecord(prisma, 'products', product, { active: !product.active }, {
+          req, userId: req.userId, source: product.active ? 'deactivated' : 'activated',
         });
         res.json(updated);
       } catch (err) { next(err); }

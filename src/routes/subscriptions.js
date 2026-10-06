@@ -1,9 +1,10 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { SUBSCRIPTION_NUMBER } = require('../utils/numbering');
+const { updateRecord } = require('../services/recordWrites');
 
 /**
  * `data` with its totalPrice worked out as unit price times quantity, unless
@@ -60,16 +61,15 @@ router.post('/:id/renew', authenticate, requirePermission('subscriptions', 'edit
     const newStart = sub.endDate ? new Date(sub.endDate) : new Date();
     const newEnd = new Date(newStart);
     newEnd.setMonth(newEnd.getMonth() + term);
-    const renewed = await prisma.subscription.update({
-      where: { id: req.params.id },
-      data: {
-        startDate: newStart, endDate: newEnd, status: 'Active',
-        renewalCount: (sub.renewalCount || 0) + 1,
-        ...(priceAdjustment && { unitPrice: priceAdjustment }),
-        totalPrice: (priceAdjustment || parseFloat(sub.unitPrice) || 0) * (sub.quantity || 1),
-      },
-    });
-    await req.audit({ action: 'update', module: 'subscriptions', recordId: sub.id, details: `Renewed until ${newEnd.toISOString().split('T')[0]}` });
+    // As an edit (services/recordWrites): the subscription's rules, audit
+    // trail, and the workflows and webhooks on its status and price, which a
+    // renewal, cancellation or plan change never reached.
+    const { record: renewed } = await updateRecord(prisma, 'subscriptions', sub, {
+      startDate: newStart, endDate: newEnd, status: 'Active',
+      renewalCount: (sub.renewalCount || 0) + 1,
+      ...(priceAdjustment && { unitPrice: priceAdjustment }),
+      totalPrice: (priceAdjustment || parseFloat(sub.unitPrice) || 0) * (sub.quantity || 1),
+    }, { req, userId: req.userId, source: `renewed until ${newEnd.toISOString().split('T')[0]}` });
     res.json(renewed);
   } catch (err) { next(err); }
 });
@@ -79,11 +79,9 @@ router.post('/:id/cancel', authenticate, requirePermission('subscriptions', 'edi
   try {
     const prisma = req.app.locals.prisma;
     const { reason, cancelDate, prorated } = req.body;
-    const sub = await prisma.subscription.update({
-      where: { id: req.params.id },
-      data: { status: 'Cancelled', cancellationReason: reason, cancellationDate: cancelDate ? new Date(cancelDate) : new Date() },
-    });
-    await req.audit({ action: 'update', module: 'subscriptions', recordId: sub.id, details: `Cancelled: ${reason || 'No reason'}` });
+    const { record: sub } = await updateRecord(prisma, 'subscriptions', req.params.id, {
+      status: 'Cancelled', cancellationReason: reason, cancellationDate: cancelDate ? new Date(cancelDate) : new Date(),
+    }, { req, userId: req.userId, source: 'cancelled' });
     res.json(sub);
   } catch (err) { next(err); }
 });
@@ -96,20 +94,15 @@ router.post('/:id/change-plan', authenticate, requirePermission('subscriptions',
     if (!productId && !unitPrice) return res.status(400).json({ error: 'productId or unitPrice required' });
     const sub = await prisma.subscription.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!sub) return res.status(404).json({ error: 'Subscription not found' });
-    // A live product the caller can see; the id was stored as sent.
-    const linkProblem = await linkRefusal(req, 'subscription', { productId }, sub);
-    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-    const updated = await prisma.subscription.update({
-      where: { id: req.params.id },
-      data: {
-        ...(productId && { productId }),
-        ...(unitPrice && { unitPrice }),
-        ...(quantity && { quantity }),
-        totalPrice: (unitPrice || parseFloat(sub.unitPrice) || 0) * (quantity || sub.quantity || 1),
-        changeEffectiveDate: effective ? new Date(effective) : new Date(),
-      },
-    });
-    await req.audit({ action: 'update', module: 'subscriptions', recordId: sub.id, details: 'Plan changed' });
+    // A live product the caller can see (the write's link check); the id was
+    // stored as sent.
+    const { record: updated } = await updateRecord(prisma, 'subscriptions', sub, {
+      ...(productId && { productId }),
+      ...(unitPrice && { unitPrice }),
+      ...(quantity && { quantity }),
+      totalPrice: (unitPrice || parseFloat(sub.unitPrice) || 0) * (quantity || sub.quantity || 1),
+      changeEffectiveDate: effective ? new Date(effective) : new Date(),
+    }, { req, userId: req.userId, source: 'plan changed' });
     res.json(updated);
   } catch (err) { next(err); }
 });

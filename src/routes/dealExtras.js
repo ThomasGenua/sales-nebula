@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
+const { updateRecord } = require('../services/recordWrites');
 
 const router = Router();
 
@@ -141,11 +142,12 @@ router.post('/:id/competitors', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { name, strengths, weaknesses, position, threat } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
-    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { competitors: true } });
+    const deal = await prisma.deal.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!deal) return res.status(404).json({ error: 'Not found' });
     const comp = Object.fromEntries(Object.entries({ name, strengths, weaknesses, position, threat }).filter(([, v]) => v !== undefined));
     const competitors = [...(Array.isArray(deal.competitors) ? deal.competitors : []), comp];
-    await prisma.deal.update({ where: { id: req.params.id }, data: { competitors } });
+    // As an edit of the deal (services/recordWrites).
+    await updateRecord(prisma, 'deals', deal, { competitors }, { req, userId: req.userId, source: 'competitors' });
     res.status(201).json(comp);
   } catch (err) { next(err); }
 });

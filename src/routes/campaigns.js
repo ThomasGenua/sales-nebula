@@ -4,6 +4,7 @@ const { requirePermission, authenticate, permits } = require('../middleware/auth
 const { reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { createRecord } = require('../services/recordWrites');
 
 /**
  * Why the caller may not add the people `ids` name under `key` (contactId or
@@ -217,7 +218,10 @@ router.post('/:id/clone', authenticate, requirePermission('campaigns', 'full'), 
     const orig = await prisma.campaign.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!orig) return res.status(404).json({ error: 'Not found' });
     const { id, createdAt, updatedAt, deletedAt, ...data } = orig;
-    const clone = await prisma.campaign.create({ data: { ...data, name: `${orig.name} (Copy)`, status: 'Planned', ownerId: req.user.id, createdById: req.user.id } });
+    // Made as a campaign is on its own page (services/recordWrites).
+    const { record: clone } = await createRecord(prisma, 'campaigns', { ...data, name: `${orig.name} (Copy)`, status: 'Planned', ownerId: req.user.id }, {
+      userId: req.userId, source: 'clone', emit: req.app.locals.emit,
+    });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });
