@@ -1,8 +1,9 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
+const { createRecord, updateRecord, batchClient } = require('../services/recordWrites');
 
 // Only administrators import records on someone else's behalf; everyone
 // else's imports are theirs.
@@ -165,9 +166,13 @@ router.post('/execute', async (req, res, next) => {
       }
     }
 
-    // A row may link only to records the importer can see (a contact's
-    // account); each linked record is looked up once for the whole file.
-    const seen = new Map();
+    // Each row is written as a record made on its own page would be: the
+    // module's validation, duplicate and assignment rules, then its workflows
+    // and webhooks (services/recordWrites). An import skipped them all. A row
+    // may link only to records the importer can see (a contact's account);
+    // each linked record is looked up once for the whole file.
+    const write = { req, userId: req.userId, source: 'import', linkCache: new Map() };
+    const db = batchClient(prisma);
 
     // Process in batches of 100
     const batchSize = 100;
@@ -202,10 +207,7 @@ router.post('/execute', async (req, res, next) => {
 
           if (existingId) {
             if (updateDuplicates) {
-              const current = await prisma[config.model].findUnique({ where: { id: existingId } });
-              const refusal = await linkRefusal(req, config.model, data, current, seen);
-              if (refusal) { results.errors.push({ row: rowNum, error: refusal }); results.skipped++; continue; }
-              await prisma[config.model].update({ where: { id: existingId }, data });
+              await updateRecord(db, module, existingId, data, write);
               results.updated++;
             } else {
               results.skipped++;
@@ -213,15 +215,9 @@ router.post('/execute', async (req, res, next) => {
             continue;
           }
 
-          // Set owner if not specified
-          if (config.fields.includes('ownerId') && !data.ownerId) {
-            data.ownerId = req.userId;
-          }
-
-          const refusal = await linkRefusal(req, config.model, data, null, seen);
-          if (refusal) { results.errors.push({ row: rowNum, error: refusal }); results.skipped++; continue; }
-
-          const created = await prisma[config.model].create({ data });
+          // With no owner in the row, the module's assignment rules pick one,
+          // and failing them the importer owns it.
+          const { record: created } = await createRecord(db, module, data, write);
 
           // Add to dedupe map for intra-batch dedup
           if (dedupeValue) dedupeMap.set(dedupeValue, created.id);

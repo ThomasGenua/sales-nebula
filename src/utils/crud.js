@@ -8,14 +8,8 @@ const {
   scalarWhere, scalarOrderBy,
 } = require('./modelFields');
 const {
-  createRecord, updateRecord, deleteRecord, RecordWriteError, defineModule,
+  createRecord, updateRecord, deleteRecord, RecordWriteError, defineModule, batchClient,
 } = require('../services/recordWrites');
-
-/** A rule's refusal as the HTTP answer; anything else to the error handler. */
-function refusal(err, res, next) {
-  if (err instanceof RecordWriteError) return res.status(err.status).json(err.body);
-  return next(err);
-}
 
 // The model behind each CRUD module, for code outside its router that must
 // check a record by module name (the WebSocket's record rooms).
@@ -195,7 +189,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         ...(duplicates.length ? { duplicates } : {}),
         ...(assignment ? { assignedBy: assignment.rule } : {}),
       });
-    } catch (err) { refusal(err, res, next); }
+    } catch (err) { next(err); }
   });
 
   // UPDATE - PUT /:id
@@ -235,7 +229,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       const body = { ...record };
       await visibleLinks(req, modelName, body, requestedInclude);
       res.json(body);
-    } catch (err) { refusal(err, res, next); }
+    } catch (err) { next(err); }
   });
 
   // DELETE - DELETE /:id
@@ -257,7 +251,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       await deleteRecord(prisma, moduleName, record, { req, userId: req.userId });
 
       res.json({ success: true });
-    } catch (err) { refusal(err, res, next); }
+    } catch (err) { next(err); }
   });
 
   // Each record of a bulk change goes through the same write as one at a time,
@@ -270,11 +264,12 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     const prisma = req.app.locals.prisma;
     const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) }, ...notDeleted() }, level);
     const records = await prisma[modelName].findMany({ where });
+    const db = batchClient(prisma);
     let done = 0;
     const failed = [];
     for (const record of records) {
       try {
-        await write(prisma, record);
+        await write(db, record);
         done++;
       } catch (err) {
         if (!(err instanceof RecordWriteError)) throw err;

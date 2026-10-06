@@ -1,9 +1,10 @@
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { editableFields, scalarWhere, scalarSelect, modelHasField } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { createRecord, updateRecord, deleteRecord, batchClient, RecordWriteError } = require('../services/recordWrites');
 const router = Router();
 router.use(authenticate);
 
@@ -20,6 +21,12 @@ const MODEL_MAP = {
  * columns, owners included. Each now takes the module's permission (read to
  * query, edit to write, full to delete) and reaches only rows the caller's
  * row security allows.
+ *
+ * Each record is written as one made on its own page is
+ * (services/recordWrites): the module's rules and hooks, then its workflows
+ * and webhooks. Inserts were a createMany, so a case or an order had no
+ * number and failed, a row that clashed was dropped without a word, and no
+ * rule saw any of it. A row a rule refuses fails on its own.
  */
 
 /** The model for a module the caller may act on at `level`; otherwise it answers and returns null. */
@@ -33,10 +40,18 @@ function target(req, res, module, level) {
 const reachable = reachableWhere;
 
 // What a bulk write may set: the model's own columns, not its identity, its
-// timestamps or who owns it (editableFields). New rows belong to the caller.
+// timestamps or who owns it (editableFields). A new row's owner comes from the
+// module's assignment rules, and failing them is the caller.
 const PROTECTED = ['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById'];
 const writable = editableFields;
-const ownedByCaller = (model, data, req) => (modelHasField(model, 'ownerId') ? { ...data, ownerId: req.userId } : data);
+
+/** One context for every record of a request: one link lookup each, one read of the rules. */
+const batchOf = req => ({
+  db: batchClient(req.app.locals.prisma),
+  ctx: { req, userId: req.userId, source: 'bulk API', linkCache: new Map() },
+});
+/** A row's failure: a rule's refusal with its code, or what the database said. */
+const failure = e => ({ error: e.message, ...(e instanceof RecordWriteError && e.code ? { code: e.code } : {}) });
 
 // Bulk insert
 router.post('/insert', async (req, res, next) => {
@@ -45,26 +60,13 @@ router.post('/insert', async (req, res, next) => {
     const model = target(req, res, module, 'edit');
     if (!model) return;
     if (!Array.isArray(records) || records.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
-    const prisma = req.app.locals.prisma;
+    const { db, ctx } = batchOf(req);
     const results = { success: 0, failed: 0, errors: [] };
-    const seen = new Map();
-    // Process in chunks of 500
-    for (let i = 0; i < records.length; i += 500) {
-      // A row linked to a record the caller cannot see fails on its own.
-      const chunk = [];
-      for (const [j, r] of records.slice(i, i + 500).entries()) {
-        const data = ownedByCaller(model, writable(model, r), req);
-        const refusal = await linkRefusal(req, model, data, null, seen);
-        if (refusal) { results.failed++; results.errors.push({ index: i + j, error: refusal }); } else chunk.push(data);
-      }
-      if (!chunk.length) continue;
+    for (const [index, record] of records.entries()) {
       try {
-        const created = await prisma[model].createMany({ data: chunk, skipDuplicates: true });
-        results.success += created.count;
-      } catch (e) {
-        results.failed += chunk.length;
-        results.errors.push({ batch: Math.floor(i / 500), error: e.message });
-      }
+        await createRecord(db, module, writable(model, record), ctx);
+        results.success++;
+      } catch (e) { results.failed++; results.errors.push({ index, ...failure(e) }); }
     }
     res.json({ operation: 'insert', module, ...results, total: records.length });
   } catch (err) { next(err); }
@@ -77,20 +79,16 @@ router.post('/update', async (req, res, next) => {
     const model = target(req, res, module, 'edit');
     if (!model) return;
     if (!Array.isArray(records) || records.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
-    const prisma = req.app.locals.prisma;
+    const { db, ctx } = batchOf(req);
     const results = { success: 0, failed: 0, errors: [] };
-    const seen = new Map();
     for (const record of records) {
       try {
         const id = record?.id ? String(record.id) : null;
-        const current = id ? await prisma[model].findFirst({ where: await reachable(req, module, model, { id }, 'Edit') }) : null;
+        const current = id ? await db[model].findFirst({ where: await reachable(req, module, model, { id }, 'Edit') }) : null;
         if (!current) { results.failed++; results.errors.push({ id, error: 'Not found' }); continue; }
-        const data = writable(model, record);
-        const refusal = await linkRefusal(req, model, data, current, seen);
-        if (refusal) { results.failed++; results.errors.push({ id, error: refusal }); continue; }
-        await prisma[model].update({ where: { id: current.id }, data });
+        await updateRecord(db, module, current, writable(model, record), ctx);
         results.success++;
-      } catch (e) { results.failed++; results.errors.push({ id: record?.id, error: e.message }); }
+      } catch (e) { results.failed++; results.errors.push({ id: record?.id, ...failure(e) }); }
     }
     res.json({ operation: 'update', module, ...results, total: records.length });
   } catch (err) { next(err); }
@@ -98,22 +96,18 @@ router.post('/update', async (req, res, next) => {
 
 /** Match on one of the model's own columns, among rows the caller may change. */
 async function upsertAll(req, module, model, records, matchField) {
-  const prisma = req.app.locals.prisma;
+  const { db, ctx } = batchOf(req);
   const results = { created: 0, updated: 0, failed: 0, errors: [] };
   const matchable = matchField && modelHasField(model, matchField) && !PROTECTED.includes(matchField) ? matchField : null;
-  const seen = new Map();
   for (const record of records) {
     try {
       const value = matchable ? record?.[matchable] : undefined;
       const existing = value !== undefined && value !== null
-        ? await prisma[model].findFirst({ where: await reachable(req, module, model, { [matchable]: value }, 'Edit') })
+        ? await db[model].findFirst({ where: await reachable(req, module, model, { [matchable]: value }, 'Edit') })
         : null;
-      const data = existing ? writable(model, record) : ownedByCaller(model, writable(model, record), req);
-      const refusal = await linkRefusal(req, model, data, existing, seen);
-      if (refusal) { results.failed++; results.errors.push({ record: matchable ? record?.[matchable] : null, error: refusal }); continue; }
-      if (existing) { await prisma[model].update({ where: { id: existing.id }, data }); results.updated++; }
-      else { await prisma[model].create({ data }); results.created++; }
-    } catch (e) { results.failed++; results.errors.push({ record: matchable ? record?.[matchable] : null, error: e.message }); }
+      if (existing) { await updateRecord(db, module, existing, writable(model, record), ctx); results.updated++; }
+      else { await createRecord(db, module, writable(model, record), ctx); results.created++; }
+    } catch (e) { results.failed++; results.errors.push({ record: matchable ? record?.[matchable] : null, ...failure(e) }); }
   }
   return results;
 }
@@ -132,19 +126,24 @@ router.post('/upsert', async (req, res, next) => {
 
 // Bulk delete: only rows the caller may delete (full access, Full on the row),
 // and a soft delete where the model has one, as every other delete is. Rows
-// were removed outright, and one with dependent records failed the batch.
+// were removed outright, and one with dependent records failed the batch;
+// then set deleted in one updateMany, with no recycle bin entry to restore
+// them from and no delete webhook.
 router.post('/delete', async (req, res, next) => {
   try {
     const { module, ids } = req.body || {};
     const model = target(req, res, module, 'full');
     if (!model) return;
     if (!Array.isArray(ids) || ids.length > 10000) return res.status(400).json({ error: 'Max 10,000 records per batch' });
-    const where = await reachable(req, module, model, { id: { in: ids.map(String) } }, 'Full');
-    const prisma = req.app.locals.prisma;
-    const deleted = modelHasField(model, 'deletedAt')
-      ? await prisma[model].updateMany({ where, data: { deletedAt: new Date() } })
-      : await prisma[model].deleteMany({ where });
-    res.json({ operation: 'delete', module, deleted: deleted.count, total: ids.length });
+    const live = modelHasField(model, 'deletedAt') ? { deletedAt: null } : {};
+    const where = await reachable(req, module, model, { id: { in: ids.map(String) }, ...live }, 'Full');
+    const { db, ctx } = batchOf(req);
+    let deleted = 0;
+    const errors = [];
+    for (const record of await db[model].findMany({ where })) {
+      try { await deleteRecord(db, module, record, ctx); deleted++; } catch (e) { errors.push({ id: record.id, ...failure(e) }); }
+    }
+    res.json({ operation: 'delete', module, deleted, total: ids.length, ...(errors.length ? { errors } : {}) });
   } catch (err) { next(err); }
 });
 

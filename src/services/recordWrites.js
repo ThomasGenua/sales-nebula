@@ -21,6 +21,8 @@
  *   req     the request, when there is one. Links are checked against what
  *           its caller may see, and a module's hooks may read its body
  *           (an order's lines).
+ *   linkCache  a Map shared by the writes of one batch, so each linked
+ *           record is looked up once (an import's accounts)
  *   source  what made the write ('import', 'web-to-lead'), for the audit trail
  *   include what the written record comes back with
  *   hydrate (record) => ..., run on the record before the automation sees it
@@ -66,7 +68,8 @@ async function runHook(fn, ...args) {
 // ─── MODULES ───
 
 // moduleName -> { moduleName, modelName, hooks }. Filled by createCrudRouter,
-// which is where each module's hooks are declared.
+// which is where a CRUD module's hooks are declared, and by the routers of
+// the modules that have their own (quotes, invoices, projects, prospects).
 const modules = new Map();
 
 function defineModule(moduleName, modelName, hooks = {}) {
@@ -75,11 +78,12 @@ function defineModule(moduleName, modelName, hooks = {}) {
 
 function moduleDefinition(moduleName) {
   const definition = modules.get(moduleName);
-  if (!definition) throw new Error(`${moduleName} is not a CRUD module`);
+  if (!definition) throw new Error(`${moduleName} has no record rules`);
   return definition;
 }
 
-const isCrudModule = moduleName => modules.has(moduleName);
+/** Whether `moduleName`'s writes come through here (a CRUD module, or one registered by its router). */
+const isRecordModule = moduleName => modules.has(moduleName);
 
 // Ownership column, in preference order: a model that has `ownerId` uses it;
 // one that only has `assignedId` uses that instead.
@@ -97,6 +101,48 @@ function emitterFor(ctx) {
   if (ctx.req?.app?.locals?.emit) return ctx.req.app.locals.emit;
   // Required lazily: the WebSocket service is not needed to write a record.
   return require('./websocket').emit;
+}
+
+// ─── BATCHES ───
+
+// The configuration the rules read on every write: validation, duplicate and
+// assignment rules, workflows, webhooks and security group rules.
+const RULE_TABLES = new Set([
+  'validationRule', 'duplicateRule', 'assignmentRule', 'workflow', 'webhook', 'securityGroupRule', 'securityGroupUser',
+]);
+
+/**
+ * The client for one batch of writes (an import, a bulk API call), reading
+ * that configuration once rather than once a record: a 500-row import looked
+ * the same rules up 500 times. Only the rule tables' findMany is remembered,
+ * for this batch alone; everything else, the round-robin counter of an
+ * assignment rule included, goes to the database as ever.
+ */
+function batchClient(prisma) {
+  const remembered = new Map();
+  const delegates = new Map();
+  const bound = (owner, value) => (typeof value === 'function' ? value.bind(owner) : value);
+  return new Proxy(prisma, {
+    get(target, table) {
+      const delegate = Reflect.get(target, table);
+      if (!RULE_TABLES.has(table)) return bound(target, delegate);
+      if (!delegates.has(table)) {
+        delegates.set(table, new Proxy(delegate, {
+          get(real, method) {
+            const fn = Reflect.get(real, method);
+            if (method !== 'findMany') return bound(real, fn);
+            return args => {
+              const key = `${table}:${JSON.stringify(args ?? {})}`;
+              // Promise.resolve runs Prisma's lazy query once, now.
+              if (!remembered.has(key)) remembered.set(key, Promise.resolve(fn.call(real, args)));
+              return remembered.get(key);
+            };
+          },
+        }));
+      }
+      return delegates.get(table);
+    },
+  });
 }
 
 // ─── AUTOMATION AFTER A WRITE ───
@@ -210,7 +256,7 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   const { data: picked, ignored } = pickModelFields(modelName, data);
   if (ctx.req) {
     const { linkRefusal } = require('../middleware/access');
-    const problem = await linkRefusal(ctx.req, modelName, picked);
+    const problem = await linkRefusal(ctx.req, modelName, picked, null, ctx.linkCache);
     if (problem) throw new RecordWriteError(400, { error: problem, code: 'LINK_NOT_VISIBLE' });
   }
   const nested = hooks.nestedWrites && ctx.req ? await hooks.nestedWrites(ctx.req, 'create') : {};
@@ -267,7 +313,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   }
   if (ctx.req) {
     const { linkRefusal } = require('../middleware/access');
-    const problem = await linkRefusal(ctx.req, modelName, updateData, oldRecord);
+    const problem = await linkRefusal(ctx.req, modelName, updateData, oldRecord, ctx.linkCache);
     if (problem) throw new RecordWriteError(400, { error: problem, code: 'LINK_NOT_VISIBLE' });
   }
 
@@ -350,8 +396,9 @@ module.exports = {
   updateRecord,
   deleteRecord,
   runAfter,
+  batchClient,
   RecordWriteError,
   defineModule,
   moduleDefinition,
-  isCrudModule,
+  isRecordModule,
 };

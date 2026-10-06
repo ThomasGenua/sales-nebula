@@ -17,6 +17,7 @@ const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
+const { RecordWriteError } = require('./services/recordWrites');
 
 let helmet, hpp, compression;
 try { helmet = require('helmet'); } catch (e) { helmet = null; }
@@ -464,6 +465,9 @@ function createApp(rawPrisma) {
 
   // ─── ERROR HANDLER ───
   app.use((err, req, res, next) => {
+    // A rule refused a record write (services/recordWrites): its answer as is.
+    if (err instanceof RecordWriteError) return res.status(err.status).json(err.body);
+
     // Handle CORS errors
     if (err.message?.includes('CORS')) {
       return res.status(403).json({ error: 'CORS: origin not allowed' });

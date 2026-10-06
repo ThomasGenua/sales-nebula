@@ -1,8 +1,9 @@
 const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate, permits } = require('../middleware/auth');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
-const { editableFields, modelHasField, columnsFrom } = require('../utils/modelFields');
+const { reachableWhere } = require('../middleware/access');
+const { editableFields, columnsFrom } = require('../utils/modelFields');
+const { createRecord, updateRecord, batchClient } = require('../services/recordWrites');
 
 const router = Router();
 
@@ -117,7 +118,13 @@ router.post('/sync', authenticate, async (req, res, next) => {
     // takes edit permission on it, writes the model's own columns, and
     // updates only records the caller may change. Links (a deal's account)
     // must name records the caller can see.
-    const seen = new Map();
+    //
+    // A change made offline is saved as one made online is
+    // (services/recordWrites): the module's rules and hooks, its workflows
+    // and webhooks, none of which a sync ran. One a rule refuses comes back
+    // as an error, with the rule's message.
+    const db = batchClient(prisma);
+    const write = { req, userId: req.userId, source: 'mobile sync', linkCache: new Map() };
     for (const change of changes.slice(0, 500)) {
       try {
         const model = SYNC_MODELS[change?.module];
@@ -125,19 +132,14 @@ router.post('/sync', authenticate, async (req, res, next) => {
         if (!permits(req, change.module, 'edit')) throw new Error(`Insufficient permissions for ${change.module}`);
         const data = editableFields(model, change.data);
         if (change.action === 'create') {
-          if (modelHasField(model, 'ownerId')) data.ownerId = req.userId;
-          const refusal = await linkRefusal(req, model, data, null, seen);
-          if (refusal) throw new Error(refusal);
-          const record = await prisma[model].create({ data });
+          const { record } = await createRecord(db, change.module, data, write);
           results.push({ id: change.localId, serverId: record.id, status: 'created' });
         } else if (change.action === 'update') {
-          const current = await prisma[model].findFirst({
+          const current = await db[model].findFirst({
             where: await reachableWhere(req, change.module, model, { id: String(change.id) }, 'Edit'),
           });
           if (!current) throw new Error('Not found');
-          const refusal = await linkRefusal(req, model, data, current, seen);
-          if (refusal) throw new Error(refusal);
-          await prisma[model].update({ where: { id: current.id }, data });
+          await updateRecord(db, change.module, current, data, write);
           results.push({ id: change.id, status: 'updated' });
         }
       } catch (e) { results.push({ id: change?.id || change?.localId, status: 'error', error: e.message }); }
@@ -173,11 +175,9 @@ router.post('/quick-log', authenticate, async (req, res, next) => {
     // As a synced create: activities edit, and only on a contact or deal the
     // caller can see. This logged against any id, with no permission at all.
     if (!permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Insufficient permissions for activities' });
-    const refusal = await linkRefusal(req, 'activity', { contactId, dealId });
-    if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
-    const activity = await prisma.activity.create({
-      data: { type, subject, description: notes, duration: +duration || null, status: 'Completed', ownerId: req.user.id, ...(contactId && { contactId }), ...(dealId && { dealId }) },
-    });
+    const { record: activity } = await createRecord(prisma, 'activities', {
+      type, subject, description: notes, duration: +duration || null, status: 'Completed', ownerId: req.user.id, ...(contactId && { contactId }), ...(dealId && { dealId }),
+    }, { req, userId: req.userId, source: 'mobile quick log' });
     res.status(201).json(activity);
   } catch (err) { next(err); }
 });
