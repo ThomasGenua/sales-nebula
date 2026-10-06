@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { updateRecord, batchClient, RecordWriteError } = require('../services/recordWrites');
 
 const router = createCrudRouter('asset', 'assets', {
   include: {
@@ -29,15 +30,12 @@ router.post('/:id/install', authenticate, requirePermission('assets', 'edit'), a
   try {
     const prisma = req.app.locals.prisma;
     // An asset has no location column: sending one made the install answer
-    // 500, so it is not stored.
-    const asset = await prisma.asset.update({
-      where: { id: req.params.id },
-      data: {
-        status: 'Installed',
-        installDate: new Date(),
-      },
-    });
-    await req.audit({ action: 'update', module: 'assets', recordId: asset.id, details: 'Asset installed' });
+    // 500, so it is not stored. As an edit (services/recordWrites): rules,
+    // audit trail, workflows and webhooks, which these actions never reached.
+    const { record: asset } = await updateRecord(prisma, 'assets', req.params.id, {
+      status: 'Installed',
+      installDate: new Date(),
+    }, { req, userId: req.userId, source: 'installed' });
     res.json(asset);
   } catch (err) { next(err); }
 });
@@ -45,11 +43,9 @@ router.post('/:id/install', authenticate, requirePermission('assets', 'edit'), a
 router.post('/:id/decommission', authenticate, requirePermission('assets', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const asset = await prisma.asset.update({
-      where: { id: req.params.id },
-      data: { status: 'Decommissioned', decommissionDate: new Date(), decommissionReason: req.body.reason },
-    });
-    await req.audit({ action: 'update', module: 'assets', recordId: asset.id, details: 'Asset decommissioned' });
+    const { record: asset } = await updateRecord(prisma, 'assets', req.params.id, {
+      status: 'Decommissioned', decommissionDate: new Date(), decommissionReason: req.body.reason,
+    }, { req, userId: req.userId, source: 'decommissioned' });
     res.json(asset);
   } catch (err) { next(err); }
 });
@@ -66,11 +62,9 @@ router.post('/:id/transfer', authenticate, requirePermission('assets', 'edit'), 
       const found = permits(req, module, 'read') && await prisma[model].findFirst({ where: await reachableWhere(req, module, model, { id: String(value) }), select: { id: true } });
       if (!found) return res.status(400).json({ error: `${key} does not name a ${model} you can see`, code: 'LINK_NOT_VISIBLE' });
     }
-    const asset = await prisma.asset.update({
-      where: { id: req.params.id },
-      data: { ...(accountId && { accountId }), ...(contactId && { contactId }) },
-    });
-    await req.audit({ action: 'update', module: 'assets', recordId: asset.id, details: `Asset transferred` });
+    const { record: asset } = await updateRecord(prisma, 'assets', req.params.id, {
+      ...(accountId && { accountId }), ...(contactId && { contactId }),
+    }, { req, userId: req.userId, source: 'transferred' });
     res.json(asset);
   } catch (err) { next(err); }
 });
@@ -125,9 +119,23 @@ router.post('/bulk/status', authenticate, requirePermission('assets', 'edit'), a
     const { ids, status } = req.body;
     if (!Array.isArray(ids) || !ids.length || typeof status !== 'string' || !status) return res.status(400).json({ error: 'ids and status required' });
     if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
-    const where = await reachableWhere(req, 'assets', 'asset', { id: { in: ids.map(String) } }, 'Edit');
-    const result = await prisma.asset.updateMany({ where, data: { status } });
-    res.json({ updated: result.count });
+    // Each as an edit is (services/recordWrites), so the status rules and
+    // workflows see every one; a refused one keeps its status and is listed.
+    const where = await reachableWhere(req, 'assets', 'asset', { id: { in: ids.map(String) }, deletedAt: null }, 'Edit');
+    const db = batchClient(prisma);
+    const write = { req, userId: req.userId, source: 'bulk status' };
+    let updated = 0;
+    const failed = [];
+    for (const asset of await prisma.asset.findMany({ where })) {
+      try {
+        await updateRecord(db, 'assets', asset, { status }, write);
+        updated++;
+      } catch (err) {
+        if (!(err instanceof RecordWriteError)) throw err;
+        failed.push({ id: asset.id, error: err.body.error });
+      }
+    }
+    res.json({ updated, ...(failed.length ? { failed } : {}) });
   } catch (err) { next(err); }
 });
 

@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom, looksLikeId, plainFieldProblem } = require('../utils/modelFields');
+const { updateRecord, batchClient } = require('../services/recordWrites');
 
 const router = Router();
 
@@ -77,28 +78,48 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
     // the module, other reps' records included.
     const record = await prisma[delegate].findFirst({ where: await reachableWhere(req, macro.module, delegate, { id: String(recordId) }, 'Edit'), select: { id: true } });
     if (!record) return res.status(404).json({ error: 'Not found' });
-    const results = [];
-    for (const action of macro.actions) {
+    // The macro's field updates are one edit of the record, made as an edit
+    // is (services/recordWrites): the module's rules and hooks (a case closed
+    // by a macro gets its closedAt and status history), its workflows and
+    // webhooks. Each was its own write, which none of them saw. A rule that
+    // refuses the edit fails every field update, with its message.
+    const results = new Array(macro.actions.length).fill(null);
+    const changes = {};
+    const fieldUpdates = [];
+    for (const [index, action] of macro.actions.entries()) {
       try {
         if (action.type === 'updateField') {
           // A plain field, as workflows and approvals may set: this wrote any
           // column (deletedAt, the owner) or relation the macro named.
           const problem = plainFieldProblem(delegate, action.field, action.value);
           if (problem) throw new Error(problem);
-          await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });
-          results.push({ action: 'updateField', field: action.field, success: true });
+          changes[action.field] = action.value;
+          fieldUpdates.push(index);
         } else if (action.type === 'addComment') {
           // A case comment, so only on a case; its text is `value`, or `body`
           // as the templates below write it, which left the comment empty and
           // the action failing.
           if (delegate !== 'case') throw new Error('Comments can only be added to cases');
           await prisma.caseComment.create({ data: { caseId: recordId, text: action.value ?? action.body, isPublic: action.isPublic || false, authorId: req.user.id } });
-          results.push({ action: 'addComment', success: true });
+          results[index] = { action: 'addComment', success: true };
         } else if (action.type === 'sendEmail') {
-          results.push({ action: 'sendEmail', success: true, note: 'Email queued' });
+          results[index] = { action: 'sendEmail', success: true, note: 'Email queued' };
         }
-      } catch (e) { results.push({ action: action.type, success: false, error: e.message }); }
+      } catch (e) { results[index] = { action: action.type, success: false, error: e.message }; }
     }
+    if (fieldUpdates.length) {
+      let failure = null;
+      try {
+        await updateRecord(prisma, macro.module, record.id, changes, { req, userId: req.userId, source: `macro ${macro.name}` });
+      } catch (e) { failure = e.message; }
+      for (const index of fieldUpdates) {
+        results[index] = failure
+          ? { action: 'updateField', field: macro.actions[index].field, success: false, error: failure }
+          : { action: 'updateField', field: macro.actions[index].field, success: true };
+      }
+    }
+    // An action type the macro does not know leaves no result, as before.
+    for (let i = results.length - 1; i >= 0; i--) if (results[i] === null) results.splice(i, 1);
     await prisma.macro.update({ where: { id: req.params.id }, data: { executionCount: { increment: 1 }, lastExecutedAt: new Date() } });
     // History and stats read these rows; nothing used to write them.
     await prisma.macroExecution.create({
@@ -128,19 +149,24 @@ router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res,
       where: await reachableWhere(req, macro.module, delegate, { id: { in: recordIds.map(String) } }, 'Edit'),
       select: { id: true },
     })).map(r => r.id));
+    // Each record's field updates as one edit, as for a single run.
+    const db = batchClient(prisma);
+    const write = { req, userId: req.userId, source: `macro ${macro.name}` };
     let successCount = 0;
     for (const recordId of recordIds) {
       let status = 'Success';
       try {
         if (!editable.has(String(recordId))) throw new Error('Not found');
+        const changes = {};
         for (const action of macro.actions) {
           if (action.type === 'updateField') {
             // A plain field only, as for a single run.
             const problem = plainFieldProblem(delegate, action.field, action.value);
             if (problem) throw new Error(problem);
-            await prisma[delegate].update({ where: { id: recordId }, data: { [action.field]: action.value } });
+            changes[action.field] = action.value;
           }
         }
+        if (Object.keys(changes).length) await updateRecord(db, macro.module, String(recordId), changes, write);
         successCount++;
       } catch (e) { status = 'Failed'; }
       await prisma.macroExecution.create({ data: { macroId: macro.id, recordId, module: macro.module, status, userId: req.user.id } });

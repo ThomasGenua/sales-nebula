@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere } = require('../middleware/access');
-const { createNumbered, ORDER_NUMBER, QUOTE_NUMBER } = require('../utils/numbering');
+const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
 const { summaryRoute } = require('../utils/moduleStatus');
 
 const router = Router();
@@ -34,12 +34,15 @@ const editableQuote = quoteReach('Edit');
 router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const quote = await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Pending Approval', submittedAt: new Date() } });
+    // As an edit of the quote (services/recordWrites): its rules, audit
+    // trail, workflows and webhooks.
+    const { record: quote } = await updateRecord(prisma, 'quotes', req.params.id, { status: 'Pending Approval', submittedAt: new Date() }, {
+      req, userId: req.userId, source: 'submitted for approval',
+    });
     // Create approval record
     await prisma.approval.create({
       data: { module: 'quotes', recordId: quote.id, status: 'Pending', requesterId: req.user.id, approverId: req.body.approverId || null },
     });
-    await req.audit({ action: 'update', module: 'quotes', recordId: quote.id, details: 'Submitted for approval' });
     res.json(quote);
   } catch (err) { next(err); }
 });
@@ -64,11 +67,17 @@ router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'ed
     });
     const subtotal = lines.reduce((s, l) => s + l.total, 0);
     const newTotal = subtotal - (quote.discount || 0) + (quote.tax || 0);
-    await prisma.$transaction([
-      ...lines.map(({ id, ...data }) => prisma.quoteItem.update({ where: { id }, data })),
-      prisma.quote.update({ where: { id: quote.id }, data: { subtotal, total: newTotal, totalAmount: newTotal, discountReason } }),
-    ]);
-    await req.audit({ action: 'update', module: 'quotes', recordId: req.params.id, details: `Applied ${discountPercent}% discount` });
+    // The lines and the quote together, the quote as an edit
+    // (services/recordWrites), its workflows and webhooks once both are in.
+    const after = [];
+    const { items, ...current } = quote;
+    await prisma.$transaction(async tx => {
+      for (const { id, ...data } of lines) await tx.quoteItem.update({ where: { id }, data });
+      await updateRecord(tx, 'quotes', current, { subtotal, total: newTotal, totalAmount: newTotal, discountReason }, {
+        req, userId: req.userId, source: `${discountPercent}% discount`, after, prisma,
+      });
+    });
+    await runAfter(after);
     res.json({ discount: discountPercent, newTotal, itemsUpdated: lines.length });
   } catch (err) { next(err); }
 });
@@ -83,14 +92,13 @@ router.post('/:id/clone', authenticate, requirePermission('quotes', 'edit'), edi
     // original's failed every clone. It is a new draft, not submitted or
     // turned into the original's order.
     const { id, createdAt, updatedAt, deletedAt, items, number, orderId, submittedAt, ...quoteData } = original;
-    const clone = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
-      data: {
-        ...quoteData, name: `${original.name || original.number} (Copy)`, status: 'Draft', quoteNumber: null,
-        items: { create: items.map(({ id, quoteId, ...item }) => item) },
-      },
-      include: { items: true },
+    // Made as a quote is (services/recordWrites), with its lines.
+    const { record: clone } = await createRecord(prisma, 'quotes', {
+      ...quoteData, name: `${original.name || original.number} (Copy)`, status: 'Draft', quoteNumber: null,
+    }, {
+      userId: req.userId, source: `clone of ${original.number}`, emit: req.app.locals.emit, include: { items: true },
+      nested: { items: { create: items.map(({ id, quoteId, ...item }) => item) } },
     });
-    await req.audit({ action: 'create', module: 'quotes', recordId: clone.id, details: `Cloned from ${original.id}` });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });
@@ -107,18 +115,20 @@ router.post('/:id/convert-to-order', authenticate, requirePermission('orders', '
     // The order is the caller's, as one they create is. It had no owner or
     // creator, so row security's ownership arm matched nobody. Its lines and
     // amounts are the quote's, as /api/orders/from-quote copies them.
-    const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
-      data: {
-        name: `Order - ${quote.name || quote.number}`, status: 'Draft',
-        accountId: quote.accountId, dealId: quote.dealId, contactId: quote.contactId,
-        subtotal: quote.total - quote.tax + quote.discount, discount: quote.discount, tax: quote.tax,
-        total: quote.total, totalAmount: quote.total, quoteId: quote.id,
-        ownerId: req.user.id, createdById: req.user.id,
-        items: { create: quote.items.map(i => ({ productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, discount: i.discount, total: i.total })) },
-      },
+    // The order is made, and the quote accepted, as on their own pages
+    // (services/recordWrites): numbers, rules, workflows and webhooks.
+    const { record: order } = await createRecord(prisma, 'orders', {
+      name: `Order - ${quote.name || quote.number}`, status: 'Draft',
+      accountId: quote.accountId, dealId: quote.dealId, contactId: quote.contactId,
+      subtotal: quote.total - quote.tax + quote.discount, discount: quote.discount, tax: quote.tax,
+      total: quote.total, totalAmount: quote.total, quoteId: quote.id,
+      ownerId: req.user.id,
+    }, {
+      userId: req.userId, source: `from quote ${quote.number}`, emit: req.app.locals.emit,
+      nested: { items: { create: quote.items.map(i => ({ productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, discount: i.discount, total: i.total })) } },
     });
-    await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Accepted', orderId: order.id } });
-    await req.audit({ action: 'create', module: 'orders', recordId: order.id, details: `Created from quote ${quote.id}` });
+    const { items, ...current } = quote;
+    await updateRecord(prisma, 'quotes', current, { status: 'Accepted', orderId: order.id }, { req, userId: req.userId, source: 'converted to order' });
     res.status(201).json(order);
   } catch (err) { next(err); }
 });

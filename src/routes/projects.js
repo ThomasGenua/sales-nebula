@@ -10,7 +10,16 @@ const {
   rollUpProgress, buildGanttRows, addDays, diffDays,
 } = require('../utils/scheduling');
 
+const { defineModule, createRecord, updateRecord, deleteRecord } = require('../services/recordWrites');
+
 const router = Router();
+
+// A project's writes go through the rules every module's do
+// (services/recordWrites): the validation rules Studio lets an admin set on
+// projects, workflows and webhooks. Projects have their own router, which
+// wrote them directly, so none of them saw a project. Its tasks, milestones
+// and time entries are its own rows, not records with rules of their own.
+defineModule('projects', 'project', {});
 
 // The projects permission for every route, read to look and edit to change,
 // and a project a route names must be one row security lets the caller see
@@ -156,19 +165,17 @@ router.post('/', authenticate, requirePermission('projects', 'edit'), auditMiddl
     const linkProblem = await linkRefusal(req, 'project', { accountId, dealId, contactId });
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-    const project = await prisma.project.create({
-      data: {
-        name, code, description,
-        status: status || 'Draft', priority: priority || 'Medium',
-        startDate: startDate ? new Date(startDate) : null,
-        endDate: endDate ? new Date(endDate) : null,
-        budget: budget != null ? +budget : null,
-        estimatedHours: estimatedHours != null ? +estimatedHours : null,
-        currency: currency || 'USD',
-        managerId: managerId || req.user.id, ownerId: req.user.id,
-        accountId, dealId, contactId,
-      },
-    });
+    const { record: project } = await createRecord(prisma, 'projects', {
+      name, code, description,
+      status: status || 'Draft', priority: priority || 'Medium',
+      startDate: startDate ? new Date(startDate) : null,
+      endDate: endDate ? new Date(endDate) : null,
+      budget: budget != null ? +budget : null,
+      estimatedHours: estimatedHours != null ? +estimatedHours : null,
+      currency: currency || 'USD',
+      managerId: managerId || req.user.id, ownerId: req.user.id,
+      accountId, dealId, contactId,
+    }, { userId: req.userId, emit: req.app.locals.emit });
 
     const team = resources?.length ? resources : [{ userId: req.user.id, role: 'Manager' }];
     for (const r of team) {
@@ -178,7 +185,6 @@ router.post('/', authenticate, requirePermission('projects', 'edit'), auditMiddl
       }).catch(() => {});
     }
 
-    await req.audit({ action: 'create', module: 'projects', recordId: project.id, details: `Project created: ${name}` });
     res.status(201).json(project);
   } catch (err) { next(err); }
 });
@@ -202,8 +208,7 @@ router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMid
     if (data.status === 'Active' && !data.actualStart) data.actualStart = new Date();
     if (data.status === 'Completed') { data.actualEnd = new Date(); data.percentComplete = 100; }
 
-    const project = await prisma.project.update({ where: { id: req.params.id }, data });
-    await req.audit({ action: 'update', module: 'projects', recordId: project.id, details: `Project updated: ${project.name}` });
+    const { record: project } = await updateRecord(prisma, 'projects', current, data, { req, userId: req.userId });
     res.json(project);
   } catch (err) { next(err); }
 });
@@ -211,10 +216,12 @@ router.put('/:id', authenticate, requirePermission('projects', 'edit'), auditMid
 router.delete('/:id', authenticate, requirePermission('projects', 'full'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    if (!(await projectToChange(req, res, req.params.id))) return;
-    const project = await prisma.project.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    const current = await projectToChange(req, res, req.params.id);
+    if (!current) return;
+    // As a delete is (services/recordWrites): into the recycle bin, with its
+    // webhook. Its tasks go with it.
+    const project = await deleteRecord(prisma, 'projects', current, { req, userId: req.userId });
     await prisma.projectTask.updateMany({ where: { projectId: project.id }, data: { deletedAt: new Date() } });
-    await req.audit({ action: 'delete', module: 'projects', recordId: project.id, details: `Project deleted: ${project.name}` });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
@@ -510,7 +517,8 @@ router.post('/:id/reschedule', authenticate, requirePermission('projects', 'edit
         data: { startDate: s.earliestStart, endDate: s.earliestFinish, isCriticalPath: s.isCritical, slackDays: s.totalFloat, wbsCode: wbs.get(s.taskId) },
       });
     }
-    await prisma.project.update({ where: { id: project.id }, data: { endDate: cpm.projectFinish } });
+    // The new end date as an edit (services/recordWrites), so a rule on it sees the slip.
+    await updateRecord(prisma, 'projects', project, { endDate: cpm.projectFinish }, { req, userId: req.userId, source: 'rescheduled' });
     await recalcProject(prisma, project.id);
 
     await req.audit({ action: 'update', module: 'projects', recordId: project.id, details: `Rescheduled: ${cpm.schedule.length} tasks, ${cpm.criticalPath.length} on critical path` });
@@ -855,18 +863,16 @@ router.post('/from-template/:templateId', authenticate, requirePermission('proje
     const linkProblem = await linkRefusal(req, 'project', { accountId, dealId });
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-    const project = await prisma.project.create({
-      data: {
-        name: name || template.name,
-        description: template.description, status: 'Planning',
-        startDate: start,
-        endDate: template.defaultDurationDays ? addDays(start, template.defaultDurationDays) : null,
-        estimatedHours: template.estimatedHours,
-        budget: budget != null ? +budget : null,
-        managerId: managerId || req.user.id, ownerId: req.user.id,
-        accountId, dealId, templateId: template.id,
-      },
-    });
+    const { record: project } = await createRecord(prisma, 'projects', {
+      name: name || template.name,
+      description: template.description, status: 'Planning',
+      startDate: start,
+      endDate: template.defaultDurationDays ? addDays(start, template.defaultDurationDays) : null,
+      estimatedHours: template.estimatedHours,
+      budget: budget != null ? +budget : null,
+      managerId: managerId || req.user.id, ownerId: req.user.id,
+      accountId, dealId, templateId: template.id,
+    }, { userId: req.userId, source: `from template ${template.name}`, emit: req.app.locals.emit });
 
     // Two passes: create tasks, then wire parents and dependencies by template key
     const idByKey = new Map();
@@ -901,7 +907,6 @@ router.post('/from-template/:templateId', authenticate, requirePermission('proje
     await prisma.projectTemplate.update({ where: { id: template.id }, data: { usageCount: { increment: 1 } } });
     await recalcProject(prisma, project.id);
 
-    await req.audit({ action: 'create', module: 'projects', recordId: project.id, details: `Project created from template ${template.name}` });
     res.status(201).json({ project, tasksCreated: idByKey.size });
   } catch (err) { next(err); }
 });

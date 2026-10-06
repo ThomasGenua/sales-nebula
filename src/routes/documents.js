@@ -8,6 +8,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { summaryRoute } = require('../utils/moduleStatus');
+const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, process.env.UPLOAD_DIR || './uploads'),
@@ -48,20 +49,21 @@ router.post('/upload', authenticate, requirePermission('documents', 'edit'), aud
     }
     // fileName is the original name, which a download is saved under; the
     // stored file (a UUID) is filePath. Downloads came back named by UUID.
-    const doc = await prisma.document.create({
-      data: {
-        name: req.body.name || req.file.originalname, fileName: req.file.originalname,
-        category: req.body.category || 'General', mimeType: req.file.mimetype,
-        fileSize: req.file.size, filePath: req.file.path,
-        ...(req.body.dealId && { dealId: req.body.dealId }),
-        ...(req.body.accountId && { accountId: req.body.accountId }),
-        ...(req.body.contactId && { contactId: req.body.contactId }),
-        createdById: req.user.id,
-      },
-    });
-    await req.audit({ action: 'create', module: 'documents', recordId: doc.id, details: `File uploaded: ${req.file.originalname}` });
+    // Made as a document is on its own page (services/recordWrites): its rules,
+    // audit trail, workflows and webhooks. One a rule refuses leaves no file.
+    const { record: doc } = await createRecord(prisma, 'documents', {
+      name: req.body.name || req.file.originalname, fileName: req.file.originalname,
+      category: req.body.category || 'General', mimeType: req.file.mimetype,
+      fileSize: req.file.size, filePath: req.file.path,
+      ...(req.body.dealId && { dealId: req.body.dealId }),
+      ...(req.body.accountId && { accountId: req.body.accountId }),
+      ...(req.body.contactId && { contactId: req.body.contactId }),
+    }, { userId: req.userId, source: `uploaded ${req.file.originalname}`, emit: req.app.locals.emit });
     res.status(201).json(doc);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
+    next(err);
+  }
 });
 
 // Bulk upload
@@ -69,17 +71,27 @@ router.post('/upload/bulk', authenticate, requirePermission('documents', 'edit')
   try {
     const prisma = req.app.locals.prisma;
     if (!req.files?.length) return res.status(400).json({ error: 'No files' });
-    const docs = await prisma.$transaction(req.files.map(file =>
-      prisma.document.create({
-        data: {
+    // All or none, as before, each made as a document is on its own page
+    // (services/recordWrites), its workflows and webhooks once all are in.
+    const after = [];
+    const write = { userId: req.userId, source: 'bulk upload', emit: req.app.locals.emit, after, prisma };
+    const docs = await prisma.$transaction(async tx => {
+      const made = [];
+      for (const file of req.files) {
+        made.push((await createRecord(tx, 'documents', {
           name: file.originalname, fileName: file.originalname, mimeType: file.mimetype,
           fileSize: file.size, filePath: file.path, category: req.body.category || 'General',
-          createdById: req.user.id,
-        },
-      })
-    ));
+        }, write)).record);
+      }
+      return made;
+    });
+    await runAfter(after);
     res.status(201).json({ uploaded: docs.length, documents: docs });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // None was kept, so none of the files is either.
+    for (const file of req.files || []) await fs.promises.unlink(file.path).catch(() => {});
+    next(err);
+  }
 });
 
 // Download
@@ -111,16 +123,18 @@ router.post('/:id/version', authenticate, requirePermission('documents', 'edit')
       await fs.promises.unlink(req.file.path).catch(() => {});
       return res.status(404).json({ error: 'Document not found' });
     }
-    const doc = await prisma.document.update({
-      where: { id: req.params.id },
-      data: {
-        fileName: req.file.originalname, mimeType: req.file.mimetype,
-        fileSize: req.file.size, filePath: req.file.path,
-        version: (original.version || 1) + 1, updatedAt: new Date(),
-      },
-    });
+    // As an edit (services/recordWrites), so its rules, audit trail and
+    // workflows see the new version; one a rule refuses leaves no file.
+    const { record: doc } = await updateRecord(prisma, 'documents', original, {
+      fileName: req.file.originalname, mimeType: req.file.mimetype,
+      fileSize: req.file.size, filePath: req.file.path,
+      version: (original.version || 1) + 1,
+    }, { req, userId: req.userId, source: 'new version' });
     res.json(doc);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
+    next(err);
+  }
 });
 
 // Search by category
@@ -147,7 +161,9 @@ router.post('/:id/share', authenticate, async (req, res, next) => {
     const { shareWith } = req.body;
     const access = req.body.access || 'view';
     if (!SHARE_LEVELS.includes(access)) return res.status(400).json({ error: `access must be one of: ${SHARE_LEVELS.join(', ')}` });
-    const updated = await prisma.document.update({ where: { id: req.params.id }, data: { sharedWith: shareWith, accessLevel: access } });
+    const { record: updated } = await updateRecord(prisma, 'documents', req.params.id, { sharedWith: shareWith, accessLevel: access }, {
+      req, userId: req.userId, source: 'shared',
+    });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -174,7 +190,9 @@ router.post('/from-template/:templateId', authenticate, async (req, res, next) =
     const { id, createdAt, updatedAt, version, downloadCount, ...data } = template;
     // Prisma refuses a bare null for a Json column; left out, it stays NULL.
     if (data.sharedWith === null) delete data.sharedWith;
-    const doc = await prisma.document.create({ data: { ...data, name: req.body.name || `${template.name} (Copy)`, isTemplate: false, createdById: req.user.id } });
+    const { record: doc } = await createRecord(prisma, 'documents', { ...data, name: req.body.name || `${template.name} (Copy)`, isTemplate: false }, {
+      userId: req.userId, source: 'from template', emit: req.app.locals.emit,
+    });
     res.status(201).json(doc);
   } catch (err) { next(err); }
 });

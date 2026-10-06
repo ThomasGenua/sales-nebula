@@ -1,8 +1,9 @@
 const { createCrudRouter } = require('../utils/crud');
 const { requirePermission } = require('../middleware/auth');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { fireWebhookEvent } = require('../services/webhooks');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 
 /**
  * Whose activities a list shows: the caller's own, or another user's for an
@@ -136,14 +137,17 @@ module.exports = createCrudRouter('activity', 'activities', {
     router.post('/:id/complete', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const activity = await prisma.activity.update({
-          where: { id: req.params.id },
+        // As an edit (services/recordWrites): the activity's rules, audit
+        // trail, and the workflows on its status, which completing one never
+        // reached; the follow-up is made as a new activity is.
+        const write = { req, userId: req.userId, source: 'completed' };
+        const { record: activity } = await updateRecord(prisma, 'activities', req.params.id, {
           // When it was done: completedAt was never set.
-          data: {
-            status: 'Completed',
-            completedAt: new Date(),
-            result: req.body.result || 'Completed',
-          },
+          status: 'Completed',
+          completedAt: new Date(),
+          result: req.body.result || 'Completed',
+        }, {
+          ...write,
           include: {
             contact: { select: { id: true, firstName: true, lastName: true } },
             deal: { select: { id: true, name: true } },
@@ -155,23 +159,20 @@ module.exports = createCrudRouter('activity', 'activities', {
         // in; with no owner or assignee, a Private default hid it from them.
         if (req.body.followUp) {
           const due = new Date(req.body.followUp.date || Date.now() + 7 * 86400000);
-          await prisma.activity.create({
-            data: {
-              type: req.body.followUp.type || 'Task',
-              subject: req.body.followUp.subject || `Follow-up: ${activity.subject}`,
-              date: due,
-              dueDate: due,
-              ownerId: req.userId,
-              assignedId: activity.assignedId || req.userId,
-              contactId: activity.contactId,
-              dealId: activity.dealId,
-              accountId: activity.accountId,
-              status: 'Scheduled',
-            },
-          });
+          await createRecord(prisma, 'activities', {
+            type: req.body.followUp.type || 'Task',
+            subject: req.body.followUp.subject || `Follow-up: ${activity.subject}`,
+            date: due,
+            dueDate: due,
+            ownerId: req.userId,
+            assignedId: activity.assignedId || req.userId,
+            contactId: activity.contactId,
+            dealId: activity.dealId,
+            accountId: activity.accountId,
+            status: 'Scheduled',
+          }, { userId: req.userId, source: 'follow-up', emit: req.app.locals.emit });
         }
 
-        await req.audit({ action: 'update', module: 'activities', recordId: activity.id, details: `Completed activity: ${activity.subject}` });
         await fireWebhookEvent(prisma, 'activity.completed', { id: activity.id, type: activity.type });
         res.json(activity);
       } catch (err) { next(err); }
@@ -185,10 +186,9 @@ module.exports = createCrudRouter('activity', 'activities', {
         // Moved as a whole, due date included, and back to Scheduled: the
         // due date the page shows stayed put, and 'Planned' is a status
         // nothing else gives an activity.
-        const activity = await prisma.activity.update({
-          where: { id: req.params.id },
-          data: { date: new Date(req.body.date), dueDate: new Date(req.body.date), status: 'Scheduled', completedAt: null },
-        });
+        const { record: activity } = await updateRecord(prisma, 'activities', req.params.id, {
+          date: new Date(req.body.date), dueDate: new Date(req.body.date), status: 'Scheduled', completedAt: null,
+        }, { req, userId: req.userId, source: 'rescheduled' });
         res.json(activity);
       } catch (err) { next(err); }
     });
@@ -228,26 +228,26 @@ module.exports = createCrudRouter('activity', 'activities', {
       try {
         const prisma = req.app.locals.prisma;
         const { contactId, dealId, accountId, subject, description, duration, result } = req.body;
-        // Only on records the caller can see. The keys were stored as sent, so
-        // a call could be filed on anyone's deal and its name read back.
-        const linkProblem = await linkRefusal(req, 'activity', { contactId, dealId, accountId });
-        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-        const activity = await prisma.activity.create({
-          data: {
-            type: 'Call',
-            subject: subject || 'Phone Call',
-            description,
-            duration: parseInt(duration) || 0,
-            result: result || 'Completed',
-            status: 'Completed',
-            completedAt: new Date(),
-            date: new Date(),
-            // The caller's, as owner too: the stats that go by owner missed
-            // every call logged here.
-            ownerId: req.userId,
-            assignedId: req.userId,
-            contactId, dealId, accountId,
-          },
+        // Only on records the caller can see (the write's link check). The
+        // keys were stored as sent, so a call could be filed on anyone's deal
+        // and its name read back. Made as an activity is on its own page
+        // (services/recordWrites), so its rules and workflows see it.
+        const { record: activity } = await createRecord(prisma, 'activities', {
+          type: 'Call',
+          subject: subject || 'Phone Call',
+          description,
+          duration: parseInt(duration) || 0,
+          result: result || 'Completed',
+          status: 'Completed',
+          completedAt: new Date(),
+          date: new Date(),
+          // The caller's, as owner too: the stats that go by owner missed
+          // every call logged here.
+          ownerId: req.userId,
+          assignedId: req.userId,
+          contactId, dealId, accountId,
+        }, {
+          req, userId: req.userId, source: 'logged call',
           include: {
             contact: { select: { id: true, firstName: true, lastName: true } },
             deal: { select: { id: true, name: true } },
@@ -263,23 +263,19 @@ module.exports = createCrudRouter('activity', 'activities', {
         const prisma = req.app.locals.prisma;
         const { contactId, dealId, accountId, subject, description, duration, date, attendees } = req.body;
         // Only on records the caller can see, as for log-call.
-        const linkProblem = await linkRefusal(req, 'activity', { contactId, dealId, accountId });
-        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-        const activity = await prisma.activity.create({
-          data: {
-            type: 'Meeting',
-            subject: subject || 'Meeting',
-            description: description || '',
-            duration: parseInt(duration) || 60,
-            result: req.body.result || '',
-            status: date && new Date(date) > new Date() ? 'Scheduled' : 'Completed',
-            ...(!(date && new Date(date) > new Date()) && { completedAt: new Date() }),
-            date: date ? new Date(date) : new Date(),
-            ownerId: req.userId,
-            assignedId: req.userId,
-            contactId, dealId, accountId,
-          },
-        });
+        const { record: activity } = await createRecord(prisma, 'activities', {
+          type: 'Meeting',
+          subject: subject || 'Meeting',
+          description: description || '',
+          duration: parseInt(duration) || 60,
+          result: req.body.result || '',
+          status: date && new Date(date) > new Date() ? 'Scheduled' : 'Completed',
+          ...(!(date && new Date(date) > new Date()) && { completedAt: new Date() }),
+          date: date ? new Date(date) : new Date(),
+          ownerId: req.userId,
+          assignedId: req.userId,
+          contactId, dealId, accountId,
+        }, { req, userId: req.userId, source: 'logged meeting' });
         res.status(201).json(activity);
       } catch (err) { next(err); }
     });

@@ -902,7 +902,7 @@ Data export job management with download
 
 ### `/api/bulk`
 
-High-volume batch operations
+High-volume batch operations. Each record is written as one made on its own page is, through the module's validation, duplicate and assignment rules, its workflows and webhooks (see One Write Path in the README). A row a rule refuses fails on its own, with the rule's message and `code`, and the rest go through; a delete puts each record in the recycle bin.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -914,7 +914,7 @@ High-volume batch operations
 
 ### `/api/mass-actions`
 
-Bulk update, delete, reassign, tag operations
+Bulk update, delete, reassign, tag operations. Update, delete and reassign change each record as an edit or delete would, through the module's rules, workflows and webhooks; a record a rule refuses keeps its values and is listed in `failed`. The CRUD modules' own `POST /:module/bulk-update` and `/bulk-delete` work the same way.
 
 | Method | Path | Description |
 |--------|------|-------------|

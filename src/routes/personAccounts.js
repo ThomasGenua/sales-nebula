@@ -1,9 +1,12 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
-const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
+const { canReach, reachableWhere } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { createCrudRouter } = require('../utils/crud');
-const { columnsFrom } = require('../utils/modelFields');
+const { editableFields } = require('../utils/modelFields');
+const {
+  createRecord, updateRecord, deleteRecord, runAfter, batchClient,
+} = require('../services/recordWrites');
 
 const router = createCrudRouter('personAccount', 'personAccounts', {
   // A person account has no company column: searching on it made every
@@ -37,27 +40,29 @@ router.post('/:id/convert', authenticate, requirePermission('personAccounts', 'e
 
     // From the columns a person account has (company, website, industry, the
     // street parts and title are not among them), owned by whoever converts
-    // it: with no owner, a Private default hid both from them.
-    const [account, contact] = await prisma.$transaction([
-      prisma.account.create({
-        data: {
-          name: `${pa.firstName} ${pa.lastName}`,
-          phone: pa.phone, address: pa.billingAddress || pa.mailingAddress,
-          ownerId: req.userId, createdById: req.userId,
-        },
-      }),
-      prisma.contact.create({
-        data: {
-          firstName: pa.firstName, lastName: pa.lastName, email: pa.email,
-          phone: pa.phone, mobilePhone: pa.mobilePhone, address: pa.mailingAddress,
-          ownerId: req.userId,
-        },
-      }),
-    ]);
-    // Link contact to account
-    await prisma.contact.update({ where: { id: contact.id }, data: { accountId: account.id } });
-    await prisma.personAccount.update({ where: { id: pa.id }, data: { convertedAccountId: account.id, convertedContactId: contact.id, status: 'Converted' } });
-    await req.audit({ action: 'update', module: 'personAccounts', recordId: pa.id, details: 'Converted to account + contact' });
+    // it: with no owner, a Private default hid both from them. All three
+    // writes go through the modules' rules (services/recordWrites) in one
+    // transaction, the contact made on its account rather than linked after,
+    // and their workflows and webhooks run once it commits. The person
+    // account was marked converted outside the transaction, so a failure
+    // there left an account and contact it did not know about.
+    const after = [];
+    const write = { userId: req.userId, source: 'person account conversion', emit: req.app.locals.emit, after, prisma };
+    const { account, contact } = await prisma.$transaction(async tx => {
+      const { record: account } = await createRecord(tx, 'accounts', {
+        name: `${pa.firstName} ${pa.lastName}`,
+        phone: pa.phone, address: pa.billingAddress || pa.mailingAddress,
+        ownerId: req.userId,
+      }, write);
+      const { record: contact } = await createRecord(tx, 'contacts', {
+        firstName: pa.firstName, lastName: pa.lastName, email: pa.email,
+        phone: pa.phone, mobilePhone: pa.mobilePhone, address: pa.mailingAddress,
+        accountId: account.id, ownerId: req.userId,
+      }, write);
+      await updateRecord(tx, 'personAccounts', pa, { convertedAccountId: account.id, convertedContactId: contact.id, status: 'Converted' }, write);
+      return { account, contact };
+    });
+    await runAfter(after);
     res.json({ account, contact, personAccountId: pa.id });
   } catch (err) { next(err); }
 });
@@ -87,11 +92,18 @@ router.post('/merge', authenticate, requirePermission('personAccounts', 'edit'),
       if (!primary[field] && secondary[field]) updates[field] = secondary[field];
     }
     // Email is unique, so the one merged away gives its up first: taking it
-    // while the secondary still held it failed every such merge.
-    const [, merged] = await prisma.$transaction([
-      prisma.personAccount.update({ where: { id: secondaryId }, data: { deletedAt: new Date(), ...(updates.email && { email: null }) } }),
-      prisma.personAccount.update({ where: { id: primaryId }, data: updates }),
-    ]);
+    // while the secondary still held it failed every such merge. The one
+    // merged away is deleted as a delete is, into the recycle bin with its
+    // webhook (it was only marked deleted), and the survivor changes as an
+    // edit would (services/recordWrites).
+    const after = [];
+    const write = { req, userId: req.userId, source: `merge of ${secondaryId}`, after, prisma };
+    const merged = await prisma.$transaction(async tx => {
+      if (updates.email) await tx.personAccount.update({ where: { id: secondaryId }, data: { email: null } });
+      await deleteRecord(tx, 'personAccounts', secondary, { ...write, source: `merged into ${primaryId}` });
+      return (await updateRecord(tx, 'personAccounts', primary, updates, write)).record;
+    });
+    await runAfter(after);
     res.json({ merged, removedId: secondaryId });
   } catch (err) { next(err); }
 });
@@ -128,10 +140,12 @@ router.post('/:id/household', authenticate, async (req, res, next) => {
       if (!(await canReach(req, 'personAccounts', 'personAccount', mId, 'Edit'))) return res.status(404).json({ error: 'Member not found' });
     }
     // Owned by its creator: an account's owner is ownerId, so with only
-    // createdById a Private default hid the household from them.
-    const household = await prisma.account.create({ data: { name: householdName || `${person.lastName} Household`, type: 'Household', ownerId: req.user.id, createdById: req.user.id } });
-    await prisma.personAccount.update({ where: { id: req.params.id }, data: { householdId: household.id } });
-    for (const mId of memberIds) { await prisma.personAccount.update({ where: { id: mId }, data: { householdId: household.id } }).catch(() => {}); }
+    // createdById a Private default hid the household from them. Made, and
+    // its members moved into it, as on their own pages (services/recordWrites).
+    const write = { req, userId: req.userId, source: 'household' };
+    const { record: household } = await createRecord(prisma, 'accounts', { name: householdName || `${person.lastName} Household`, type: 'Household', ownerId: req.user.id }, write);
+    await updateRecord(prisma, 'personAccounts', person, { householdId: household.id }, write);
+    for (const mId of memberIds) { await updateRecord(prisma, 'personAccounts', mId, { householdId: household.id }, write).catch(() => {}); }
     res.json({ householdId: household.id, householdName: household.name, primaryMember: person.id });
   } catch (err) { next(err); }
 });
@@ -197,15 +211,15 @@ router.post('/bulk-import', authenticate, requirePermission('personAccounts', 'f
     const { records } = req.body;
     if (!records?.length) return res.status(400).json({ error: 'records array required' });
     const results = [];
-    const seen = new Map();
+    // Each row's own columns, linked only to records the importer can see;
+    // rows went to Prisma whole. Made as on its own page
+    // (services/recordWrites): rules, an owner from the assignment rules or
+    // else the importer, workflows and webhooks.
+    const db = batchClient(prisma);
+    const write = { req, userId: req.userId, source: 'bulk import', linkCache: new Map() };
     for (const rec of records.slice(0, 200)) {
       try {
-        // Each row's own columns, owned by the importer, linked only to records
-        // the importer can see; rows went to Prisma whole.
-        const data = { ...columnsFrom('personAccount', rec), ownerId: req.user.id, createdById: req.user.id };
-        const refusal = await linkRefusal(req, 'personAccount', data, null, seen);
-        if (refusal) throw new Error(refusal);
-        const pa = await prisma.personAccount.create({ data });
+        const { record: pa } = await createRecord(db, 'personAccounts', editableFields('personAccount', rec), write);
         results.push({ id: pa.id, status: 'created' });
       } catch (e) { results.push({ data: rec, status: 'error', error: e.message }); }
     }

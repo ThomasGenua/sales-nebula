@@ -6,6 +6,7 @@ const { buildApprovalSteps, notifyApprovers, meetsEntryConditions } = require('.
 const { fireWebhookEvent } = require('../services/webhooks');
 const { acquireLease, releaseLease } = require('../utils/lease');
 const { currencyContext, sumInBase, resolveDealCurrency } = require('../utils/currency');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 
 /**
  * `find(where)` over another module's rows matching `where`, narrowed to the
@@ -34,11 +35,11 @@ module.exports = createCrudRouter('deal', 'deals', {
   orderBy: { updatedAt: 'desc' },
   // A deal's value is in its own currency; an unknown or inactive code is a
   // 400, and none at all means the default currency.
-  beforeCreate: async (data, req) => ({ ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) }),
-  afterUpdate: async (record, req) => {
-    // Track stage changes
-    const prisma = req.app.locals.prisma;
-    const oldStage = req._oldDealStage;
+  beforeCreate: async (data, { prisma }) => ({ ...data, currency: await resolveDealCurrency(prisma, data.currency) }),
+  // A stage move is kept in the deal's stage history, however it was made:
+  // the edit form, a bulk or mass update, an import.
+  afterUpdate: async (record, { prisma, oldRecord, userId, emit }) => {
+    const oldStage = oldRecord.stage;
     if (oldStage && oldStage !== record.stage) {
       // Calculate days in old stage
       const lastHistory = await prisma.dealStageHistory.findFirst({
@@ -54,24 +55,16 @@ module.exports = createCrudRouter('deal', 'deals', {
           dealId: record.id,
           fromStage: oldStage,
           toStage: record.stage,
-          changedById: req.userId,
+          changedById: userId,
           duration,
         },
       });
 
-      if (req.app.locals.emit?.dealStageChanged) {
-        req.app.locals.emit.dealStageChanged(record, oldStage, record.stage);
-      }
+      try { emit?.dealStageChanged?.(record, oldStage, record.stage); } catch (e) { /* Real-time is best-effort */ }
     }
   },
-  beforeUpdate: async (data, req) => {
-    if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) };
-    // Store old stage for afterUpdate comparison
-    if (data.stage) {
-      const prisma = req.app.locals.prisma;
-      const current = await prisma.deal.findUnique({ where: { id: req.params.id }, select: { stage: true } });
-      req._oldDealStage = current?.stage;
-    }
+  beforeUpdate: async (data, { prisma }) => {
+    if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(prisma, data.currency) };
     return data;
   },
   customRoutes: (router) => {
@@ -206,10 +199,11 @@ module.exports = createCrudRouter('deal', 'deals', {
           include: { product: { select: { id: true, name: true, sku: true } } },
         });
 
-        // Update deal value to match line items total
+        // Update deal value to match line items total, as an edit of the deal
+        // (services/recordWrites), so a rule on its value sees the new one.
         const allItems = await prisma.dealLineItem.findMany({ where: { dealId: req.params.id } });
         const dealTotal = allItems.reduce((s, i) => s + i.total, 0);
-        await prisma.deal.update({ where: { id: req.params.id }, data: { value: dealTotal } });
+        await updateRecord(prisma, 'deals', req.params.id, { value: dealTotal }, { req, userId: req.userId, source: 'line items' });
 
         res.status(201).json(item);
       } catch (err) { next(err); }
@@ -224,10 +218,10 @@ module.exports = createCrudRouter('deal', 'deals', {
         const { count } = await prisma.dealLineItem.deleteMany({ where: { id: req.params.itemId, dealId: req.params.id } });
         if (!count) return res.status(404).json({ error: 'Not found' });
 
-        // Recalculate deal value
+        // Recalculate deal value, as an edit of the deal.
         const allItems = await prisma.dealLineItem.findMany({ where: { dealId: req.params.id } });
         const dealTotal = allItems.reduce((s, i) => s + i.total, 0);
-        await prisma.deal.update({ where: { id: req.params.id }, data: { value: dealTotal } });
+        await updateRecord(prisma, 'deals', req.params.id, { value: dealTotal }, { req, userId: req.userId, source: 'line items' });
 
         res.json({ success: true });
       } catch (err) { next(err); }
@@ -264,13 +258,12 @@ module.exports = createCrudRouter('deal', 'deals', {
         // Prisma refuses a bare null for a Json column; left out, it stays NULL.
         if (data.competitors === null) delete data.competitors;
 
-        const clone = await prisma.deal.create({
-          data: {
-            ...data,
-            lineItems: lineItems.length > 0 ? {
-              create: lineItems.map(({ id, dealId, createdAt, ...item }) => item),
-            } : undefined,
-          },
+        // Made as a deal is on its own page (services/recordWrites): its
+        // rules, then the workflows and webhooks for new deals. Its links were
+        // settled above, so they are not checked again.
+        const { record: clone } = await createRecord(prisma, 'deals', data, {
+          userId: req.userId, source: 'clone', emit: req.app.locals.emit,
+          nested: lineItems.length > 0 ? { lineItems: { create: lineItems.map(({ id, dealId, createdAt, ...item }) => item) } } : undefined,
           include: {
             account: { select: { id: true, name: true } },
             lineItems: true,
@@ -298,10 +291,7 @@ module.exports = createCrudRouter('deal', 'deals', {
         const { competitors } = req.body; // Array of {name, strengths, weaknesses, threat}
         // Prisma refuses a bare null for the Json column, so that was a 500.
         if (!Array.isArray(competitors)) return res.status(400).json({ error: 'competitors array required' });
-        const deal = await prisma.deal.update({
-          where: { id: req.params.id },
-          data: { competitors },
-        });
+        const { record: deal } = await updateRecord(prisma, 'deals', req.params.id, { competitors }, { req, userId: req.userId, source: 'competitors' });
         res.json({ data: deal.competitors });
       } catch (err) { next(err); }
     });

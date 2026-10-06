@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { createRecord, RecordWriteError } = require('../services/recordWrites');
 const { statusRoutes } = require('../utils/moduleStatus');
 const { visibleWhere } = require('../middleware/rowSecurity');
 const { columnsFrom } = require('../utils/modelFields');
@@ -25,13 +25,19 @@ router.post('/', async (req, res, next) => {
     });
     if (recentFromEmail >= 5) return res.status(429).json({ error: 'Too many submissions. Please try again later.' });
 
-    // Find or create contact
-    let contact = await prisma.contact.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
+    // The contact and the case are made as in the app (services/recordWrites):
+    // the modules' rules, a case number, an owner from the assignment rules,
+    // then the workflows and webhooks for new cases. A case from the form had
+    // no owner and no rule ever heard of it.
+    const write = { source: 'web-to-case', emit: req.app.locals.emit };
+
+    // Find or create contact: a live one, not one in the recycle bin.
+    let contact = await prisma.contact.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null } });
     if (!contact && name) {
       const parts = name.trim().split(/\s+/);
-      contact = await prisma.contact.create({
-        data: { firstName: parts[0] || '', lastName: parts.slice(1).join(' ') || name, email, phone, leadSource: 'Web Form' },
-      }).catch(() => null);
+      contact = await createRecord(prisma, 'contacts', {
+        firstName: parts[0] || '', lastName: parts.slice(1).join(' ') || name, email, phone, leadSource: 'Web Form',
+      }, write).then(made => made.record).catch(() => null);
     }
 
     // Priority inference
@@ -39,16 +45,22 @@ router.post('/', async (req, res, next) => {
     const descLower = (description || '').toLowerCase();
     if (descLower.includes('urgent') || descLower.includes('down') || descLower.includes('critical')) casePriority = 'High';
 
-    const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
-      data: {
+    let newCase;
+    try {
+      ({ record: newCase } = await createRecord(prisma, 'cases', {
         subject, description: description || '', origin: 'Web',
         status: 'New', priority: casePriority, type: type || 'Question',
         contactEmail: email, contactPhone: phone, webFormName: name,
         ...(contact && { contactId: contact.id, accountId: contact.accountId }),
         ...(product && { product }),
         ...(customFields && { customFields }),
-      },
-    });
+      }, write));
+    } catch (err) {
+      // The rule's message only: a rule's name, or another case's id, is no
+      // business of an anonymous caller.
+      if (err instanceof RecordWriteError) return res.status(err.status).json(err.publicBody);
+      throw err;
+    }
 
     res.status(201).json({ success: true, caseNumber: newCase.caseNumber, message: 'Your case has been submitted successfully.' });
   } catch (err) { next(err); }

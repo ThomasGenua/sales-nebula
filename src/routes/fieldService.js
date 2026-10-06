@@ -6,6 +6,7 @@ const { createCrudRouter } = require('../utils/crud');
 const { queryWithIncludes } = require('../utils/modelFields');
 const { WORK_ORDER_NUMBER } = require('../utils/numbering');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { updateRecord } = require('../services/recordWrites');
 
 const router = createCrudRouter('workOrder', 'fieldService', {
   include: {
@@ -34,11 +35,12 @@ router.post('/:id/schedule', authenticate, requirePermission('fieldService', 'ed
     const prisma = req.app.locals.prisma;
     const { assignedToId, startDate, endDate, notes } = req.body;
     if (!startDate) return res.status(400).json({ error: 'startDate required' });
-    const wo = await prisma.workOrder.update({
-      where: { id: req.params.id },
-      data: { assignedToId, startDate: new Date(startDate), endDate: endDate ? new Date(endDate) : null, status: 'Scheduled', schedulingNotes: notes },
-    });
-    await req.audit({ action: 'update', module: 'fieldService', recordId: wo.id, details: 'Work order scheduled' });
+    // As an edit (services/recordWrites): rules, audit trail, workflows and
+    // webhooks, which scheduling, dispatch, completion and cancellation never
+    // reached.
+    const { record: wo } = await updateRecord(prisma, 'fieldService', req.params.id, {
+      assignedToId, startDate: new Date(startDate), endDate: endDate ? new Date(endDate) : null, status: 'Scheduled', schedulingNotes: notes,
+    }, { req, userId: req.userId, source: 'scheduled' });
     res.json(wo);
   } catch (err) { next(err); }
 });
@@ -47,10 +49,9 @@ router.post('/:id/schedule', authenticate, requirePermission('fieldService', 'ed
 router.post('/:id/dispatch', authenticate, requirePermission('fieldService', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const wo = await prisma.workOrder.update({
-      where: { id: req.params.id },
-      data: { status: 'Dispatched', dispatchedAt: new Date() },
-    });
+    const { record: wo } = await updateRecord(prisma, 'fieldService', req.params.id, {
+      status: 'Dispatched', dispatchedAt: new Date(),
+    }, { req, userId: req.userId, source: 'dispatched' });
     // app.locals.emit is the socket helper object, not a function, so this
     // threw into the catch and no dispatch was ever announced. It goes to the
     // technician it was dispatched to.
@@ -64,15 +65,11 @@ router.post('/:id/complete', authenticate, requirePermission('fieldService', 'ed
   try {
     const prisma = req.app.locals.prisma;
     const { resolution, partsUsed, laborHours, signature } = req.body;
-    const wo = await prisma.workOrder.update({
-      where: { id: req.params.id },
-      data: {
-        status: 'Completed', completedAt: new Date(),
-        resolution, partsUsed: partsUsed || [], laborHours: laborHours || 0,
-        customerSignature: signature || null,
-      },
-    });
-    await req.audit({ action: 'update', module: 'fieldService', recordId: wo.id, details: 'Work order completed' });
+    const { record: wo } = await updateRecord(prisma, 'fieldService', req.params.id, {
+      status: 'Completed', completedAt: new Date(),
+      resolution, partsUsed: partsUsed || [], laborHours: laborHours || 0,
+      customerSignature: signature || null,
+    }, { req, userId: req.userId, source: 'completed' });
     res.json(wo);
   } catch (err) { next(err); }
 });
@@ -81,10 +78,9 @@ router.post('/:id/complete', authenticate, requirePermission('fieldService', 'ed
 router.post('/:id/cancel', authenticate, requirePermission('fieldService', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const wo = await prisma.workOrder.update({
-      where: { id: req.params.id },
-      data: { status: 'Cancelled', cancelReason: req.body.reason },
-    });
+    const { record: wo } = await updateRecord(prisma, 'fieldService', req.params.id, {
+      status: 'Cancelled', cancelReason: req.body.reason,
+    }, { req, userId: req.userId, source: 'cancelled' });
     res.json(wo);
   } catch (err) { next(err); }
 });

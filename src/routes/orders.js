@@ -2,11 +2,12 @@ const { createCrudRouter } = require('../utils/crud');
 const { auditMiddleware } = require('../middleware/audit');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
-const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
+const { ORDER_NUMBER } = require('../utils/numbering');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 const { lineItemFields } = require('../utils/modelFields');
 
 /** The order's lines as sent, each cut down to the columns an item has. */
-const orderLines = req => (Array.isArray(req.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
+const orderLines = req => (Array.isArray(req?.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
 
 const sameValue = (a, b) => String(a) === String(b);
 
@@ -45,7 +46,7 @@ const router = createCrudRouter('order', 'orders', {
     if (!data.accountId) errors.accountId = 'Required';
     return { valid: Object.keys(errors).length === 0, errors };
   },
-  beforeCreate: async (data, req) => {
+  beforeCreate: async (data, { req }) => {
     const lines = orderLines(req);
     if (lines.length) {
       data.subtotal = lines.reduce((sum, line) => sum + line.total, 0);
@@ -53,10 +54,9 @@ const router = createCrudRouter('order', 'orders', {
     }
     return withTotals(data);
   },
-  beforeUpdate: async (data, req) => {
+  beforeUpdate: async (data, { oldRecord }) => {
     if (data.total === undefined && data.totalAmount === undefined) return data;
-    const current = await req.app.locals.prisma.order.findUnique({ where: { id: req.params.id }, select: { total: true, totalAmount: true } });
-    return withTotals(data, current || {});
+    return withTotals(data, oldRecord);
   },
   // The items went to Prisma exactly as sent, as a bare list it rejected.
   nestedWrites: async (req, operation) => {
@@ -69,16 +69,12 @@ const router = createCrudRouter('order', 'orders', {
 router.post('/:id/activate', authenticate, requirePermission('orders', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const order = await prisma.order.update({
-      where: { id: req.params.id },
-      data: { status: 'Activated', activatedDate: new Date() },
-      include,
-    });
-    await req.audit({ action: 'update', module: 'orders', recordId: order.id, details: 'Order activated' });
-    // emit is an object of senders, not a function: calling it threw after
-    // the order was saved, so every activation answered 500. It sends ids
-    // only, as the CRUD update does, and cannot fail the request.
-    try { req.app.locals.emit?.recordUpdated?.('orders', order); } catch (e) { /* Real-time is best-effort */ }
+    // As an edit (services/recordWrites): the order's rules, the audit trail,
+    // the real-time update, and the workflows and webhooks on its status,
+    // which an activation, fulfilment or cancellation never reached.
+    const { record: order } = await updateRecord(prisma, 'orders', req.params.id, {
+      status: 'Activated', activatedDate: new Date(),
+    }, { req, userId: req.userId, source: 'activated', include });
     res.json(order);
   } catch (err) { next(err); }
 });
@@ -100,19 +96,22 @@ router.post('/from-quote/:quoteId', authenticate, requirePermission('orders', 'e
     // The subtotal is before the discount, as an order's total is subtotal
     // plus tax less discount; it was taken after it, so the parts did not
     // add up to the total.
-    const order = await createNumbered(prisma, 'order', ORDER_NUMBER, {
-      data: {
-        name: `Order - ${quote.name || quote.number}`,
-        accountId: quote.accountId,
-        contactId: quote.contactId,
-        quoteId: quote.id,
-        subtotal: quote.total - quote.tax + quote.discount,
-        tax: quote.tax,
-        total: quote.total,
-        totalAmount: quote.total,
-        discount: quote.discount,
-        ownerId: req.userId,
-        createdById: req.userId,
+    // Made as an order is on its own page (services/recordWrites): number,
+    // rules, workflows and webhooks, with the quote's lines as its own.
+    const { record: order } = await createRecord(prisma, 'orders', {
+      name: `Order - ${quote.name || quote.number}`,
+      accountId: quote.accountId,
+      contactId: quote.contactId,
+      quoteId: quote.id,
+      subtotal: quote.total - quote.tax + quote.discount,
+      tax: quote.tax,
+      total: quote.total,
+      totalAmount: quote.total,
+      discount: quote.discount,
+      ownerId: req.userId,
+    }, {
+      userId: req.userId, source: `from quote ${quote.number}`, emit: req.app.locals.emit, include,
+      nested: {
         items: {
           create: quote.items.map(qi => ({
             productId: qi.productId,
@@ -124,9 +123,7 @@ router.post('/from-quote/:quoteId', authenticate, requirePermission('orders', 'e
           })),
         },
       },
-      include,
     });
-    await req.audit({ action: 'create', module: 'orders', recordId: order.id, details: `Created from quote ${quote.number}` });
     res.status(201).json(order);
   } catch (err) { next(err); }
 });
@@ -141,8 +138,9 @@ router.post('/:id/fulfill', authenticate, requirePermission('orders', 'full'), a
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) return res.status(404).json({ error: 'Not found' });
     if (order.status === 'Cancelled') return res.status(400).json({ error: 'Cannot fulfill cancelled order' });
-    const updated = await prisma.order.update({ where: { id: req.params.id }, data: { status: 'Fulfilled', trackingNumber, carrier, shippedDate: shippedDate ? new Date(shippedDate) : new Date(), fulfilledAt: new Date(), fulfillmentNotes: notes } });
-    await req.audit({ action: 'update', module: 'orders', recordId: order.id, details: `Fulfilled. Tracking: ${trackingNumber || 'N/A'}` });
+    const { record: updated } = await updateRecord(prisma, 'orders', order, {
+      status: 'Fulfilled', trackingNumber, carrier, shippedDate: shippedDate ? new Date(shippedDate) : new Date(), fulfilledAt: new Date(), fulfillmentNotes: notes,
+    }, { req, userId: req.userId, source: 'fulfilled' });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -155,8 +153,9 @@ router.post('/:id/cancel', authenticate, requirePermission('orders', 'full'), au
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) return res.status(404).json({ error: 'Not found' });
     if (order.status === 'Fulfilled') return res.status(400).json({ error: 'Cannot cancel fulfilled order' });
-    const updated = await prisma.order.update({ where: { id: req.params.id }, data: { status: 'Cancelled', cancelledAt: new Date(), cancelReason: reason } });
-    await req.audit({ action: 'update', module: 'orders', recordId: order.id, details: `Cancelled: ${reason || 'No reason'}` });
+    const { record: updated } = await updateRecord(prisma, 'orders', order, {
+      status: 'Cancelled', cancelledAt: new Date(), cancelReason: reason,
+    }, { req, userId: req.userId, source: 'cancelled' });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -191,7 +190,8 @@ router.post('/:id/items', authenticate, requirePermission('orders', 'full'), asy
     const subtotal = allItems.reduce((s, i) => s + (i.total || 0), 0);
     const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { tax: true, discount: true } });
     const total = subtotal + (order?.tax || 0) - (order?.discount || 0);
-    await prisma.order.update({ where: { id: req.params.id }, data: { subtotal, total, totalAmount: total } });
+    // As an edit of the order, so a rule on its total sees the new one.
+    await updateRecord(prisma, 'orders', req.params.id, { subtotal, total, totalAmount: total }, { req, userId: req.userId, source: 'line items' });
     res.status(201).json(item);
   } catch (err) { next(err); }
 });
@@ -209,11 +209,14 @@ router.post('/:id/clone', authenticate, requirePermission('orders', 'full'), asy
       activatedDate, fulfilledAt, shippedDate, trackingNumber, carrier, fulfillmentNotes, cancelledAt, cancelReason,
       ...data
     } = order;
-    const clone = await createNumbered(prisma, 'order', ORDER_NUMBER, { data: { ...data, status: 'Draft', name: `${order.name || order.orderNumber} (Copy)`, ownerId: req.user.id, createdById: req.user.id } });
-    for (const item of items) {
-      const { id: iId, orderId, createdAt: iC, updatedAt: iU, ...iData } = item;
-      await prisma.orderItem.create({ data: { ...iData, orderId: clone.id } });
-    }
+    // Made as an order is on its own page, with its lines in the same write;
+    // they were copied one by one afterwards, so a failure left a partial copy.
+    const { record: clone } = await createRecord(prisma, 'orders', {
+      ...data, status: 'Draft', name: `${order.name || order.orderNumber} (Copy)`, ownerId: req.user.id,
+    }, {
+      userId: req.userId, source: 'clone', emit: req.app.locals.emit,
+      nested: { items: { create: items.map(({ id: iId, orderId, createdAt: iC, updatedAt: iU, ...iData }) => iData) } },
+    });
     res.status(201).json(clone);
   } catch (err) { next(err); }
 });

@@ -4,6 +4,15 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { editableFields, scalarOrderBy } = require('../utils/modelFields');
+const {
+  defineModule, createRecord, updateRecord, deleteRecord, batchClient,
+} = require('../services/recordWrites');
+
+// A prospect's writes go through the rules every module's do
+// (services/recordWrites): the validation rules Studio lets an admin set on
+// prospects, workflows and webhooks. Prospects have their own router, which
+// wrote them directly, so none of them saw a prospect.
+defineModule('prospects', 'prospect', {});
 
 const router = Router();
 
@@ -213,8 +222,7 @@ router.post('/', authenticate, requirePermission('leads', 'edit'), auditMiddlewa
     };
     payload.score = scoreProspect(payload);
 
-    const prospect = await prisma.prospect.create({ data: payload });
-    await req.audit({ action: 'create', module: 'prospects', recordId: prospect.id, details: `Prospect created: ${payload.fullName}` });
+    const { record: prospect } = await createRecord(prisma, 'prospects', payload, { userId: req.userId, emit: req.app.locals.emit });
     res.status(201).json(prospect);
   } catch (err) { next(err); }
 });
@@ -239,7 +247,7 @@ router.put('/:id', authenticate, requirePermission('leads', 'edit'), async (req,
     }
     data.score = scoreProspect({ ...existing, ...data });
 
-    const prospect = await prisma.prospect.update({ where: { id: existing.id }, data });
+    const { record: prospect } = await updateRecord(prisma, 'prospects', existing, data, { req, userId: req.userId });
     res.json(prospect);
   } catch (err) { next(err); }
 });
@@ -247,11 +255,11 @@ router.put('/:id', authenticate, requirePermission('leads', 'edit'), async (req,
 router.delete('/:id', authenticate, requirePermission('leads', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { count } = await prisma.prospect.updateMany({
-      where: await visibleProspects(req, { id: req.params.id }, 'Full'),
-      data: { deletedAt: new Date() },
-    });
-    if (!count) return res.status(404).json({ error: 'Prospect not found' });
+    const prospect = await prisma.prospect.findFirst({ where: await visibleProspects(req, { id: req.params.id }, 'Full') });
+    if (!prospect) return res.status(404).json({ error: 'Prospect not found' });
+    // As a delete is (services/recordWrites): into the recycle bin, with its
+    // webhook. It was only marked deleted, with nothing in the bin.
+    await deleteRecord(prisma, 'prospects', prospect, { req, userId: req.userId });
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
@@ -275,6 +283,9 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
     // A skipped duplicate names its prospect only when the caller can see
     // one with that address, as POST / does.
     const visible = await visibleProspects(req);
+    // Each row made as a prospect is on its own (services/recordWrites).
+    const db = batchClient(prisma);
+    const write = { userId: req.userId, source: 'import', emit: req.app.locals.emit };
     for (const raw of prospects) {
       if (!raw.lastName && !raw.email) { invalid.push({ row: raw, reason: 'needs a lastName or an email' }); continue; }
       const email = normalizeEmail(raw.email);
@@ -303,7 +314,7 @@ router.post('/import', authenticate, requirePermission('leads', 'edit'), auditMi
       payload.score = scoreProspect(payload);
 
       try {
-        const created = await prisma.prospect.create({ data: payload });
+        const { record: created } = await createRecord(db, 'prospects', payload, write);
         imported.push({ id: created.id, email: created.email });
         if (list) {
           await prisma.prospectListEntry.create({ data: { listId: list.id, prospectId: created.id, addedBy: req.user.id } }).catch(() => {});
@@ -343,40 +354,44 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
     const linkProblem = await linkRefusal(req, 'contact', { accountId });
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-    // A lead and a contact need a first name, and a lead a company; a
-    // prospect needs neither, so converting one without them was a 500.
+    // The lead or contact is made as on its own page, with its module's
+    // rules, workflows and webhooks (services/recordWrites), which a
+    // conversion skipped. A lead and a contact need a first name, and a lead
+    // a company; a prospect needs neither. Converting one without a first
+    // name was a 500, then made a lead with a blank one, which the lead's
+    // own form refuses; it now says what to add.
+    if (!prospect.firstName?.trim()) {
+      return res.status(400).json({ error: `Add the prospect's first name before converting: a ${target} needs one.` });
+    }
+    const write = { req, userId: req.userId, source: 'prospect conversion' };
     if (target === 'lead') {
-      const lead = await prisma.lead.create({
-        data: {
-          firstName: prospect.firstName || '', lastName: prospect.lastName,
-          email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
-          company: prospect.accountName || 'Unknown', title: prospect.title,
-          // `leadSource` is a Contact column; on Lead it is `source`. Lead has
-          // no industry column at all, so the prospect's is carried in the
-          // description rather than silently dropped on conversion.
-          source: prospect.source || 'Prospect', status: 'New',
-          description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
-            .filter(Boolean).join('\n') || null,
-          city: prospect.city, state: prospect.state, country: prospect.country,
-          ownerId,
-        },
-      });
-      await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedLeadId: lead.id, convertedAt: new Date(), status: 'Converted' } });
+      const { record: lead } = await createRecord(prisma, 'leads', {
+        firstName: prospect.firstName, lastName: prospect.lastName,
+        email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
+        company: prospect.accountName || 'Unknown', title: prospect.title,
+        // `leadSource` is a Contact column; on Lead it is `source`. Lead has
+        // no industry column at all, so the prospect's is carried in the
+        // description rather than silently dropped on conversion.
+        source: prospect.source || 'Prospect', status: 'New',
+        description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
+          .filter(Boolean).join('\n') || null,
+        city: prospect.city, state: prospect.state, country: prospect.country,
+        ownerId,
+      }, write);
+      await updateRecord(prisma, 'prospects', prospect, { convertedLeadId: lead.id, convertedAt: new Date(), status: 'Converted' }, write);
       await req.audit({ action: 'update', module: 'prospects', recordId: prospect.id, details: 'Converted to lead' });
       return res.status(201).json({ target: 'lead', record: lead });
     }
 
-    const contact = await prisma.contact.create({
-      data: {
-        firstName: prospect.firstName || '', lastName: prospect.lastName,
-        email: prospect.email, phone: prospect.phoneWork, mobile: prospect.phoneMobile,
-        title: prospect.title, department: prospect.department,
-        description: prospect.description,
-        ownerId,
-        accountId,
-      },
-    });
-    await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedContactId: contact.id, convertedAt: new Date(), status: 'Converted' } });
+    const { record: contact } = await createRecord(prisma, 'contacts', {
+      firstName: prospect.firstName, lastName: prospect.lastName,
+      email: prospect.email, phone: prospect.phoneWork, mobile: prospect.phoneMobile,
+      title: prospect.title, department: prospect.department,
+      description: prospect.description,
+      ownerId,
+      accountId,
+    }, write);
+    await updateRecord(prisma, 'prospects', prospect, { convertedContactId: contact.id, convertedAt: new Date(), status: 'Converted' }, write);
     await req.audit({ action: 'update', module: 'prospects', recordId: prospect.id, details: 'Converted to contact' });
     res.status(201).json({ target: 'contact', record: contact });
   } catch (err) { next(err); }
@@ -416,7 +431,9 @@ router.post('/:id/merge', authenticate, requirePermission('leads', 'full'), audi
           : prisma.prospectListEntry.update({ where: { id: e.id }, data: { prospectId: survivor.id } })).catch(() => {});
         lists.add(e.listId);
       }
-      await prisma.prospect.update({ where: { id: dupe.id }, data: { deletedAt: new Date(), duplicateOfId: survivor.id } });
+      // Deleted as a delete is (services/recordWrites): the recycle bin and
+      // its webhook, with the survivor it went into.
+      await deleteRecord(prisma, 'prospects', dupe, { req, userId: req.userId, source: `merged into ${survivor.id}`, alsoSet: { duplicateOfId: survivor.id } });
     }
     for (const listId of lists) {
       const total = await prisma.prospectListEntry.count({ where: { listId } });
@@ -425,7 +442,7 @@ router.post('/:id/merge', authenticate, requirePermission('leads', 'full'), audi
 
     const { id, createdAt, updatedAt, deletedAt, ...updateData } = filled;
     updateData.score = scoreProspect(filled);
-    const merged = await prisma.prospect.update({ where: { id: survivor.id }, data: updateData });
+    const { record: merged } = await updateRecord(prisma, 'prospects', survivor, updateData, { req, userId: req.userId, source: 'merge' });
 
     await req.audit({ action: 'update', module: 'prospects', recordId: survivor.id, details: `Merged ${duplicates.length} duplicates` });
     res.json({ survivor: merged, mergedCount: duplicates.length });

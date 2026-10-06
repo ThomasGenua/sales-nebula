@@ -3,6 +3,9 @@ const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields, modelHasField } = require('../utils/modelFields');
+const {
+  updateRecord, deleteRecord, batchClient, isRecordModule, RecordWriteError,
+} = require('../services/recordWrites');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -12,7 +15,36 @@ router.use(authenticate, auditMiddleware);
  * (owners included) on, delete, or reassign up to 200 records at a time in
  * fifteen modules. Each action now takes the module's permission and reaches
  * only records the caller may change.
+ *
+ * And each record changes as it would on its own page
+ * (services/recordWrites): the module's validation rules and hooks, its
+ * workflows and webhooks. They were one updateMany, which none of them saw:
+ * a mass stage change kept no stage history, a mass close left cases
+ * without a closing date, a rule that refused a value let it through. A
+ * record a rule refuses keeps its values and is listed in `failed`. Emails,
+ * which no rule reads, are still changed together.
  */
+
+/** Change each record through the write service, collecting the ones refused. */
+async function eachRecord(req, records, write) {
+  const db = batchClient(req.app.locals.prisma);
+  const ctx = { req, userId: req.userId, source: 'mass action', linkCache: new Map() };
+  let done = 0;
+  const failed = [];
+  for (const record of records) {
+    try {
+      await write(db, record, ctx);
+      done++;
+    } catch (err) {
+      if (!(err instanceof RecordWriteError)) throw err;
+      failed.push({ id: record.id, error: err.body.error, ...(err.code ? { code: err.code } : {}) });
+    }
+  }
+  return { done, failed };
+}
+
+/** Records not in the recycle bin, where the model has one. */
+const live = model => (modelHasField(model, 'deletedAt') ? { deletedAt: null } : {});
 
 /** The caller may act on `module` at `level`; otherwise answer and return false. */
 function allowed(req, res, module, level) {
@@ -55,17 +87,17 @@ router.post('/update', async (req, res, next) => {
     const linkProblem = await linkRefusal(req, model, data);
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-    const result = await prisma[model].updateMany({
-      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
-      data,
-    });
+    const where = await reachableWhere(req, module, model, { id: { in: recordIds.map(String) }, ...live(model) }, 'Edit');
+    const { done, failed } = isRecordModule(module)
+      ? await eachRecord(req, await prisma[model].findMany({ where }), (db, record, ctx) => updateRecord(db, module, record, data, ctx))
+      : { done: (await prisma[model].updateMany({ where, data })).count, failed: [] };
 
     await req.audit({
       action: 'update', module,
-      details: `Mass update ${result.count} ${module}: ${Object.keys(updates).join(', ')}`,
+      details: `Mass update ${done} ${module}: ${Object.keys(updates).join(', ')}`,
     });
 
-    res.json({ success: true, updated: result.count });
+    res.json({ success: true, updated: done, ...(failed.length ? { failed } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -88,46 +120,41 @@ router.post('/delete', async (req, res, next) => {
     if (!allowed(req, res, module, 'full')) return;
     const model = MODULE_MAP[module];
 
-    // Snapshot records for recycle bin: only those the caller may delete, the
-    // row access a single DELETE asks for.
+    // Only those the caller may delete, the row access a single DELETE asks for.
     const records = await prisma[model].findMany({
-      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Full'),
+      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) }, ...live(model) }, 'Full'),
     });
 
-    // Move to recycle bin
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await Promise.all(records.map(record =>
-      prisma.recycleBinItem.create({
-        data: {
-          module, recordId: record.id,
-          recordData: record,
-          deletedById: req.userId,
-          expiresAt,
-        },
-      }).catch(() => {})
-    ));
-
-    // Soft delete where the model supports it, as a single delete does. Rows
-    // were removed outright, taking their links with them (or failing on
-    // them after the bin entries were made), so the bin could not restore
-    // them in place.
-    const ids = records.map(r => r.id);
-    const result = modelHasField(model, 'deletedAt')
-      ? await prisma[model].updateMany({ where: { id: { in: ids } }, data: { deletedAt: new Date() } })
-      : await prisma[model].deleteMany({ where: { id: { in: ids } } });
+    // As a single delete is: soft where the model keeps deleted rows, with a
+    // recycle bin entry to restore it from. Rows were removed outright,
+    // taking their links with them (or failing on them after the bin entries
+    // were made), so the bin could not restore them in place.
+    let deleted;
+    if (isRecordModule(module)) {
+      ({ done: deleted } = await eachRecord(req, records, (db, record, ctx) => deleteRecord(db, module, record, ctx)));
+    } else {
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await Promise.all(records.map(record => prisma.recycleBinItem.create({
+        data: { module, recordId: record.id, recordData: record, deletedById: req.userId, expiresAt },
+      }).catch(() => {})));
+      const ids = records.map(r => r.id);
+      deleted = (modelHasField(model, 'deletedAt')
+        ? await prisma[model].updateMany({ where: { id: { in: ids } }, data: { deletedAt: new Date() } })
+        : await prisma[model].deleteMany({ where: { id: { in: ids } } })).count;
+    }
 
     await req.audit({
       action: 'delete', module,
-      details: `Mass deleted ${result.count} ${module}`,
+      details: `Mass deleted ${deleted} ${module}`,
     });
 
-    // Fire webhooks
+    // One event for the whole action, besides each record's own.
     try {
       const { fireWebhookEvent } = require('../services/webhooks');
-      await fireWebhookEvent(prisma, `${module}.bulk_deleted`, { ids: records.map(r => r.id), count: result.count });
+      await fireWebhookEvent(prisma, `${module}.bulk_deleted`, { ids: records.map(r => r.id), count: deleted });
     } catch (e) { /* best-effort */ }
 
-    res.json({ success: true, deleted: result.count });
+    res.json({ success: true, deleted });
   } catch (err) { next(err); }
 });
 
@@ -160,17 +187,18 @@ router.post('/reassign', async (req, res, next) => {
     const ownerField = modelHasField(model, 'ownerId') ? 'ownerId' : modelHasField(model, 'assignedId') ? 'assignedId' : null;
     if (!ownerField) return res.status(400).json({ error: `${module} records have no owner to reassign` });
 
-    const result = await prisma[model].updateMany({
-      where: await reachableWhere(req, module, model, { id: { in: recordIds.map(String) } }, 'Edit'),
-      data: { [ownerField]: newOwner.id },
-    });
+    const where = await reachableWhere(req, module, model, { id: { in: recordIds.map(String) }, ...live(model) }, 'Edit');
+    const change = { [ownerField]: newOwner.id };
+    const { done, failed } = isRecordModule(module)
+      ? await eachRecord(req, await prisma[model].findMany({ where }), (db, record, ctx) => updateRecord(db, module, record, change, ctx))
+      : { done: (await prisma[model].updateMany({ where, data: change })).count, failed: [] };
 
     await req.audit({
       action: 'update', module,
-      details: `Mass reassigned ${result.count} ${module} to ${newOwner.firstName} ${newOwner.lastName}`,
+      details: `Mass reassigned ${done} ${module} to ${newOwner.firstName} ${newOwner.lastName}`,
     });
 
-    res.json({ success: true, reassigned: result.count, newOwner: `${newOwner.firstName} ${newOwner.lastName}` });
+    res.json({ success: true, reassigned: done, newOwner: `${newOwner.firstName} ${newOwner.lastName}`, ...(failed.length ? { failed } : {}) });
   } catch (err) { next(err); }
 });
 

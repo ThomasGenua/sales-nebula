@@ -11,7 +11,7 @@
  *   date, uid, attachments, headers }.
  */
 
-const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { createRecord, updateRecord } = require('./recordWrites');
 
 /** Pull a plain address out of "Display Name <addr@host>". */
 function parseAddress(raw) {
@@ -179,17 +179,18 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
       }
 
       if (linkedCase) {
-        // A reply reopens a closed or resolved case as Open: 'Reopened' was a
-        // status no case screen offers and the open-case counts skipped, and a
-        // reply to a resolved case was linked and left resolved.
         await prisma.case.update({
           where: { id: linkedCase.id },
-          data: {
-            emailCount: { increment: 1 }, lastEmailAt: new Date(),
-            lastEmailMessageId: raw.messageId || null,
-            ...(['Closed', 'Resolved'].includes(linkedCase.status) && { status: 'Open' }),
-          },
+          data: { emailCount: { increment: 1 }, lastEmailAt: new Date(), lastEmailMessageId: raw.messageId || null },
         }).catch(() => {});
+        // A reply reopens a closed or resolved case as Open: 'Reopened' was a
+        // status no case screen offers and the open-case counts skipped, and a
+        // reply to a resolved case was linked and left resolved. It reopens as
+        // an edit would (services/recordWrites), so closedAt is cleared, the
+        // status history kept, and the rules on a case's status see it.
+        if (['Closed', 'Resolved'].includes(linkedCase.status)) {
+          await updateRecord(prisma, 'cases', linkedCase.id, { status: 'Open' }, { source: 'inbound email' }).catch(() => {});
+        }
         await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdCaseId: linkedCase.id, status: 'Linked' } }).catch(() => {});
         repliesLinked++; processed++;
         results.push({ subject, action: 'linked', caseId: linkedCase.id, caseNumber: linkedCase.caseNumber });
@@ -206,22 +207,24 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
         // caseNumber is required and has no default, and type is not nullable,
         // so an email-opened case has to supply one and omit the other.
         const caseType = routed?.setType || account.defaultCaseType;
-        const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
-          data: {
-            subject: subject.slice(0, 250),
-            description: bodyText.slice(0, 8000),
-            status: routed?.setStatus || 'New',
-            priority: routed?.setPriority || account.defaultPriority || 'Medium',
-            ...(caseType ? { type: caseType } : {}),
-            origin: 'Email',
-            ownerId: routed?.assignToId || account.defaultOwnerId || null,
-            contactId: contact?.id || null,
-            accountId: contact?.accountId || null,
-            contactEmail: from.email,
-            emailCount: 1, lastEmailAt: new Date(),
-            lastEmailMessageId: raw.messageId || null,
-          },
-        });
+        // As a case made in the app (services/recordWrites): its rules and
+        // number, then the workflows and webhooks for new cases. With no
+        // owner from a routing rule or the mailbox, the assignment rules pick
+        // one, as they do for any new case.
+        const { record: newCase } = await createRecord(prisma, 'cases', {
+          subject: subject.slice(0, 250).trim() || 'No Subject',
+          description: bodyText.slice(0, 8000),
+          status: routed?.setStatus || 'New',
+          priority: routed?.setPriority || account.defaultPriority || 'Medium',
+          ...(caseType ? { type: caseType } : {}),
+          origin: 'Email',
+          ownerId: routed?.assignToId || account.defaultOwnerId || null,
+          contactId: contact?.id || null,
+          accountId: contact?.accountId || null,
+          contactEmail: from.email,
+          emailCount: 1, lastEmailAt: new Date(),
+          lastEmailMessageId: raw.messageId || null,
+        }, { source: 'inbound email' });
         await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdCaseId: newCase.id, status: 'Converted' } }).catch(() => {});
         // Acknowledge, when the account asks for it. The sender is a real
         // person here: automated mail never reaches this branch. Sending is
@@ -244,19 +247,20 @@ async function ingestMessages(prisma, account, messages, { onAcknowledge } = {})
       if (account.autoCreateLead && from.email) {
         const existingLead = await prisma.lead.findFirst({ where: { email: from.email, deletedAt: null } });
         if (!existingLead) {
-          const [first, ...rest] = (from.name || from.email.split('@')[0]).split(' ');
-          const lead = await prisma.lead.create({
-            data: {
-              firstName: first, lastName: rest.join(' ') || first,
-              // `company` is required and `source` is the column's name — this
-              // create named `leadSource`, which only Contact has, and supplied
-              // no company at all, so it threw on every inbound message.
-              email: from.email, source: 'Email',
-              company: from.email.split('@')[1] || 'Unknown',
-              status: 'New', description: bodyText.slice(0, 4000),
-              ownerId: account.defaultOwnerId || null,
-            },
-          });
+          const words = String(from.name || '').trim().split(/\s+/).filter(Boolean);
+          const [first, ...rest] = words.length ? words : [from.email.split('@')[0]];
+          // As a lead made in the app (services/recordWrites): rules, an owner
+          // from the mailbox or else the assignment rules, then workflows.
+          const { record: lead } = await createRecord(prisma, 'leads', {
+            firstName: first, lastName: rest.join(' ') || first,
+            // `company` is required and `source` is the column's name — this
+            // create named `leadSource`, which only Contact has, and supplied
+            // no company at all, so it threw on every inbound message.
+            email: from.email, source: 'Email',
+            company: from.email.split('@')[1] || 'Unknown',
+            status: 'New', description: bodyText.slice(0, 4000),
+            ownerId: account.defaultOwnerId || null,
+          }, { source: 'inbound email' });
           await prisma.inboundEmailMessage.update({ where: { id: stored.id }, data: { createdLeadId: lead.id, status: 'Converted' } }).catch(() => {});
           leadsCreated++; processed++;
           results.push({ subject, action: 'lead created', leadId: lead.id });

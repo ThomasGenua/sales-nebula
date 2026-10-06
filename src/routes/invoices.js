@@ -5,8 +5,11 @@ const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = re
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { currencyContext } = require('../utils/currency');
-const { createNumbered, INVOICE_NUMBER } = require('../utils/numbering');
+const { INVOICE_NUMBER } = require('../utils/numbering');
 const { fireWebhookEvent } = require('../services/webhooks');
+const {
+  defineModule, createRecord, updateRecord, deleteRecord, runAfter,
+} = require('../services/recordWrites');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -55,6 +58,16 @@ function invoiceAmounts(data, lines, current = {}) {
  * Why these lines may not be saved, or null: each names a live product the
  * caller can see, other than the products the invoice already has (`kept`).
  */
+// An invoice's rules for every write, wherever it comes from
+// (services/recordWrites): its number, and its twin totals kept equal.
+// Invoices have their own router, which wrote them directly, so no rule,
+// workflow or webhook on invoices saw them.
+defineModule('invoices', 'invoice', {
+  numbering: INVOICE_NUMBER,
+  beforeCreate: data => invoiceAmounts(data, null),
+  beforeUpdate: (data, { oldRecord }) => invoiceAmounts(data, null, oldRecord),
+});
+
 async function lineProblem(req, lines, kept = new Set()) {
   const seen = new Map();
   for (const line of lines) {
@@ -115,13 +128,11 @@ router.post('/', requirePermission('invoices', 'edit'), async (req, res, next) =
     const lines = Array.isArray(items) ? items.map(i => lineItemFields(i, { discount: false })) : [];
     const badLine = await lineProblem(req, lines);
     if (badLine) return res.status(400).json({ error: badLine, code: 'LINK_NOT_VISIBLE' });
-    const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
-      data: { ...invoiceAmounts(data, lines.length ? lines : null), items: { create: lines } },
-      include,
+    // Its number, rules, audit trail, workflows and invoices.created webhook,
+    // as a CRUD create has them. Its links were checked above (the quote too).
+    const { record: invoice } = await createRecord(prisma, 'invoices', invoiceAmounts(data, lines.length ? lines : null), {
+      userId: req.userId, emit: req.app.locals.emit, include, nested: { items: { create: lines } },
     });
-    await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id });
-    // As a CRUD create fires it; invoices have their own router, so invoice.created never fired.
-    await fireWebhookEvent(prisma, 'invoices.created', { id: invoice.id, module: 'invoices', number: invoice.number });
     res.status(201).json(invoice);
   } catch (err) { next(err); }
 });
@@ -147,14 +158,16 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
     const lines = sent && sent.map(lineKey).sort().join() !== stored.map(lineKey).sort().join() ? sent : null;
     const badLine = lines && await lineProblem(req, lines, new Set(stored.map(i => i.productId)));
     if (badLine) return res.status(400).json({ error: badLine, code: 'LINK_NOT_VISIBLE' });
-    const writes = [];
-    if (lines) writes.push(prisma.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } }));
-    writes.push(prisma.invoice.update({
-      where: { id: req.params.id },
-      data: { ...invoiceAmounts(data, lines && lines.length ? lines : null, current), ...(lines && { items: { create: lines } }) },
-      include,
-    }));
-    const invoice = (await prisma.$transaction(writes)).pop();
+    // The lines and the invoice together, the invoice as an edit
+    // (services/recordWrites), its workflows and webhooks once both are in.
+    const after = [];
+    const invoice = await prisma.$transaction(async tx => {
+      if (lines) await tx.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } });
+      return (await updateRecord(tx, 'invoices', current, invoiceAmounts(data, lines && lines.length ? lines : null, current), {
+        userId: req.userId, emit: req.app.locals.emit, include, after, prisma, ...(lines && { nested: { items: { create: lines } } }),
+      })).record;
+    });
+    await runAfter(after);
     res.json(invoice);
   } catch (err) { next(err); }
 });
@@ -163,12 +176,9 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
 router.post('/:id/pay', requirePermission('invoices', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const invoice = await prisma.invoice.update({
-      where: { id: req.params.id },
-      data: { status: 'Paid', paidDate: new Date(), payMethod: req.body.payMethod || 'Wire Transfer' },
-      include,
-    });
-    await req.audit({ action: 'update', module: 'invoices', recordId: invoice.id, details: 'Invoice paid' });
+    const { record: invoice } = await updateRecord(prisma, 'invoices', req.params.id, {
+      status: 'Paid', paidDate: new Date(), payMethod: req.body.payMethod || 'Wire Transfer',
+    }, { req, userId: req.userId, source: 'paid', include });
     await fireWebhookEvent(prisma, 'invoice.paid', { id: invoice.id, number: invoice.number, total: invoice.total });
     res.json(invoice);
   } catch (err) { next(err); }
@@ -181,13 +191,8 @@ router.delete('/:id', requirePermission('invoices', 'full'), async (req, res, ne
     // A soft delete into the recycle bin, as the CRUD modules delete. The row
     // was removed outright, so the bin, which lists invoices, never got one
     // to restore.
-    const invoice = await prisma.invoice.findFirst({ where: { id: req.params.id, deletedAt: null } });
-    if (!invoice) return res.status(404).json({ error: 'Not found' });
-    await prisma.invoice.update({ where: { id: invoice.id }, data: { deletedAt: new Date() } });
-    await prisma.recycleBinItem.create({
-      data: { module: 'invoices', recordId: invoice.id, recordData: invoice, deletedById: req.userId, expiresAt: new Date(Date.now() + 30 * 86400000) },
-    }).catch(() => { /* Recycle bin is best-effort */ });
-    await req.audit({ action: 'delete', module: 'invoices', recordId: invoice.id, details: `Deleted ${invoice.number}` });
+    // And its delete webhook, as a CRUD delete has (services/recordWrites).
+    await deleteRecord(prisma, 'invoices', req.params.id, { req, userId: req.userId });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

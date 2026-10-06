@@ -2,7 +2,7 @@ const { Router } = require('express');
 const { authenticate, requirePermission, hasPermission, permits, validatePassword } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
-const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { createRecord, updateRecord, RecordWriteError } = require('../services/recordWrites');
 const { columnsFrom } = require('../utils/modelFields');
 
 const router = Router();
@@ -134,11 +134,19 @@ router.post('/my/cases', authenticate, auditMiddleware, async (req, res, next) =
     if (!user?.contactId) return res.status(403).json({ error: 'No associated contact' });
     // A case needs a subject; without one this was a 500.
     if (typeof req.body.subject !== 'string' || !req.body.subject.trim()) return res.status(400).json({ error: 'subject is required' });
-    const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
-      data: { subject: req.body.subject, description: req.body.description, priority: req.body.priority || 'Medium', status: 'New', origin: 'Portal', contactId: user.contactId },
-    });
+    // As a case made in the app (services/recordWrites): its rules, a number,
+    // an owner from the assignment rules, then the workflows and webhooks for
+    // new cases. A customer's case had no owner and no rule heard of it. The
+    // customer is not the one acting for the company, so the case is not
+    // theirs to own and no rule falls back to them.
+    const { record: c } = await createRecord(prisma, 'cases', {
+      subject: req.body.subject, description: req.body.description, priority: req.body.priority || 'Medium', status: 'New', origin: 'Portal', contactId: user.contactId,
+    }, { source: 'portal', emit: req.app.locals.emit });
     res.status(201).json(c);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err instanceof RecordWriteError) return res.status(err.status).json(err.publicBody);
+    next(err);
+  }
 });
 
 module.exports = router;
@@ -194,12 +202,18 @@ router.put('/users/:id/profile', authenticate, async (req, res, next) => {
       data,
       select: { id: true, firstName: true, lastName: true, email: true },
     });
-    // The phone number lives on the customer's contact.
+    // The phone number lives on the customer's contact, which changes as an
+    // edit in the app would: its rules, workflows and webhooks.
     if (typeof phone === 'string' && account.contactId) {
-      await prisma.contact.update({ where: { id: account.contactId }, data: { phone: phone.trim() || null } });
+      await updateRecord(prisma, 'contacts', account.contactId, { phone: phone.trim() || null }, {
+        userId: self ? null : req.user.id, source: 'portal', emit: req.app.locals.emit,
+      });
     }
     res.json(updated);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err instanceof RecordWriteError) return res.status(err.status).json(err.publicBody);
+    next(err);
+  }
 });
 
 // Portal analytics

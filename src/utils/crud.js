@@ -1,36 +1,15 @@
 const { Router } = require('express');
-const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { validate } = require('../middleware/validate');
-const { diffFields, formatChanges } = require('./integrity');
-const { rowSecurity, applyAccessFilter, applyAutoAssignRules, autoAssignToUserGroups } = require('../middleware/rowSecurity');
+const { rowSecurity, applyAccessFilter } = require('../middleware/rowSecurity');
 const { moduleAccess, recordAccess, reachableWhere, linkRefusal, visibleLinks } = require('../middleware/access');
 const {
-  pickModelFields, editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
+  editableFields, modelHasField, resolveInclude, hydrateIncludes, looksLikeId,
   scalarWhere, scalarOrderBy,
 } = require('./modelFields');
-const { runWorkflowsSafely } = require('../services/workflowEngine');
-const { createNumbered } = require('./numbering');
 const {
-  checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates,
-} = require('../services/recordRules');
-
-/**
- * File a record into security groups: the groups whose rules it matches, and
- * on create the auto-assigning groups of its owner. Both were configurable
- * and never ran, so a rule set to put new deals in a group left them open.
- * As with workflows, a failure here does not fail the write.
- */
-async function assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate }) {
-  try {
-    await applyAutoAssignRules(prisma, moduleName, record, { onCreate });
-    const owner = record.ownerId || record.assignedId || record.createdById;
-    if (onCreate && owner) await autoAssignToUserGroups(prisma, owner, moduleName, record.id);
-  } catch (err) {
-    require('../services/logger').logger.warn({ err, module: moduleName, recordId: record.id }, 'Security group assignment failed');
-  }
-}
+  createRecord, updateRecord, deleteRecord, RecordWriteError, defineModule, batchClient,
+} = require('../services/recordWrites');
 
 // The model behind each CRUD module, for code outside its router that must
 // check a record by module name (the WebSocket's record rooms).
@@ -45,6 +24,13 @@ const crudModuleFor = modelName => {
 /**
  * Creates a standard CRUD router for a Prisma model.
  * Enhanced with: field-level audit, optimistic locking, Prisma error handling, input validation.
+ *
+ * The module's hooks are its rules for every write, wherever it comes from:
+ * they are handed to services/recordWrites, which the routes below and every
+ * other path that writes these records go through. Each takes the data or
+ * record and a context of { prisma, userId, req, oldRecord, emit, source };
+ * `req` is null for a write that did not come from a request (inbound mail,
+ * a job), and `source` says what made it ('import', 'escalated').
  */
 function createCrudRouter(modelName, moduleName, options = {}) {
   crudModels.set(moduleName, modelName);
@@ -69,6 +55,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
     // never taken from a request body.
     serverFields = [],
   } = options;
+  defineModule(moduleName, modelName, { validate, beforeCreate, afterCreate, beforeUpdate, afterUpdate, numbering, nestedWrites });
 
   // What the server sets and a request body never does: the id, the
   // timestamps, the soft-delete marker, who created the record, and the
@@ -104,10 +91,6 @@ function createCrudRouter(modelName, moduleName, options = {}) {
 
   // Not every model has a deletedAt column, and filtering on one that does not
   // exist makes the list and count queries throw. Only ask for it where it is.
-  // Ownership column, in preference order: a model that has `ownerId` uses it;
-  // one that only has `assignedId` uses that instead.
-  const OWNERSHIP_FIELDS = ['ownerId', 'assignedId'];
-
   const softDeletes = modelHasField(modelName, 'deletedAt');
   const notDeleted = () => (softDeletes ? { deletedAt: null } : {});
 
@@ -189,94 +172,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   router.post('/', requirePermission(moduleName, 'edit'), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
-      let data = fromClient(req.body);
-
-      if (validate) {
-        const { valid, errors } = validate(data);
-        // The message names the fields: the pages show only `error`, which
-        // said "Validation failed" and not what to fix.
-        if (!valid) {
-          const detail = Object.entries(errors || {}).map(([field, problem]) => `${field}: ${String(problem).toLowerCase()}`).join('; ');
-          return res.status(400).json({ error: detail ? `Validation failed (${detail})` : 'Validation failed', errors });
-        }
-      }
-
-      if (beforeCreate) data = await beforeCreate(data, req);
-
-      // Validation rules describe what is not allowed. They had admin screens
-      // and a table and were read by nothing, so they validated nothing.
-      const violations = await checkValidationRules(prisma, moduleName, data);
-      if (violations.length) {
-        return res.status(400).json({
-          error: violations[0].message,
-          code: 'VALIDATION_RULE',
-          violations,
-        });
-      }
-
-      // Duplicate rules likewise: configured, never consulted. A blocking rule
-      // refuses; a warning rule lets the record through and says so.
-      const duplicates = await findDuplicates(prisma, moduleName, data);
-      const blocking = duplicates.filter(d => d.action === 'block');
-      if (blocking.length) {
-        return res.status(409).json({
-          error: `This looks like a duplicate of an existing ${moduleName.replace(/s$/, '')}.`,
-          code: 'DUPLICATE_RECORD',
-          duplicates: blocking,
-        });
-      }
-
-      // Assignment rules pick an owner when the caller did not name one.
-      const assignment = await applyAssignmentRules(prisma, moduleName, data);
-      if (assignment) data = { ...data, ...assignment.fields };
-
-      // Failing both, the creator owns what they create. Records were being
-      // written with a null owner, so the ownership arm of row-level security
-      // matched nobody and one rep could read and edit another rep's deals.
-      for (const field of OWNERSHIP_FIELDS) {
-        if (!modelHasField(modelName, field)) continue;
-        if (!data[field] && req.userId) data[field] = req.userId;
-        break;
-      }
-      // The creator is whoever made it; row security reads it as the owner
-      // of a record with no owner column (a document).
-      if (modelHasField(modelName, 'createdById') && req.userId) data.createdById = req.userId;
-
-      // A key the model does not have used to 500 the whole request. Relation
-      // keys go too; a router whose records take nested rows (order items)
-      // builds them itself, from checked fields, in nestedWrites.
-      const { data: pickedData, ignored } = pickModelFields(modelName, data);
-      const linkProblem = await linkRefusal(req, modelName, pickedData);
-      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-      const createData = nestedWrites ? { ...pickedData, ...(await nestedWrites(req, 'create')) } : pickedData;
-      const record = numbering
-        ? await createNumbered(prisma, modelName, numbering, { data: createData, include })
-        : await prisma[modelName].create({ data: createData, include });
-      await hydrateIncludes(prisma, record, manualIncludes);
-
-      await req.audit({ action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}` });
-      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: true });
-
-      // Emit real-time event
-      if (req.app.locals.emit?.recordCreated) {
-        req.app.locals.emit.recordCreated(moduleName, record);
-      }
-
-      if (afterCreate) await afterCreate(record, req);
-
-      // Fire the rules for this module. Nothing used to call the engine, so a
-      // workflow could be enabled and never run. Awaited so a rule's effects
-      // are in place before the caller sees the record, and swallowed so
-      // automation can never fail the write itself.
-      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'create', record, userId: req.userId });
-
-      // Fire webhook
-      try {
-        const { fireWebhookEvent } = require('../services/webhooks');
-        await fireWebhookEvent(prisma, `${moduleName}.created`, { id: record.id, module: moduleName, data: record });
-      } catch (e) { /* Webhook is best-effort */ }
-
-      if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
+      const { record, ignored, duplicates, assignment } = await createRecord(prisma, moduleName, fromClient(req.body), {
+        req, userId: req.userId, include, hydrate: created => hydrateIncludes(prisma, created, manualIncludes),
+      });
 
       const warnings = [];
       if (ignored.length) warnings.push(`Ignored unknown field(s): ${ignored.join(', ')}`);
@@ -299,7 +197,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   router.put('/:id', idParam, requirePermission(moduleName, 'edit'), guard({ minLevel: 'Edit' }), async (req, res, next) => {
     try {
       const prisma = req.app.locals.prisma;
-      let data = fromClient(req.body);
+      const data = fromClient(req.body);
 
       // Optimistic locking check
       const expectedVersion = req.body._version || req.headers['if-match'];
@@ -324,67 +222,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      if (beforeUpdate) data = await beforeUpdate(data, req);
-
-      // Validate the record as it will be, not just the fields supplied.
-      const updateViolations = await checkValidationRules(prisma, moduleName, { ...oldRecord, ...data });
-      if (updateViolations.length) {
-        return res.status(400).json({
-          error: updateViolations[0].message,
-          code: 'VALIDATION_RULE',
-          violations: updateViolations,
-        });
-      }
-
-      const { data: updateData } = pickModelFields(modelName, data);
-      // An empty Json column sent back empty is no change; leave it unwritten.
-      for (const [key, value] of Object.entries(updateData)) {
-        if (value === Prisma.DbNull && oldRecord[key] === null) delete updateData[key];
-      }
-      const linkProblem = await linkRefusal(req, modelName, updateData, oldRecord);
-      if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-      const record = await prisma[modelName].update({
-        where: { id: req.params.id },
-        data: updateData,
-        include,
+      const { record } = await updateRecord(prisma, moduleName, oldRecord, data, {
+        req, userId: req.userId, include, hydrate: updated => hydrateIncludes(prisma, updated, manualIncludes),
       });
-      await hydrateIncludes(prisma, record, manualIncludes);
-      await assignSecurityGroupsSafely(prisma, moduleName, record, { onCreate: false });
-
-      // Field-level audit, of the values written: the form sends the whole
-      // record back as text, so diffing the body logged every number as changed.
-      const changes = diffFields(oldRecord, updateData);
-      if (changes.length > 0) {
-        await req.audit({
-          action: 'update', module: moduleName, recordId: record.id,
-          details: `Updated ${modelName}: ${formatChanges(changes)}`,
-        });
-      }
-
-      if (req.app.locals.emit?.recordUpdated) {
-        req.app.locals.emit.recordUpdated(moduleName, record);
-      }
-
-      if (afterUpdate) await afterUpdate(record, req);
-
-      await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: req.userId });
-
-      // A status or stage move is its own trigger, so a rule does not have to
-      // re-derive "did this change" from conditions.
-      const movedStage = ['status', 'stage'].some(f => oldRecord[f] !== undefined && oldRecord[f] !== record[f]);
-      if (movedStage) {
-        await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: req.userId });
-      }
-
-      // Fire webhook
-      try {
-        const { fireWebhookEvent } = require('../services/webhooks');
-        await fireWebhookEvent(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
-        // Offered as deal.stage_changed and never fired.
-        if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
-          await fireWebhookEvent(prisma, `${moduleName}.stage_changed`, { id: record.id, module: moduleName, from: oldRecord.stage, to: record.stage });
-        }
-      } catch (e) { /* Webhook is best-effort */ }
 
       // As for create: linked records as the caller may see them, in the response only.
       const body = { ...record };
@@ -407,57 +247,51 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      // Soft delete where the model supports it; otherwise remove the row.
-      // The recycle bin snapshot below covers both cases.
-      if (softDeletes) {
-        await prisma[modelName].update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
-      } else {
-        await prisma[modelName].delete({ where: { id: req.params.id } });
-      }
-
-      // Send to recycle bin (30-day retention)
-      try {
-        await prisma.recycleBinItem.create({
-          data: {
-            module: moduleName,
-            recordId: req.params.id,
-            recordData: record,
-            deletedById: req.userId,
-            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-          },
-        });
-      } catch (e) { /* Recycle bin is best-effort */ }
-
-      await req.audit({ action: 'delete', module: moduleName, recordId: req.params.id, details: `Deleted ${modelName}` });
-
-      if (req.app.locals.emit?.recordDeleted) {
-        req.app.locals.emit.recordDeleted(moduleName, req.params.id);
-      }
-
-      // Fire webhook
-      try {
-        const { fireWebhookEvent } = require('../services/webhooks');
-        await fireWebhookEvent(prisma, `${moduleName}.deleted`, { id: req.params.id, module: moduleName });
-      } catch (e) { /* Webhook is best-effort */ }
+      // Soft where the model keeps deleted rows, with a recycle bin entry
+      // either way.
+      await deleteRecord(prisma, moduleName, record, { req, userId: req.userId });
 
       res.json({ success: true });
     } catch (err) { next(err); }
   });
+
+  // Each record of a bulk change goes through the same write as one at a time,
+  // so the module's rules, workflows and webhooks see it, and a deleted one
+  // goes to the recycle bin. These were one deleteMany and one updateMany:
+  // nothing fired, a bulk delete was permanent where a single one is not, and
+  // a rule that refused a value let a bulk update write it. A record a rule
+  // refuses is left as it was and reported in `failed`.
+  const eachReachable = async (req, ids, level, write) => {
+    const prisma = req.app.locals.prisma;
+    const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) }, ...notDeleted() }, level);
+    const records = await prisma[modelName].findMany({ where });
+    const db = batchClient(prisma);
+    let done = 0;
+    const failed = [];
+    for (const record of records) {
+      try {
+        await write(db, record);
+        done++;
+      } catch (err) {
+        if (!(err instanceof RecordWriteError)) throw err;
+        failed.push({ id: record.id, error: err.body.error, ...(err.code ? { code: err.code } : {}) });
+      }
+    }
+    return { done, failed };
+  };
 
   // BULK DELETE - POST /bulk-delete
   // Only rows the caller could delete one at a time. This deleted whatever
   // ids it was sent, other reps' records included.
   router.post('/bulk-delete', requirePermission(moduleName, 'full'), async (req, res, next) => {
     try {
-      const prisma = req.app.locals.prisma;
       const { ids } = req.body;
       if (!ids || !Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'ids array required' });
       if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
 
-      const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) } }, 'Full');
-      const result = await prisma[modelName].deleteMany({ where });
-      await req.audit({ action: 'delete', module: moduleName, details: `Bulk deleted ${result.count} ${moduleName}` });
-      res.json({ success: true, deleted: result.count });
+      const { done, failed } = await eachReachable(req, ids, 'Full',
+        (prisma, record) => deleteRecord(prisma, moduleName, record, { req, userId: req.userId, source: 'bulk delete' }));
+      res.json({ success: true, deleted: done, ...(failed.length ? { failed } : {}) });
     } catch (err) { next(err); }
   });
 
@@ -467,7 +301,6 @@ function createCrudRouter(modelName, moduleName, options = {}) {
   // records, who owns them, a document's stored file path.
   router.post('/bulk-update', requirePermission(moduleName, 'edit'), async (req, res, next) => {
     try {
-      const prisma = req.app.locals.prisma;
       const { ids, data } = req.body;
       if (!ids || !Array.isArray(ids) || !data || typeof data !== 'object') return res.status(400).json({ error: 'ids array and data required' });
       if (ids.length > 100) return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
@@ -477,10 +310,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       const linkProblem = await linkRefusal(req, modelName, changes);
       if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-      const where = await reachableWhere(req, moduleName, modelName, { id: { in: ids.map(String) } }, 'Edit');
-      const result = await prisma[modelName].updateMany({ where, data: changes });
-      await req.audit({ action: 'update', module: moduleName, details: `Bulk updated ${result.count} ${moduleName}` });
-      res.json({ success: true, updated: result.count });
+      const { done, failed } = await eachReachable(req, ids, 'Edit',
+        (prisma, record) => updateRecord(prisma, moduleName, record, changes, { req, userId: req.userId, source: 'bulk update' }));
+      res.json({ success: true, updated: done, ...(failed.length ? { failed } : {}) });
     } catch (err) { next(err); }
   });
 

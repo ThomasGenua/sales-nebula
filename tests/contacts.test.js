@@ -197,8 +197,12 @@ describe('POST /api/contacts/bulk-delete', () => {
     expect(res.status).toBe(200);
     expect(res.body.deleted).toBe(2);
 
-    const remaining = await prisma.contact.count();
+    // As a single delete is: soft, and in the recycle bin. A bulk delete was
+    // a deleteMany, permanent, with nothing to restore.
+    const remaining = await prisma.contact.count({ where: { deletedAt: null } });
     expect(remaining).toBe(1);
+    const binned = await prisma.recycleBinItem.findMany({ where: { module: 'contacts' } });
+    expect(binned.map(b => b.recordId).sort()).toEqual([c1.id, c2.id].sort());
   });
 });
 
@@ -234,9 +238,10 @@ describe('POST /api/contacts/:id/merge', () => {
     expect(res.body.phone).toBe('555-1234');
     expect(res.body.firstName).toBe('Primary'); // Primary keeps its values
 
-    // Duplicate should be deleted
+    // The duplicate is deleted as a delete is: soft, and in the recycle bin.
     const dupe = await prisma.contact.findUnique({ where: { id: duplicate.id } });
-    expect(dupe).toBeNull();
+    expect(dupe.deletedAt).not.toBeNull();
+    expect(await prisma.recycleBinItem.count({ where: { module: 'contacts', recordId: duplicate.id } })).toBe(1);
   });
 });
 

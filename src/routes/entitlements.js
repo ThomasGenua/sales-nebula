@@ -1,9 +1,10 @@
 const { Router } = require('express');
 const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere, linkRefusal } = require('../middleware/access');
+const { reachableWhere } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
 const { editableFields } = require('../utils/modelFields');
+const { createRecord, updateRecord, batchClient } = require('../services/recordWrites');
 
 const router = createCrudRouter('entitlement', 'entitlements', {
   include: {
@@ -69,8 +70,11 @@ router.post('/:id/renew', authenticate, requirePermission('entitlements', 'edit'
     if (!entitlement) return res.status(404).json({ error: 'Entitlement not found' });
     const newEnd = new Date(entitlement.endDate || Date.now());
     newEnd.setMonth(newEnd.getMonth() + months);
-    const updated = await prisma.entitlement.update({ where: { id: req.params.id }, data: { endDate: newEnd, status: 'Active' } });
-    await req.audit({ action: 'update', module: 'entitlements', recordId: req.params.id, details: `Renewed for ${months} months` });
+    // As an edit (services/recordWrites): rules, audit trail, workflows and
+    // webhooks, which a renewal or transfer never reached.
+    const { record: updated } = await updateRecord(prisma, 'entitlements', entitlement, { endDate: newEnd, status: 'Active' }, {
+      req, userId: req.userId, source: `renewed for ${months} months`,
+    });
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -154,17 +158,16 @@ router.post('/bulk', authenticate, requirePermission('entitlements', 'full'), as
     const { entitlements } = req.body;
     if (!entitlements?.length) return res.status(400).json({ error: 'entitlements array required' });
     const results = [];
-    const seen = new Map();
+    // Each row's own columns, made as a single create is
+    // (services/recordWrites): the importer's, linked only to records they
+    // can see, through the module's rules, workflows and webhooks. Rows went
+    // to Prisma whole: ids, dates, nested writes into the account, and a date
+    // input's "2026-01-01", which Prisma refuses.
+    const db = batchClient(prisma);
+    const write = { req, userId: req.userId, source: 'bulk', linkCache: new Map() };
     for (const e of entitlements.slice(0, 100)) {
       try {
-        // Each row's own columns, owned by the importer, linked only to
-        // records they can see, as a single create is. Rows went to Prisma
-        // whole: ids, dates, nested writes into the account, and a date
-        // input's "2026-01-01", which Prisma refuses.
-        const data = { ...editableFields('entitlement', e), createdById: req.user.id };
-        const refusal = await linkRefusal(req, 'entitlement', data, null, seen);
-        if (refusal) throw new Error(refusal);
-        const ent = await prisma.entitlement.create({ data });
+        const { record: ent } = await createRecord(db, 'entitlements', editableFields('entitlement', e), write);
         results.push({ id: ent.id, status: 'created' });
       } catch (err) { results.push({ data: e, status: 'error', error: err.message }); }
     }
@@ -180,12 +183,11 @@ router.post('/:id/transfer', authenticate, requirePermission('entitlements', 'fu
     if (!targetAccountId) return res.status(400).json({ error: 'targetAccountId required' });
     const ent = await prisma.entitlement.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!ent) return res.status(404).json({ error: 'Not found' });
-    // To a live account the caller can see: the id was stored as sent.
-    const linkProblem = await linkRefusal(req, 'entitlement', { accountId: String(targetAccountId) }, ent);
-    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-    const previousAccountId = ent.accountId;
-    const updated = await prisma.entitlement.update({ where: { id: req.params.id }, data: { accountId: targetAccountId } });
-    await req.audit({ action: 'update', module: 'entitlements', recordId: ent.id, details: `Transferred from account ${previousAccountId} to ${targetAccountId}. Reason: ${reason || 'N/A'}` });
+    // To a live account the caller can see (the write's link check): the id
+    // was stored as sent.
+    const { record: updated } = await updateRecord(prisma, 'entitlements', ent, { accountId: String(targetAccountId) }, {
+      req, userId: req.userId, source: `transferred, reason: ${reason || 'N/A'}`,
+    });
     res.json(updated);
   } catch (err) { next(err); }
 });

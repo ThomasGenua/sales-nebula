@@ -5,7 +5,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { encrypt, decrypt } = require('../utils/secretBox');
-const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { createRecord } = require('../services/recordWrites');
 const { columnsFrom } = require('../utils/modelFields');
 const {
   ingestMessages, recordPoll,
@@ -388,33 +388,33 @@ router.post('/messages/:id/convert', authenticate, requirePermission('cases', 'e
     if (!message) return res.status(404).json({ error: 'Message not found' });
     if (message.createdCaseId || message.createdLeadId) return res.status(409).json({ error: 'Message has already been converted' });
 
+    // Made as in the app (services/recordWrites): the module's rules, then its
+    // workflows and webhooks, which a converted message skipped.
+    const write = { userId: req.userId, source: 'inbound email', emit: req.app.locals.emit };
     if (target === 'case') {
       const contact = message.fromEmail ? await prisma.contact.findFirst({ where: { email: message.fromEmail, deletedAt: null } }) : null;
-      const created = await createNumbered(prisma, 'case', CASE_NUMBER, {
-        data: {
-          subject: (message.subject || 'Email enquiry').slice(0, 250),
-          description: (message.textBody || '').slice(0, 8000),
-          status: 'New', priority: req.body.priority || 'Medium', origin: 'Email',
-          ownerId,
-          contactId: contact?.id || null, accountId: contact?.accountId || null,
-          contactEmail: message.fromEmail,
-        },
-      });
+      const { record: created } = await createRecord(prisma, 'cases', {
+        subject: (message.subject || 'Email enquiry').slice(0, 250),
+        description: (message.textBody || '').slice(0, 8000),
+        status: 'New', priority: req.body.priority || 'Medium', origin: 'Email',
+        ownerId,
+        contactId: contact?.id || null, accountId: contact?.accountId || null,
+        contactEmail: message.fromEmail,
+      }, write);
       await prisma.inboundEmailMessage.update({ where: { id: message.id }, data: { createdCaseId: created.id, status: 'Converted' } });
       await req.audit({ action: 'create', module: 'inboundEmail', recordId: created.id, details: 'Email converted to case' });
       return res.status(201).json({ target: 'case', record: created });
     }
 
-    const [first, ...rest] = (message.fromName || (message.fromEmail || '').split('@')[0] || 'Unknown').split(' ');
-    const lead = await prisma.lead.create({
-      data: {
-        firstName: first, lastName: rest.join(' ') || first,
-        email: message.fromEmail, source: 'Email', status: 'New',
-        company: (message.fromEmail || '').split('@')[1] || 'Unknown',
-        description: (message.textBody || '').slice(0, 4000),
-        ownerId,
-      },
-    });
+    const words = String(message.fromName || '').trim().split(/\s+/).filter(Boolean);
+    const [first, ...rest] = words.length ? words : [(message.fromEmail || '').split('@')[0] || 'Unknown'];
+    const { record: lead } = await createRecord(prisma, 'leads', {
+      firstName: first, lastName: rest.join(' ') || first,
+      email: message.fromEmail, source: 'Email', status: 'New',
+      company: (message.fromEmail || '').split('@')[1] || 'Unknown',
+      description: (message.textBody || '').slice(0, 4000),
+      ownerId,
+    }, write);
     await prisma.inboundEmailMessage.update({ where: { id: message.id }, data: { createdLeadId: lead.id, status: 'Converted' } });
     res.status(201).json({ target: 'lead', record: lead });
   } catch (err) { next(err); }

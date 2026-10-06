@@ -3,7 +3,8 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { createCrudRouter } = require('../utils/crud');
-const { createNumbered, CONTRACT_NUMBER } = require('../utils/numbering');
+const { CONTRACT_NUMBER } = require('../utils/numbering');
+const { createRecord, updateRecord } = require('../services/recordWrites');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { editableFields } = require('../utils/modelFields');
 
@@ -36,11 +37,11 @@ const contractValue = c => c.value ?? c.totalValue ?? 0;
 router.post('/:id/activate', authenticate, requirePermission('contracts', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const contract = await prisma.contract.update({
-      where: { id: req.params.id },
-      data: { status: 'Activated', activatedAt: new Date(), activatedById: req.user.id },
-    });
-    await req.audit({ action: 'update', module: 'contracts', recordId: contract.id, details: 'Contract activated' });
+    // As an edit (services/recordWrites): the contract's rules, audit trail,
+    // and the workflows and webhooks on its status, which these never reached.
+    const { record: contract } = await updateRecord(prisma, 'contracts', req.params.id, {
+      status: 'Activated', activatedAt: new Date(), activatedById: req.user.id,
+    }, { req, userId: req.userId, source: 'activated' });
     res.json(contract);
   } catch (err) { next(err); }
 });
@@ -49,11 +50,9 @@ router.post('/:id/activate', authenticate, requirePermission('contracts', 'edit'
 router.post('/:id/terminate', authenticate, requirePermission('contracts', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const contract = await prisma.contract.update({
-      where: { id: req.params.id },
-      data: { status: 'Terminated', terminationDate: new Date(), terminationReason: req.body.reason },
-    });
-    await req.audit({ action: 'update', module: 'contracts', recordId: contract.id, details: `Terminated: ${req.body.reason || 'No reason'}` });
+    const { record: contract } = await updateRecord(prisma, 'contracts', req.params.id, {
+      status: 'Terminated', terminationDate: new Date(), terminationReason: req.body.reason,
+    }, { req, userId: req.userId, source: 'terminated' });
     res.json(contract);
   } catch (err) { next(err); }
 });
@@ -77,15 +76,15 @@ router.post('/:id/amend', authenticate, requirePermission('contracts', 'edit'), 
     const changes = editableFields('contract', req.body);
     const linkProblem = await linkRefusal(req, 'contract', changes, original);
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-    const amendment = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
-      data: {
-        ...contractData, ...changes,
-        name: `${original.name || original.contractNumber} (Amendment)`,
-        status: 'Draft', parentContractId: original.id,
-        version: (original.version || 1) + 1,
-      },
-    });
-    await req.audit({ action: 'create', module: 'contracts', recordId: amendment.id, details: `Amendment of contract ${original.id}` });
+    // Made as a contract is on its own page (services/recordWrites): number,
+    // rules, workflows and webhooks. Its links were checked above, against
+    // the original's.
+    const { record: amendment } = await createRecord(prisma, 'contracts', {
+      ...contractData, ...changes,
+      name: `${original.name || original.contractNumber} (Amendment)`,
+      status: 'Draft', parentContractId: original.id,
+      version: (original.version || 1) + 1,
+    }, { userId: req.userId, source: `amendment of ${original.contractNumber || original.id}`, emit: req.app.locals.emit });
     res.status(201).json(amendment);
   } catch (err) { next(err); }
 });
@@ -104,15 +103,12 @@ router.post('/:id/renew', authenticate, requirePermission('contracts', 'edit'), 
     const newEnd = new Date(newStart); newEnd.setMonth(newEnd.getMonth() + months);
     // The renewal is the caller's, as a contract they create is, with the
     // original's contact and terms; with no owner, a Private default hid it.
-    const renewed = await createNumbered(prisma, 'contract', CONTRACT_NUMBER, {
-      data: {
-        name: `${original.name || original.contractNumber} (Renewal)`, accountId: original.accountId, dealId: original.dealId,
-        contactId: original.contactId, billingFrequency: original.billingFrequency, autoRenew: original.autoRenew,
-        startDate: newStart, endDate: newEnd, contractTerm: months, status: 'Draft', parentContractId: original.id,
-        value: Number(priceAdjustment) || contractValue(original), ownerId: req.userId,
-      },
-    });
-    await req.audit({ action: 'create', module: 'contracts', recordId: renewed.id, details: `Renewal of contract ${original.id}` });
+    const { record: renewed } = await createRecord(prisma, 'contracts', {
+      name: `${original.name || original.contractNumber} (Renewal)`, accountId: original.accountId, dealId: original.dealId,
+      contactId: original.contactId, billingFrequency: original.billingFrequency, autoRenew: original.autoRenew,
+      startDate: newStart, endDate: newEnd, contractTerm: months, status: 'Draft', parentContractId: original.id,
+      value: Number(priceAdjustment) || contractValue(original), ownerId: req.userId,
+    }, { userId: req.userId, source: `renewal of ${original.contractNumber || original.id}`, emit: req.app.locals.emit });
     res.status(201).json(renewed);
   } catch (err) { next(err); }
 });

@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields } = require('../utils/modelFields');
 const { currencyContext, sumInBase } = require('../utils/currency');
+const { createRecord, updateRecord, deleteRecord, runAfter } = require('../services/recordWrites');
 
 /**
  * `find(where)` over another module's rows matching `where`, narrowed to the
@@ -71,10 +72,9 @@ const router = createCrudRouter('contact', 'contacts', {
         // owner or a nested write into another table.
         const data = editableFields('contact', fields);
         // An accountId among them was stored as sent, so the merge could file
-        // the contact on an account the caller cannot see.
-        const linkProblem = await linkRefusal(req, 'contact', data, await prisma.contact.findUnique({ where: { id: primaryId } }));
-        if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-        if (Object.keys(data).length) await prisma.contact.update({ where: { id: primaryId }, data });
+        // the contact on an account the caller cannot see (the write checks it).
+        // The survivor changes as an edit would (services/recordWrites).
+        if (Object.keys(data).length) await updateRecord(prisma, 'contacts', primaryId, data, { req, userId: req.userId, source: `merge of ${mergeId}` });
 
         // Re-link all relations from merged record to primary. Its quotes,
         // invoices, documents, contracts and campaign sends were left, and the
@@ -91,8 +91,9 @@ const router = createCrudRouter('contact', 'contacts', {
           prisma.campaignRecipient.updateMany({ where: { contactId: mergeId }, data: { contactId: primaryId } }),
         ]);
 
-        // Delete merged record
-        await prisma.contact.delete({ where: { id: mergeId } });
+        // Delete the merged contact as a delete does: into the recycle bin,
+        // with its webhook. It was removed outright, with nothing to restore.
+        await deleteRecord(prisma, 'contacts', mergeId, { req, userId: req.userId, source: `merged into ${primaryId}` });
 
         const result = await prisma.contact.findUnique({ where: { id: primaryId } });
         // Its account only if the caller may see it (readable). This returned
@@ -113,9 +114,9 @@ const router = createCrudRouter('contact', 'contacts', {
         const { records } = req.body;
         if (!records || !Array.isArray(records)) return res.status(400).json({ error: 'records array required' });
 
-        // Each row as the contact's own columns, owned by the importer. Raw
-        // rows set ids, timestamps and another rep as owner.
-        const data = records.map(row => ({ ...editableFields('contact', row), ownerId: req.userId }));
+        // Each row as the contact's own columns. Raw rows set ids, timestamps
+        // and another rep as owner.
+        const data = records.map(row => editableFields('contact', row));
         // And on accounts the importer can see, checked before any row is
         // written: accountId was stored as sent. Each account is looked up once.
         const seen = new Map();
@@ -123,8 +124,24 @@ const router = createCrudRouter('contact', 'contacts', {
           const linkProblem = await linkRefusal(req, 'contact', row, null, seen);
           if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE', row: i + 1 });
         }
-        const created = await prisma.contact.createMany({ data, skipDuplicates: true });
-        res.json({ success: true, imported: created.count });
+        // Each contact as one made on its page (services/recordWrites): its
+        // rules, an owner from the assignment rules or else the importer, then
+        // its workflows. All or none, as before: a row a rule refuses fails
+        // the file, by row.
+        const after = [];
+        const write = { userId: req.userId, source: 'import', emit: req.app.locals.emit, after, prisma };
+        await prisma.$transaction(async tx => {
+          for (const [i, row] of data.entries()) {
+            try {
+              await createRecord(tx, 'contacts', row, write);
+            } catch (err) {
+              if (err.body) err.body = { ...err.body, row: i + 1 };
+              throw err;
+            }
+          }
+        }, { timeout: 120000 });
+        await runAfter(after);
+        res.json({ success: true, imported: data.length });
       } catch (err) { next(err); }
     });
 
@@ -198,10 +215,12 @@ router.post('/:id/convert-to-lead', authenticate, requirePermission('leads', 'ed
     const account = contact.accountId
       ? await readable(req, 'accounts', 'account', { id: contact.accountId }, where => prisma.account.findFirst({ where, select: { name: true } }), null)
       : null;
-    const lead = await prisma.lead.create({
-      data: { firstName: contact.firstName, lastName: contact.lastName, email: contact.email, phone: contact.phone, company: account?.name || '', title: contact.title, status: 'New', source: contact.leadSource || 'Existing Contact', ownerId: req.user.id },
-    });
-    await req.audit({ action: 'create', module: 'leads', recordId: lead.id, details: `Converted from contact ${contact.id}` });
+    // Made as a lead is on its own page (services/recordWrites): its rules,
+    // workflows and webhooks. A lead needs a company, which the empty one
+    // given for a contact with no account the caller can see was not.
+    const { record: lead } = await createRecord(prisma, 'leads', {
+      firstName: contact.firstName, lastName: contact.lastName, email: contact.email, phone: contact.phone, company: account?.name || 'Unknown', title: contact.title, status: 'New', source: contact.leadSource || 'Existing Contact', ownerId: req.user.id,
+    }, { userId: req.userId, source: `converted from contact ${contact.id}`, emit: req.app.locals.emit });
     res.status(201).json(lead);
   } catch (err) { next(err); }
 });
