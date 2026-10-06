@@ -68,7 +68,8 @@ User CRUD, roles, permissions, preferences, online status
 | GET | `/api/users` | List all users |
 | GET | `/api/users/:id` | Get user by ID |
 | POST | `/api/users` | Create new user |
-| PUT | `/api/users/:id` | Update user |
+| PUT | `/api/users/:id` | Update user (name, email, role, active) |
+| POST | `/api/users/:id/password-reset` | Email the user a one-time link to choose a new password |
 | DELETE | `/api/users/:id` | Delete user |
 | GET | `/api/users/roles/all` | List all roles |
 | POST | `/api/users/roles` | Create role |
@@ -78,6 +79,13 @@ User CRUD, roles, permissions, preferences, online status
 | GET | `/api/users/me/preferences` | Get user preferences |
 | PUT | `/api/users/me/preferences` | Update user preferences |
 | GET | `/api/users/me/activity` | Get current user activity log |
+
+Rules for managing users:
+- Creating, editing, deactivating or deleting a user, and sending a reset link, take `users: full`. Nobody may grant a role, or manage a user whose role, needs more access than they have; only an administrator manages administrators.
+- You can't deactivate or delete your own account. The last active administrator can't be demoted, so someone can always manage users and roles.
+- A deactivated user is refused on their next request (`403 Account disabled`), and can't sign in until reactivated.
+- `password-reset` answers `{ emailSent: true }` once the email has gone. Where this server sends no email, it answers `{ emailSent: false, resetUrl }` so the link can be passed on, as an invite's is.
+- Invites (`/api/signup/invites`) are held to the same ceiling: resending or revoking one takes the access its role grants. Their list carries `roleName`.
 
 ---
 

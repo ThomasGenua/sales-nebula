@@ -1,5 +1,4 @@
 const { Router } = require('express');
-const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { validate, schemas } = require('../middleware/validate');
 const { limiters } = require('../middleware/rateLimit');
@@ -45,11 +44,9 @@ const recordSignIn = (prisma, req, userId, status, loginType = 'password') => pr
   data: { userId, status, loginType, sourceIp: req.ip || null, browser: String(req.get('user-agent') || '').slice(0, 300) || null },
 }).catch(() => {});
 
-/**
- * A stamp of the password a reset link replaces. The link carries it, so it
- * stops working once the password changes: it used to work for its whole hour.
- */
-const passwordStamp = hash => crypto.createHmac('sha256', JWT_SECRET).update(String(hash || '')).digest('base64url').slice(0, 22);
+// A reset link carries a stamp of the password it replaces, so it works once
+// (services/passwordReset, which also issues the links an administrator sends).
+const { passwordStamp, issuePasswordReset } = require('../services/passwordReset');
 
 /**
  * Issue the session for a fully authenticated user. Shared by password login
@@ -459,18 +456,7 @@ router.post('/forgot-password', limiters.auth, async (req, res, next) => {
     // As sign-in finds it: lowercasing first missed every account stored with a capital.
     const user = await findAccountByEmail(prisma, email);
     if (user && user.active !== false) {
-      const { sendPasswordResetEmail, appUrl } = require('../utils/mail');
-      const resetToken = jwt.sign(
-        { sub: user.id, purpose: 'password-reset', pw: passwordStamp(user.password) },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-      );
-      const resetUrl = appUrl(`/reset-password?token=${encodeURIComponent(resetToken)}`);
-      await sendPasswordResetEmail({
-        to: user.email,
-        firstName: user.firstName,
-        resetUrl,
-      });
+      const { resetUrl } = await issuePasswordReset(user);
       if (process.env.NODE_ENV !== 'production') {
         generic.devResetUrl = resetUrl;
       }

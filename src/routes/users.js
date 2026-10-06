@@ -4,6 +4,8 @@ const {
   authenticate, requirePermission, validatePassword, roleCeilingRefusal, roleGrantRefusal, PERMISSION_LEVELS,
 } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { isAdmin } = require('../middleware/rowSecurity');
+const { issuePasswordReset } = require('../services/passwordReset');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -82,6 +84,23 @@ async function manageableUser(req, id) {
   return refusal ? { status: 403, error: refusal } : { target };
 }
 
+/**
+ * Why `target` may not stop being an active administrator, or null: someone
+ * else must still be one. Only an administrator may change one, so in practice
+ * this is the last administrator demoting themselves, which left nobody able
+ * to manage users or roles, and only the database could undo it.
+ */
+async function lastAdminRefusal(prisma, target) {
+  if (!target.active || target.isPortalUser || !isAdmin(target)) return null;
+  // Administrators as isAdmin knows them (the role's name, in any case), which
+  // the SQLite development fallback cannot match in a query.
+  const others = await prisma.user.findMany({
+    where: { id: { not: target.id }, active: true, isPortalUser: false },
+    select: { role: { select: { name: true } } },
+  });
+  return others.some(isAdmin) ? null : 'This is the only active administrator. Make someone else an administrator first.';
+}
+
 const passwordProblem = password => {
   const { valid, errors } = validatePassword(String(password));
   return valid ? null : errors.join('. ');
@@ -126,7 +145,7 @@ router.post('/', requirePermission('users', 'full'), async (req, res, next) => {
 router.put('/:id', requirePermission('users', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { status, error } = await manageableUser(req, req.params.id);
+    const { status, error, target } = await manageableUser(req, req.params.id);
     if (error) return res.status(status).json({ error });
 
     // The account fields an administrator sets. The body went to Prisma whole,
@@ -141,10 +160,19 @@ router.put('/:id', requirePermission('users', 'full'), async (req, res, next) =>
       if (await emailTaken(prisma, data.email, req.params.id)) return res.status(409).json({ error: 'A user already exists with that email' });
     }
     if (b.active !== undefined) data.active = !!b.active;
+    // Signing yourself out of the system for good is never what was meant.
+    if (data.active === false && target.id === req.userId) return res.status(400).json({ error: "You can't deactivate your own account" });
+    let newRole = null;
     if (b.roleId !== undefined) {
       const refusal = await roleGrantRefusal(prisma, req.user, b.roleId);
       if (refusal) return res.status(refusal === 'Role not found' ? 400 : 403).json({ error: refusal });
       data.roleId = b.roleId;
+      newRole = await prisma.role.findUnique({ where: { id: String(b.roleId) }, select: { name: true } });
+    }
+    const losesAdmin = (data.active === false && target.active) || (newRole && isAdmin(target) && !isAdmin({ role: newRole }));
+    if (losesAdmin) {
+      const refusal = await lastAdminRefusal(prisma, target);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'LAST_ADMIN' });
     }
     if (b.password) {
       const weak = passwordProblem(b.password);
@@ -156,7 +184,17 @@ router.put('/:id', requirePermission('users', 'full'), async (req, res, next) =>
       data,
       include: { role: true },
     });
-    await req.audit({ action: 'update', module: 'users', recordId: user.id });
+    const changed = [
+      data.active === false && target.active && 'deactivated',
+      data.active === true && !target.active && 'reactivated',
+      newRole && data.roleId !== target.roleId && `role: ${target.role?.name} → ${newRole.name}`,
+      data.email && data.email !== target.email && `email: ${target.email} → ${data.email}`,
+      data.password && 'password set by an administrator',
+    ].filter(Boolean);
+    await req.audit({
+      action: 'update', module: 'users', recordId: user.id,
+      details: `Updated user ${user.email}${changed.length ? `: ${changed.join(', ')}` : ''}`,
+    });
     const { password: _, ...safeUser } = user;
     res.json(safeUser);
   } catch (err) { next(err); }
@@ -177,6 +215,23 @@ router.delete('/:id', requirePermission('users', 'full'), async (req, res, next)
       return res.status(409).json({ error: 'This user has history in the system and cannot be deleted. Deactivate the account instead.', code: 'USER_HAS_HISTORY' });
     }
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/users/:id/password-reset - Email them a link to choose a new
+// password: the one "Forgot password" sends, an hour long and good once. An
+// administrator could only type a new password for someone, and then knew it.
+// Where this server does not send email, the link comes back to pass on, as an
+// invite's does; whoever may send it could set the password outright anyway.
+router.post('/:id/password-reset', requirePermission('users', 'full'), async (req, res, next) => {
+  try {
+    const { status, error, target } = await manageableUser(req, req.params.id);
+    if (error) return res.status(status).json({ error });
+    if (!target.active) return res.status(409).json({ error: 'This account is deactivated, and a reset link does not open it. Reactivate it first.' });
+    const { resetUrl, mail } = await issuePasswordReset(target, { byAdmin: true });
+    await req.audit({ action: 'password_reset_request', module: 'users', recordId: target.id, details: `Password reset link sent to ${target.email}` });
+    const emailSent = !!(mail && mail.ok && mail.mode === 'smtp');
+    res.json(emailSent ? { emailSent } : { emailSent, resetUrl, expiresInMinutes: 60 });
   } catch (err) { next(err); }
 });
 

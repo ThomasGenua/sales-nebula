@@ -123,17 +123,24 @@ async function sendWelcomeEmail({ to, firstName }) {
   return sendMail({ to, subject, text, html });
 }
 
-async function sendPasswordResetEmail({ to, firstName, resetUrl }) {
+/** `byAdmin`: an administrator sent it from the Users screen; nobody asked. */
+async function sendPasswordResetEmail({ to, firstName, resetUrl, byAdmin = false }) {
   const name = firstName || 'there';
   const subject = 'Reset your Sales Nebula password';
-  const text = `Hi ${name},\n\nReset your Sales Nebula password using this link (expires in 1 hour):\n${resetUrl}\n\nIf you did not request this, you can ignore this email.\n`;
+  const why = byAdmin
+    ? 'An administrator sent you this link to choose a new Sales Nebula password.'
+    : 'We received a request to reset your Sales Nebula password.';
+  const unasked = byAdmin
+    ? 'Your current password keeps working until you choose a new one.'
+    : 'If you did not ask for a reset, ignore this email.';
+  const text = `Hi ${name},\n\n${why} Use this link (expires in 1 hour):\n${resetUrl}\n\n${unasked}\n`;
   const html = wrapHtml(
     'Reset your password',
     `<p>Hi ${escapeHtml(name)},</p>
-     <p>We received a request to reset your Sales Nebula password.</p>
+     <p>${why}</p>
      <p style="padding:18px 0;"><a href="${resetUrl}" style="display:inline-block;background:#F5A623;color:#060B1A;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:8px;">Reset password</a></p>
      <p style="font-size:13px;color:#7E8598;">Or paste this link:<br/><a href="${resetUrl}" style="color:#F5A623;word-break:break-all;">${resetUrl}</a></p>
-     <p style="font-size:13px;color:#7E8598;">This link expires in 1 hour. If you did not ask for a reset, ignore this email.</p>`
+     <p style="font-size:13px;color:#7E8598;">This link expires in 1 hour. ${unasked}</p>`
   );
   return sendMail({ to, subject, text, html });
 }
