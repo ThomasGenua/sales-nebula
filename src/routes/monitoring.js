@@ -4,8 +4,10 @@ const { queryWithIncludes } = require('../utils/modelFields');
 
 const router = Router();
 
-// Login history with filtering
-router.get('/login-history', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+// Login history with filtering. Every user's sign-ins and the addresses they
+// came from: admin read alone is every Sales Rep's, so this takes users read
+// as well, as the admin dashboard's recent-logins list already did.
+router.get('/login-history', authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { userId, status, limit = 100, page = 1 } = req.query;

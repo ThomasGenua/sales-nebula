@@ -203,7 +203,9 @@ module.exports = router;
 statusRoutes(router, { module: 'security', analytics: true });
 
 // Threat detection - suspicious activity analysis
-router.get('/threats', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+// Failed sign-ins and active sessions are other users' sign-in records, with
+// their IP addresses: users read as well as admin read, as login history takes.
+router.get('/threats', authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const since = new Date(Date.now() - 24 * 3600000);
@@ -225,7 +227,7 @@ router.get('/threats', authenticate, requirePermission('admin', 'read'), async (
 });
 
 // Active sessions
-router.get('/sessions', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/sessions', authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const recentLogins = await queryWithIncludes(prisma, 'loginHistory', 'findMany', { where: { status: 'Success', loginTime: { gte: new Date(Date.now() - 8 * 3600000) } }, include: { user: { select: { firstName: true, lastName: true, email: true } } }, orderBy: { loginTime: 'desc' }, take: 50 });

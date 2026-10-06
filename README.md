@@ -502,6 +502,8 @@ Nobody grants more than they hold. Creating or inviting a user, approving a sign
 
 Each user is assigned one role. The role contains a set of `Permission` records, each specifying a module name and access level. The `requirePermission(module, level)` middleware enforces these at the route level.
 
+`admin: read` opens the setup screens read only (Studio, Security Groups and the like); the default Sales Rep role has it. On its own it does not reach other people's sign-ins or organisation-wide figures: login history, active sessions, failed sign-ins and the Admin dashboard also take `users: read`, and the log of privacy requests takes `admin: edit`, as logging one does. The sidebar leaves out the Admin and Privacy entries for roles that cannot open them.
+
 ### API Key Authentication
 
 For server-to-server integrations, generate API keys via `POST /api/admin/api-keys`. Pass the key as `X-API-Key` header. The key is shown once, in that response: only a SHA-256 of it is stored, so a lost key is replaced, not recovered.

@@ -32,7 +32,10 @@ function subjectTypeOf(input) {
 // ─── REQUESTS ───
 
 // List data subject requests
-router.get('/requests', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+// The log of data subject requests: who asked to be exported or erased, by
+// address, and what was done. Admin edit, which logging a request takes; admin
+// read is every Sales Rep's and the Read Only role's.
+router.get('/requests', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, status, requestType } = req.query;
@@ -82,7 +85,7 @@ router.post('/requests', authenticate, requirePermission('admin', 'edit'), audit
   } catch (err) { next(err); }
 });
 
-router.get('/requests/:id', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/requests/:id', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const request = await req.app.locals.prisma.dataSubjectRequest.findUnique({ where: { id: req.params.id } });
     if (!request) return res.status(404).json({ error: 'Request not found' });
