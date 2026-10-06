@@ -1,5 +1,8 @@
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
+// The demo password the README prints; the server warns in production while
+// a demo account still takes it (src/services/demoAccounts.js).
+const { DEMO_PASSWORD } = require('../src/services/demoAccounts');
 
 const prisma = new PrismaClient();
 
@@ -73,7 +76,7 @@ async function main() {
   console.log('  Roles created: Admin, Manager, Sales Rep, Read Only');
 
   // ─── USERS ───
-  const pw = await bcrypt.hash('password123', 12);
+  const pw = await bcrypt.hash(DEMO_PASSWORD, 12);
 
   const thomas = await prisma.user.create({ data: { email: 'thomas@salesnebula.com', password: pw, firstName: 'Thomas', lastName: 'Genua', avatar: 'TG', roleId: adminRole.id } });
   const alex = await prisma.user.create({ data: { email: 'alex@salesnebula.com', password: pw, firstName: 'Alex', lastName: 'Rivera', avatar: 'AR', roleId: managerRole.id } });
