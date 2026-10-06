@@ -39,10 +39,12 @@ const router = createCrudRouter('case', 'cases', {
     if (DONE.includes(data.status)) return { ...data, closedAt: oldRecord.closedAt || new Date() };
     return { ...data, closedAt: null };
   },
-  afterUpdate: async (record, { prisma, oldRecord, userId }) => {
+  afterUpdate: async (record, { prisma, oldRecord, userId, source }) => {
     if (oldRecord.status === record.status) return;
+    // With what made the change, when it was not the edit form: the SLA job,
+    // a macro, an import.
     await prisma.caseStatusHistory.create({
-      data: { caseId: record.id, fromStatus: oldRecord.status, toStatus: record.status, changedById: userId },
+      data: { caseId: record.id, fromStatus: oldRecord.status, toStatus: record.status, changedById: userId, ...(source && { note: source }) },
     }).catch(() => {});
   },
   customRoutes: (router) => {

@@ -84,42 +84,6 @@ function softDeleteWhere(where = {}) {
   return { ...where, deletedAt: null };
 }
 
-function applySoftDelete(prisma, modelName) {
-  return {
-    // Override findMany to exclude soft-deleted
-    findMany: (args = {}) => {
-      args.where = softDeleteWhere(args.where);
-      return prisma[modelName].findMany(args);
-    },
-    // Soft delete: set deletedAt instead of removing
-    softDelete: (id) => {
-      return prisma[modelName].update({
-        where: { id },
-        data: { deletedAt: new Date() },
-      });
-    },
-    // Restore a soft-deleted record
-    restore: (id) => {
-      return prisma[modelName].update({
-        where: { id },
-        data: { deletedAt: null },
-      });
-    },
-    // Hard delete (actually remove)
-    hardDelete: (id) => {
-      return prisma[modelName].delete({ where: { id } });
-    },
-    // Find including deleted
-    findWithDeleted: (args = {}) => {
-      return prisma[modelName].findMany(args);
-    },
-    // Count excluding deleted
-    count: (where = {}) => {
-      return prisma[modelName].count({ where: softDeleteWhere(where) });
-    },
-  };
-}
-
 // ─── VALIDATION CONSTRAINTS ───
 // Business rules for field values
 
@@ -197,7 +161,6 @@ module.exports = {
   formatChanges,
   optimisticLock,
   softDeleteWhere,
-  applySoftDelete,
   validateConstraints,
   validateBody,
   constraints,

@@ -4,7 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { columnsFrom } = require('../utils/modelFields');
-const { updateRecord, batchClient, isRecordModule } = require('../services/recordWrites');
+const { updateRecord, batchClient } = require('../services/recordWrites');
 const {
   haversineDistance, isValidPoint, boundingBox, pointInPolygon, polygonBounds,
   polygonArea, polygonCentroid, circleToPolygon, encodeGeohash, clusterByGeohash,
@@ -527,11 +527,6 @@ router.post('/areas/:id/assign-owner', authenticate, requirePermission('admin', 
       if (!permits(req, permissionFor(module), 'edit')) { summary.push({ module, error: `Insufficient permissions for ${permissionFor(module)}` }); continue; }
       try {
         const where = await reachableRecords(req, module, { id: { in: ids } }, 'Edit');
-        if (!isRecordModule(module)) {
-          const result = await prisma[model].updateMany({ where, data: { ownerId } });
-          summary.push({ module, updated: result.count });
-          continue;
-        }
         // Each record's new owner as an edit would set it
         // (services/recordWrites): its security groups, the rules and
         // workflows on its owner, its webhooks. One a rule refuses keeps its

@@ -105,7 +105,7 @@ const softDeletes = modelName => modelHasField(modelName, 'deletedAt');
 
 /** What a module's hooks are handed, besides the data. */
 function hookContext(db, ctx, oldRecord = null) {
-  return { prisma: db, userId: ctx.userId || null, req: ctx.req || null, oldRecord, emit: emitterFor(ctx) };
+  return { prisma: db, userId: ctx.userId || null, req: ctx.req || null, oldRecord, emit: emitterFor(ctx), source: ctx.source || null };
 }
 
 function emitterFor(ctx) {

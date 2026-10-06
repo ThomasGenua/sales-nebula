@@ -320,11 +320,22 @@ const handlers = {
   },
 
   async checkOverdueInvoices() {
-    const overdue = await prisma.invoice.updateMany({
-      where: { status: 'Sent', dueDate: { lt: new Date() }, deletedAt: null },
-      data: { status: 'Overdue' },
-    });
-    return { updated: overdue.count };
+    // Each marked overdue as an edit would mark it (services/recordWrites),
+    // so the rules on an invoice's status see it go overdue; as one
+    // updateMany, none of them did.
+    const { updateRecord, batchClient } = require('../services/recordWrites');
+    const db = batchClient(prisma);
+    const due = await prisma.invoice.findMany({ where: { status: 'Sent', dueDate: { lt: new Date() }, deletedAt: null } });
+    let updated = 0;
+    for (const invoice of due) {
+      try {
+        await updateRecord(db, 'invoices', invoice, { status: 'Overdue' }, { source: 'past due' });
+        updated++;
+      } catch (err) {
+        log.warn({ invoiceId: invoice.id, err: err.message }, 'could not mark invoice overdue');
+      }
+    }
+    return { updated };
   },
 
   /**
@@ -580,22 +591,28 @@ const handlers = {
       for (const cs of overdueCase) {
         const escalate = !!policy.escalateAfterMinutes
           && cs.createdAt < new Date(Date.now() - policy.escalateAfterMinutes * 60 * 1000);
+        let escalatedNow = false;
         if (escalate) {
-          await prisma.case.update({
-            where: { id: cs.id },
-            data: {
+          // As the Escalate button does it (services/recordWrites): the case's
+          // hook keeps its status history, noted as the SLA's, and the rules
+          // and workflows on an escalation run, as they do for one by hand.
+          // A case a rule will not let escalate is left for an agent, and the
+          // run goes on to the rest.
+          try {
+            await require('../services/recordWrites').updateRecord(prisma, 'cases', cs.id, {
               status: 'Escalated', isEscalated: true, escalatedAt: new Date(), slaBreached: true,
               escalationReason: `Open past the ${policy.priority} SLA (${policy.escalateAfterMinutes} min)`,
-            },
-          });
-          await prisma.caseStatusHistory.create({
-            data: { caseId: cs.id, fromStatus: cs.status, toStatus: 'Escalated', note: 'Escalated by SLA policy' },
-          }).catch(() => {});
-          await require('../services/webhooks').fireWebhookEvent(prisma, 'case.escalated', { id: cs.id, caseNumber: cs.caseNumber, by: 'sla' });
-          escalated++;
+            }, { source: 'Escalated by SLA policy' });
+            await require('../services/webhooks').fireWebhookEvent(prisma, 'case.escalated', { id: cs.id, caseNumber: cs.caseNumber, by: 'sla' });
+            escalated++;
+            escalatedNow = true;
+          } catch (err) {
+            log.warn({ caseId: cs.id, err: err.message }, 'SLA escalation refused');
+          }
         }
         if (cs.slaBreached) continue;
-        if (!escalate) await prisma.case.update({ where: { id: cs.id }, data: { slaBreached: true } });
+        // Marked breached so it is warned about once: the escalation sets it.
+        if (!escalatedNow) await prisma.case.update({ where: { id: cs.id }, data: { slaBreached: true } });
         // ownerId is a plain column, so a stale one must not fail the run.
         const recipient = cs.assignedId || cs.ownerId;
         const sent = recipient && await notify(prisma, 'caseAlerts', {

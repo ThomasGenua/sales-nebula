@@ -28,8 +28,9 @@ const crudModuleFor = modelName => {
  * The module's hooks are its rules for every write, wherever it comes from:
  * they are handed to services/recordWrites, which the routes below and every
  * other path that writes these records go through. Each takes the data or
- * record and a context of { prisma, userId, req, oldRecord, emit }; `req` is
- * null for a write that did not come from a request (inbound mail, a job).
+ * record and a context of { prisma, userId, req, oldRecord, emit, source };
+ * `req` is null for a write that did not come from a request (inbound mail,
+ * a job), and `source` says what made it ('import', 'escalated').
  */
 function createCrudRouter(modelName, moduleName, options = {}) {
   crudModels.set(moduleName, modelName);

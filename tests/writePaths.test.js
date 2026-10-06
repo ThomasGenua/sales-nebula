@@ -5,10 +5,95 @@
  * it. They were the CRUD router's create and edit alone, so a bulk update, an
  * import, a lead conversion or a case opened by email skipped every one.
  */
+const fs = require('fs');
+const path = require('path');
 const request = require('supertest');
 const {
   setup, teardown, cleanDatabase, createTestRole, createTestUser, createTestAccount, authHeader,
 } = require('./setup');
+
+// ─── NO NEW WAY ROUND ───
+
+// The models whose writes go through services/recordWrites: the CRUD modules,
+// and quotes, invoices, projects and prospects.
+const MODELS = [
+  'account', 'activity', 'asset', 'campaign', 'case', 'contact', 'contract', 'deal', 'document', 'entitlement',
+  'workOrder', 'lead', 'order', 'partner', 'personAccount', 'product', 'subscription', 'quote', 'invoice', 'project', 'prospect',
+];
+const WRITE = '(?:create|createMany|update|updateMany|upsert|delete|deleteMany)';
+const DIRECT = [
+  // prisma.case.update(...), tx.lead.updateMany(...)
+  { kind: 'named', pattern: new RegExp(`\\b\\w+\\.(?:${MODELS.join('|')})\\.${WRITE}\\(`, 'g') },
+  // prisma[model].update(...): any model, so each one is listed below
+  { kind: 'dynamic', pattern: new RegExp(`\\b\\w+\\[[^\\]]+\\]\\.${WRITE}\\(`, 'g') },
+  // Every numbered model is one of these; recordWrites numbers them.
+  { kind: 'numbered', pattern: /(?<!function )\bcreateNumbered\(/g },
+];
+
+/**
+ * The direct writes that are meant to stay, per file and kind, each with why.
+ * Anything else writes one of these modules' records past their rules.
+ */
+const ALLOWED = {
+  'src/services/workflowEngine.js': { named: 1, dynamic: 1, why: "a rule's own actions (updateField, createActivity): through the write path they would run the rules again, and could loop" },
+  'src/services/approvals.js': { dynamic: 1, why: "an approval process's final field update, the automation's own write, as a rule's is" },
+  'src/services/dataErasure.js': { dynamic: 1, why: 'erasing a data subject: no rule, workflow or webhook may see or keep what is being erased' },
+  'src/routes/recycleBin.js': { dynamic: 4, why: 'restoring and purging the recycle bin, which puts back or removes what a delete already handled' },
+  'src/utils/numbering.js': { dynamic: 2, why: 'the numbering helper itself (one in a comment), which recordWrites calls' },
+  'src/routes/omnichannel.js': { dynamic: 1, why: 'claims work items and chat sessions, not records of these modules' },
+  'src/routes/massActions.js': { dynamic: 4, why: 'the emails a mass action reaches, which no rule reads; every other module goes through recordWrites' },
+  'src/routes/duplicates.js': { dynamic: 1, why: "a merge moving the duplicate's children to the survivor, one updateMany per child table" },
+  'src/routes/contacts.js': { named: 7, why: "a merge moving the merged contact's children to the survivor" },
+  'src/routes/accounts.js': { named: 6, why: "a merge moving the merged account's children to the survivor" },
+  'src/routes/personAccounts.js': { named: 1, why: "a merge freeing the merged record's unique email for the survivor before it is deleted through recordWrites" },
+  'src/routes/leads.js': { named: 1, why: "a conversion's claim on the lead, which stops a second one; the lead's change goes through recordWrites" },
+  'src/jobs/scheduler.js': { named: 1, why: 'the SLA job marking a breach as warned, so it warns once' },
+  'src/services/inboundIngest.js': { named: 1, why: "a customer reply's email count and last-message stamp" },
+  'src/routes/emailToCase.js': { named: 1, why: "a customer reply's email count and last-message stamp" },
+  'src/routes/documents.js': { named: 1, why: "a download's counter" },
+  'src/routes/projects.js': { named: 1, why: "a project's progress, hours, cost and health, rolled up from its tasks" },
+  'src/routes/sla.js': { named: 1, why: 'the SLA due date and status, recomputed from the policy' },
+  'src/routes/prospects.js': { named: 2, why: 'the opt-out set on every prospect with a suppressed address, and the bulk rescore after a scoring change' },
+  'src/routes/admin.js': { named: 2, why: "the bulk lead rescore, and the old default currency stamped on deals that had none" },
+  'src/routes/ai.js': { named: 1, why: 'the bulk lead rescore' },
+};
+
+function sourceFiles(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'generated' ? [] : sourceFiles(full);
+    return entry.name.endsWith('.js') ? [full] : [];
+  });
+}
+
+test("no route writes these modules' records past their rules, beyond the writes listed with a reason", () => {
+  const root = path.join(__dirname, '..');
+  const found = {};
+  for (const file of sourceFiles(path.join(root, 'src'))) {
+    const name = path.relative(root, file).split(path.sep).join('/');
+    if (name === 'src/services/recordWrites.js') continue;
+    const text = fs.readFileSync(file, 'utf8');
+    for (const { kind, pattern } of DIRECT) {
+      const lines = [...text.matchAll(pattern)].map(m => text.slice(0, m.index).split('\n').length);
+      if (lines.length) (found[name] = found[name] || {})[kind] = lines;
+    }
+  }
+
+  const problems = [];
+  for (const name of new Set([...Object.keys(found), ...Object.keys(ALLOWED)])) {
+    for (const kind of ['named', 'dynamic', 'numbered']) {
+      const lines = found[name]?.[kind] || [];
+      const allowed = ALLOWED[name]?.[kind] || 0;
+      if (lines.length !== allowed) problems.push(`${name}: ${lines.length} ${kind} write(s) (lines ${lines.join(', ') || 'none'}), ${allowed} allowed`);
+    }
+  }
+  // A write here skips the module's validation, duplicate and assignment
+  // rules, its hooks, workflows and webhooks: make it with createRecord,
+  // updateRecord or deleteRecord, or, if it is bookkeeping no rule should
+  // see, list it in ALLOWED with the reason. A count that went down means
+  // one was moved over: lower it.
+  expect(problems).toEqual([]);
+});
 
 let app, prisma, role, admin;
 
