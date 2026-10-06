@@ -213,6 +213,9 @@ const via = source => (source ? ` (${source})` : '');
  */
 async function createRecord(db, moduleName, input, ctx = {}) {
   const { modelName, hooks } = moduleDefinition(moduleName);
+  // Numbering retries a clash, which Postgres does not allow inside a
+  // transaction (utils/numbering): make a numbered record outside one.
+  if (hooks.numbering && Array.isArray(ctx.after)) throw new Error(`A ${moduleName} record is numbered, so it cannot be made inside a transaction`);
   let data = { ...input };
 
   if (hooks.validate) {
