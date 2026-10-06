@@ -2234,9 +2234,12 @@ function AuthorizedAppsPanel({ className, style, setToast }) {
 }
 
 function AdminDashboardPage() {
-  const { data: sys, loading } = useApi("/admin/dashboard/system");
+  const { data: sys, loading, error } = useApi("/admin/dashboard/system");
   const { data: actData } = useApi("/admin/dashboard/activity");
   if (loading) return <Spinner />;
+  // Without access (it takes admin and users read) it showed "Degraded" over a
+  // page of zeros, as if the system were failing.
+  if (error) return <ErrorState message={error} />;
   const d = sys || {}; const p = d.platform || {}; const r = d.records || {}; const sec = d.security || {};
   const rev = d.revenue || {}; const auto = d.automation || {}; const health = d.health || {};
   const act = actData || {};
@@ -5575,14 +5578,14 @@ const NAV_ITEMS = [
           { id: "webhooks", label: "Webhooks", icon: Webhook },
           { id: "studio", label: "Studio", icon: Wrench },
           { id: "securityGroups", label: "Security Groups", icon: Lock },
-          { id: "privacy", label: "Privacy", icon: Shield },
+          { id: "privacy", label: "Privacy", icon: Shield, requires: { module: "admin", level: "edit" } },
         ],
       },
     ],
   },
   { id: "accessRequests", label: "Access requests", icon: Inbox, hideInDemo: true, requires: { module: "users", level: "read" } },
   { id: "settings", label: "Settings", icon: Settings },
-  { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true },
+  { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true, requires: [{ module: "admin", level: "read" }, { module: "users", level: "read" }] },
 ];
 
 function navContainsPage(item, page) {
@@ -5591,12 +5594,23 @@ function navContainsPage(item, page) {
   return Boolean(item.children?.some((child) => navContainsPage(child, page)));
 }
 
+// An entry shows when the user's role grants every permission its page loads
+// with (`requires`: one { module, level } or a list), at any depth of the
+// tree; a group left with no entries goes too.
+function visibleNavItems(items, user, demoMode) {
+  return items.flatMap((item) => {
+    if (item.hideInDemo && demoMode) return [];
+    const needs = item.requires ? [].concat(item.requires) : [];
+    if (!needs.every((need) => can(user, need.module, need.level))) return [];
+    if (!item.children) return [item];
+    const children = visibleNavItems(item.children, user, demoMode);
+    return children.length ? [{ ...item, children }] : [];
+  });
+}
+
 function useVisibleNavItems() {
   const { demoMode, user } = useAuth();
-  return useMemo(
-    () => NAV_ITEMS.filter((item) => !(item.hideInDemo && demoMode) && (!item.requires || can(user, item.requires.module, item.requires.level))),
-    [demoMode, user],
-  );
+  return useMemo(() => visibleNavItems(NAV_ITEMS, user, demoMode), [demoMode, user]);
 }
 
 function NavLeaf({ item, page, setPage, onNavigate, depth = 0 }) {

@@ -148,7 +148,10 @@ router.delete('/:id', requirePermission('workflows', 'full'), async (req, res, n
 router.get('/logs/all', requirePermission('workflows', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const logs = await prisma.workflowLog.findMany({ orderBy: { createdAt: 'desc' }, take: 200 });
+    // Runs only: a scheduled rule also logs 'scheduled-unmatched' when a record
+    // it acted on stops matching (src/jobs/scheduler.js), which is bookkeeping
+    // that lets it act again, not a run.
+    const logs = await prisma.workflowLog.findMany({ where: { trigger: { not: 'scheduled-unmatched' } }, orderBy: { createdAt: 'desc' }, take: 200 });
     res.json({ data: logs });
   } catch (err) { next(err); }
 });

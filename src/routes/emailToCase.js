@@ -29,12 +29,25 @@ function requireInboundSecret(req, res, next) {
   return res.status(401).json({ error: 'Invalid webhook secret' });
 }
 
+/**
+ * The sender's address, lowercased: providers send `from` as an address, as
+ * "Name <address>", or as { address } / { email }. The request sanitizer has
+ * already turned "<address>" into "&lt;address&gt;" by the time it gets here.
+ */
+function senderAddress(from) {
+  const raw = typeof from === 'object' && from ? (from.address || from.email) : from;
+  const text = String(raw || '').trim().replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+  const bracketed = /<([^<>\s]+@[^<>\s]+)>/.exec(text);
+  return (bracketed ? bracketed[1] : text).toLowerCase();
+}
+
 // Receive inbound email (webhook endpoint)
 router.post('/inbound', requireInboundSecret, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { from, to, subject, body, htmlBody, threadId, messageId, attachments, headers } = req.body;
     if (!from || !subject) return res.status(400).json({ error: 'from and subject required' });
+    const emailAddr = senderAddress(from);
 
     // Load config for defaults. Switching the feature, or threading, off in
     // it changed nothing: neither setting was read.
@@ -52,7 +65,18 @@ router.post('/inbound', requireInboundSecret, async (req, res, next) => {
       const caseRefMatch = subject.match(/\[Case#\s*([\w-]+)\]/i);
       if (caseRefMatch) {
         const ref = caseRefMatch[1];
-        existingCase = await prisma.case.findFirst({ where: { caseNumber: { in: [ref, `${CASE_NUMBER.prefix}${ref}`] }, deletedAt: null } });
+        const byRef = await prisma.case.findFirst({
+          where: { caseNumber: { in: [ref, `${CASE_NUMBER.prefix}${ref}`] }, deletedAt: null },
+          include: { contact: { select: { email: true } } },
+        });
+        // Case numbers run in sequence, so a tag proves nothing about who sent
+        // it: anyone who emailed the support address with "[Case# CS-001]" in
+        // the subject posted a public comment into that customer's case. Only
+        // the case's own contact threads by tag, as the mailbox pipeline
+        // already requires (services/inboundIngest.js); anyone else's mail
+        // opens a case of its own.
+        const own = [byRef?.contactEmail, byRef?.contact?.email].filter(Boolean).map(senderAddress);
+        if (byRef && emailAddr && own.includes(emailAddr)) existingCase = byRef;
       }
     }
     if (threading && !existingCase && messageId) {
@@ -61,7 +85,6 @@ router.post('/inbound', requireInboundSecret, async (req, res, next) => {
 
     // Find contact by email: a live one, and only with an address to match
     // (with none, the filter matched any contact).
-    const emailAddr = typeof from === 'object' ? from.address : from;
     const contact = emailAddr ? await prisma.contact.findFirst({ where: { email: { equals: emailAddr, mode: 'insensitive' }, deletedAt: null } }) : null;
 
     if (existingCase) {

@@ -195,6 +195,116 @@ describe('Scheduled rules', () => {
     expect(logs[0].success).toBe(false);
     expect(logs[0].error).toMatch(/unknown module/i);
   });
+
+  // The job runs every 15 minutes. A rule acted on every matching record on
+  // every run, so a rule that creates a task, notifies or emails did it 96
+  // times a day for each record, for as long as the record matched.
+  it('acts on a matching record once, not on every run', async () => {
+    const account = await createTestAccount();
+    const deal = await prisma.deal.create({ data: { name: 'Stale', value: 10, stage: 'Prospecting', accountId: account.id } });
+    await makeWorkflow({
+      trigger: 'scheduled',
+      conditions: [{ field: 'stage', operator: 'equals', value: 'Prospecting' }],
+      actions: [{ type: 'createActivity', config: { subject: 'Chase this deal' } }],
+    });
+
+    const first = await handlers.runScheduledWorkflows();
+    const second = await handlers.runScheduledWorkflows();
+    const third = await handlers.runScheduledWorkflows();
+
+    expect([first.matched, second.matched, third.matched]).toEqual([1, 0, 0]);
+    expect(third.alreadyActed).toBe(1);
+    expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(1);
+  });
+
+  it('acts again after the record stops matching and matches again, and not for another rule\'s update', async () => {
+    const account = await createTestAccount();
+    const deal = await prisma.deal.create({ data: { name: 'Stale', value: 10, stage: 'Prospecting', accountId: account.id } });
+    const chase = await makeWorkflow({
+      name: 'Chase',
+      trigger: 'scheduled',
+      conditions: [{ field: 'stage', operator: 'equals', value: 'Prospecting' }],
+      actions: [{ type: 'createActivity', config: { subject: 'Chase this deal' } }],
+    });
+    // A second rule whose own action changes the record, which still matches:
+    // neither rule takes that change as a reason to act again.
+    const tag = await makeWorkflow({
+      name: 'Tag',
+      trigger: 'scheduled',
+      conditions: [{ field: 'stage', operator: 'equals', value: 'Prospecting' }],
+      actions: [{ type: 'updateField', config: { field: 'description', value: 'Needs a nudge' } }],
+    });
+    const acted = id => prisma.workflowLog.count({ where: { workflowId: id, trigger: 'scheduled' } });
+
+    await handlers.runScheduledWorkflows();
+    await handlers.runScheduledWorkflows();
+    expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(1);
+    expect([await acted(chase.id), await acted(tag.id)]).toEqual([1, 1]);
+
+    // An edit that leaves it matching is not a new occasion either.
+    await prisma.deal.update({ where: { id: deal.id }, data: { value: 20 } });
+    await handlers.runScheduledWorkflows();
+    expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(1);
+
+    // It leaves Prospecting, then comes back: both rules act once more.
+    await prisma.deal.update({ where: { id: deal.id }, data: { stage: 'Qualification' } });
+    await handlers.runScheduledWorkflows();
+    expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(1);
+    await prisma.deal.update({ where: { id: deal.id }, data: { stage: 'Prospecting' } });
+    await handlers.runScheduledWorkflows();
+    await handlers.runScheduledWorkflows();
+    expect(await prisma.activity.count({ where: { dealId: deal.id } })).toBe(2);
+    expect([await acted(chase.id), await acted(tag.id)]).toEqual([2, 2]);
+
+    // The log of runs lists the four runs, not the marks made when it left.
+    expect(await prisma.workflowLog.count({ where: { trigger: 'scheduled-unmatched' } })).toBe(2);
+    const listed = await request(app).get('/api/workflows/logs/all').set(authHeader(user.token));
+    expect(listed.status).toBe(200);
+    expect(listed.body.data.map(l => l.trigger)).toEqual(['scheduled', 'scheduled', 'scheduled', 'scheduled']);
+  });
+
+  it('reaches every matching record, at most 500 a run, not only the first 500 rows', async () => {
+    const account = await createTestAccount();
+    await prisma.deal.createMany({
+      data: Array.from({ length: 600 }, (_, i) => ({ name: `Deal ${i}`, value: i, stage: 'Prospecting', accountId: account.id })),
+    });
+    // No owner to notify, so the action does nothing; each run logs what it acted on.
+    const wf = await makeWorkflow({
+      trigger: 'scheduled',
+      conditions: [{ field: 'stage', operator: 'equals', value: 'Prospecting' }],
+      actions: [{ type: 'createNotification', config: {} }],
+    });
+
+    const runs = [];
+    for (let i = 0; i < 3; i++) runs.push(await handlers.runScheduledWorkflows());
+    expect(runs.map(r => r.matched)).toEqual([500, 100, 0]);
+    expect(runs[2].alreadyActed).toBe(600);
+
+    const logs = await prisma.workflowLog.findMany({ where: { workflowId: wf.id }, select: { recordId: true } });
+    expect(new Set(logs.map(l => l.recordId)).size).toBe(600);
+    expect(logs).toHaveLength(600);
+  }, 60000);
+
+  it('logs a record whose action fails, goes on to the next, and does not retry it while it matches', async () => {
+    const account = await createTestAccount();
+    await prisma.deal.create({ data: { name: 'One', value: 1, stage: 'Prospecting', accountId: account.id } });
+    await prisma.deal.create({ data: { name: 'Two', value: 2, stage: 'Prospecting', accountId: account.id } });
+    // updateField may not hand a record to someone: this action always throws.
+    const wf = await makeWorkflow({
+      trigger: 'scheduled',
+      conditions: [{ field: 'stage', operator: 'equals', value: 'Prospecting' }],
+      actions: [{ type: 'updateField', config: { field: 'ownerId', value: 'someone' } }],
+    });
+
+    const first = await handlers.runScheduledWorkflows();
+    expect(first).toMatchObject({ matched: 2, actionErrors: 2, failed: 0 });
+    const logs = await prisma.workflowLog.findMany({ where: { workflowId: wf.id } });
+    expect(logs.map(l => [l.success, /not a field an automated update may set/.test(l.error)])).toEqual([[false, true], [false, true]]);
+
+    const second = await handlers.runScheduledWorkflows();
+    expect(second).toMatchObject({ matched: 0, actionErrors: 0, alreadyActed: 2 });
+    expect(await prisma.workflowLog.count({ where: { workflowId: wf.id } })).toBe(2);
+  });
 });
 
 describe('POST /api/workflows/execute', () => {

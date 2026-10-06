@@ -6,7 +6,11 @@ const { auditMiddleware } = require('../middleware/audit');
 const { currencyContext, sumInBase } = require('../utils/currency');
 const { modelHasField } = require('../utils/modelFields');
 const router = Router();
-router.use(authenticate, requirePermission('admin', 'read'));
+// Organisation-wide figures: record counts and the pipeline and revenue totals
+// of every deal, whoever owns it, so past record sharing. Admin read alone is
+// every Sales Rep's (the seeded role has it), which showed a rep the totals of
+// deals they cannot open; users read, which reps do not have, goes with it.
+router.use(authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'));
 
 /** Routes the app answers, one per method and path, counted from its router. */
 function countRoutes(stack = []) {
@@ -148,9 +152,9 @@ router.get('/system', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Recent activity feed for admins. Who signed in and what everyone changed:
-// admin read is every Sales Rep's, so this takes users read as well.
-router.get('/activity', requirePermission('users', 'read'), async (req, res, next) => {
+// Recent activity feed for admins: who signed in and what everyone changed
+// (users read, with admin read, as the whole router takes).
+router.get('/activity', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const since = new Date(Date.now() - 7 * 86400000);

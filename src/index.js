@@ -63,6 +63,19 @@ async function start() {
     logger.info(`  Metrics:   http://localhost:${PORT}/metrics`);
     logger.info(`  WebSocket: ws://localhost:${PORT}`);
   });
+
+  // A production install made before the bootstrap replaced the demo seed has
+  // demo accounts whose password is in the README. Checked after listening, so
+  // it does not hold up start-up.
+  if (process.env.NODE_ENV === 'production') {
+    const { openDemoAccounts } = require('./services/demoAccounts');
+    openDemoAccounts(prisma).then(open => {
+      if (open.length) {
+        logger.warn(`Demo account${open.length > 1 ? 's' : ''} ${open.join(', ')} still sign${open.length > 1 ? '' : 's'} in with the password printed in the README. `
+          + 'Anyone can use them: change their passwords or deactivate them.');
+      }
+    }).catch(err => logger.warn({ error: err.message }, 'Could not check for demo accounts'));
+  }
 }
 
 start().catch(err => {
