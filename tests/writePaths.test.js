@@ -367,3 +367,49 @@ describe("The modules' own actions", () => {
     expect(await firedFor(onCreate)).toEqual([followUp.id]);
   });
 });
+
+describe('Quotes, invoices, projects and prospects, which have routers of their own', () => {
+  test("a quote is checked by the rules Studio sets on quotes, and runs quotes' workflows when made", async () => {
+    await prisma.validationRule.create({
+      data: { name: 'Quotes need an expiry', module: 'quotes', active: true, errorMessage: 'Give the quote an expiry date', condition: { field: 'validUntil', operator: 'isEmpty' } },
+    });
+    const onCreate = await ruleOn('quotes', 'create');
+
+    const refused = await post('/api/quotes', { name: 'No expiry' });
+    const made = await post('/api/quotes', { name: 'With expiry', validUntil: '2026-12-31' });
+
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe('Give the quote an expiry date');
+    expect(made.status).toBe(201);
+    expect(made.body.number).toMatch(/^QT-\d+$/);
+    expect(await firedFor(onCreate)).toEqual([made.body.id]);
+  });
+
+  test('paying an invoice runs the status rules on invoices', async () => {
+    const invoice = (await post('/api/invoices', { status: 'Sent' })).body;
+    const onPaid = await ruleOn('invoices', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Paid' }]);
+
+    const res = await post(`/api/invoices/${invoice.id}/pay`, {});
+
+    expect(res.status).toBe(200);
+    expect(await firedFor(onPaid)).toEqual([invoice.id]);
+  });
+
+  test('a project and a prospect are checked by their rules, and a deleted prospect goes to the recycle bin', async () => {
+    await prisma.validationRule.create({
+      data: { name: 'Projects need a budget', module: 'projects', active: true, errorMessage: 'Set a budget', condition: { field: 'budget', operator: 'isEmpty' } },
+    });
+    const onProspect = await ruleOn('prospects', 'create');
+
+    const project = await post('/api/projects', { name: 'Unfunded' });
+    const prospect = await post('/api/prospects', { firstName: 'Pat', lastName: 'Prospect', email: 'pat@prospect.test' });
+    const removed = await request(app).delete(`/api/prospects/${prospect.body.id}`).set(authHeader(admin.token));
+
+    expect(project.status).toBe(400);
+    expect(project.body.error).toBe('Set a budget');
+    expect(prospect.status).toBe(201);
+    expect(await firedFor(onProspect)).toEqual([prospect.body.id]);
+    expect(removed.status).toBe(200);
+    expect(await prisma.recycleBinItem.count({ where: { module: 'prospects', recordId: prospect.body.id } })).toBe(1);
+  });
+});

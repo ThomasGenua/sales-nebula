@@ -5,9 +5,12 @@ const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = re
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { currencyContext } = require('../utils/currency');
-const { createNumbered, QUOTE_NUMBER, INVOICE_NUMBER } = require('../utils/numbering');
+const { QUOTE_NUMBER } = require('../utils/numbering');
 const { fireWebhookEvent } = require('../services/webhooks');
 const { acquireLease, releaseLease } = require('../utils/lease');
+const {
+  defineModule, createRecord, updateRecord, deleteRecord, runAfter,
+} = require('../services/recordWrites');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -48,6 +51,17 @@ function quoteAmounts(data, lines, current = {}) {
   }
   return out;
 }
+
+// A quote's rules for every write, wherever it comes from
+// (services/recordWrites): its number, and its twin columns kept equal. Quotes
+// have their own router, which wrote them directly, so the validation rules
+// Studio lets an admin set on quotes, and any workflow or webhook on them, saw
+// nothing.
+defineModule('quotes', 'quote', {
+  numbering: QUOTE_NUMBER,
+  beforeCreate: data => quoteAmounts(data, null),
+  beforeUpdate: (data, { oldRecord }) => quoteAmounts(data, null, oldRecord),
+});
 
 /**
  * Why these lines may not be saved, or null: each names a live product the
@@ -116,16 +130,11 @@ router.post('/', requirePermission('quotes', 'edit'), async (req, res, next) => 
     const lines = Array.isArray(items) ? items.map(i => lineItemFields(i)) : [];
     const badLine = await lineProblem(req, lines);
     if (badLine) return res.status(400).json({ error: badLine, code: 'LINK_NOT_VISIBLE' });
-    const quote = await createNumbered(prisma, 'quote', QUOTE_NUMBER, {
-      data: {
-        ...quoteAmounts(data, Array.isArray(items) ? lines : null),
-        items: { create: lines },
-      },
-      include,
+    // Its number, rules, audit trail, workflows and quotes.created webhook,
+    // as a CRUD create has them.
+    const { record: quote } = await createRecord(prisma, 'quotes', quoteAmounts(data, Array.isArray(items) ? lines : null), {
+      req, userId: req.userId, include, nested: { items: { create: lines } },
     });
-    await req.audit({ action: 'create', module: 'quotes', recordId: quote.id, details: `Created ${quote.number}` });
-    // As a CRUD create fires it; quotes have their own router, so quote.created never fired.
-    await fireWebhookEvent(prisma, 'quotes.created', { id: quote.id, module: 'quotes', number: quote.number });
     res.status(201).json(quote);
   } catch (err) { next(err); }
 });
@@ -151,16 +160,16 @@ router.put('/:id', requirePermission('quotes', 'edit'), async (req, res, next) =
     const badLine = lines && await lineProblem(req, lines, new Set(stored.map(i => i.productId)));
     if (badLine) return res.status(400).json({ error: badLine, code: 'LINK_NOT_VISIBLE' });
 
-    // Replace the items and update the quote together.
-    const writes = [];
-    if (lines) writes.push(prisma.quoteItem.deleteMany({ where: { quoteId: req.params.id } }));
-    writes.push(prisma.quote.update({
-      where: { id: req.params.id },
-      data: { ...quoteAmounts(data, lines, current), ...(lines && { items: { create: lines } }) },
-      include,
-    }));
-    const quote = (await prisma.$transaction(writes)).pop();
-    await req.audit({ action: 'update', module: 'quotes', recordId: quote.id });
+    // Replace the items and update the quote together, the quote as an edit
+    // (services/recordWrites), its workflows and webhooks once both are in.
+    const after = [];
+    const quote = await prisma.$transaction(async tx => {
+      if (lines) await tx.quoteItem.deleteMany({ where: { quoteId: req.params.id } });
+      return (await updateRecord(tx, 'quotes', current, quoteAmounts(data, lines, current), {
+        req, userId: req.userId, include, after, prisma, ...(lines && { nested: { items: { create: lines } } }),
+      })).record;
+    });
+    await runAfter(after);
     res.json(quote);
   } catch (err) { next(err); }
 });
@@ -169,8 +178,7 @@ router.put('/:id', requirePermission('quotes', 'edit'), async (req, res, next) =
 router.post('/:id/accept', requirePermission('quotes', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const quote = await prisma.quote.update({ where: { id: req.params.id }, data: { status: 'Accepted' }, include });
-    await req.audit({ action: 'update', module: 'quotes', recordId: quote.id, details: 'Quote accepted' });
+    const { record: quote } = await updateRecord(prisma, 'quotes', req.params.id, { status: 'Accepted' }, { req, userId: req.userId, source: 'accepted', include });
     await fireWebhookEvent(prisma, 'quote.accepted', { id: quote.id, number: quote.number, total: quote.total });
     res.json(quote);
   } catch (err) { next(err); }
@@ -202,26 +210,28 @@ router.post('/:id/create-invoice', requirePermission('invoices', 'edit'), async 
       // so a quote with lines never became an invoice. A line's total already
       // has its discount off, and the quote's discount comes off the subtotal.
       // The invoice's amounts are the quote's; they were left at 0.
-      const invoice = await createNumbered(prisma, 'invoice', INVOICE_NUMBER, {
-        data: {
-          quoteId: quote.id,
-          accountId: quote.accountId,
-          contactId: quote.contactId,
-          subtotal: quote.total - quote.tax,
-          tax: quote.tax,
-          total: quote.total,
-          totalAmount: quote.total,
-          notes: quote.notes,
-          terms: quote.terms,
+      // Made as an invoice is (services/recordWrites): number, rules,
+      // workflows and webhooks, with the quote's lines.
+      const { record: invoice } = await createRecord(prisma, 'invoices', {
+        quoteId: quote.id,
+        accountId: quote.accountId,
+        contactId: quote.contactId,
+        subtotal: quote.total - quote.tax,
+        tax: quote.tax,
+        total: quote.total,
+        totalAmount: quote.total,
+        notes: quote.notes,
+        terms: quote.terms,
+      }, {
+        userId: req.userId, source: `from ${quote.number}`, emit: req.app.locals.emit, include: { items: true },
+        nested: {
           items: {
             create: quote.items.map(i => ({
               productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, total: i.total,
             })),
           },
         },
-        include: { items: true },
       });
-      await req.audit({ action: 'create', module: 'invoices', recordId: invoice.id, details: `Created from ${quote.number}` });
       res.status(201).json(invoice);
     } finally {
       await releaseLease(prisma, leaseName, leaseToken);
@@ -236,13 +246,8 @@ router.delete('/:id', requirePermission('quotes', 'full'), async (req, res, next
     // A soft delete into the recycle bin, as the CRUD modules delete. The row
     // was removed outright: the bin, which lists quotes, never got one to
     // restore, and the quote's invoices lost their link to it.
-    const quote = await prisma.quote.findFirst({ where: { id: req.params.id, deletedAt: null } });
-    if (!quote) return res.status(404).json({ error: 'Not found' });
-    await prisma.quote.update({ where: { id: quote.id }, data: { deletedAt: new Date() } });
-    await prisma.recycleBinItem.create({
-      data: { module: 'quotes', recordId: quote.id, recordData: quote, deletedById: req.userId, expiresAt: new Date(Date.now() + 30 * 86400000) },
-    }).catch(() => { /* Recycle bin is best-effort */ });
-    await req.audit({ action: 'delete', module: 'quotes', recordId: quote.id, details: `Deleted ${quote.number}` });
+    // And its delete webhook, as a CRUD delete has (services/recordWrites).
+    await deleteRecord(prisma, 'quotes', req.params.id, { req, userId: req.userId });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

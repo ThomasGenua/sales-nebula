@@ -25,9 +25,10 @@
  *           record is looked up once (an import's accounts)
  *   source  what made the write ('import', 'web-to-lead'), for the audit trail
  *   include what the written record comes back with
- *   nested  rows made with the record that the caller built itself, from
- *           checked fields (an order's lines, copied from its quote); for
- *           one made from a request, the module's nestedWrites builds them
+ *   nested  rows written with the record that the caller built itself, from
+ *           checked fields (an order's lines, copied from its quote; a
+ *           quote's replaced lines); for a create from a request, the
+ *           module's nestedWrites builds them
  *   hydrate (record) => ..., run on the record before the automation sees it
  *   emit    real-time senders; the request's, or else the WebSocket's
  *   after   inside a transaction: a list the automation is added to rather
@@ -328,7 +329,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     if (problem) throw new RecordWriteError(400, { error: problem, code: 'LINK_NOT_VISIBLE' });
   }
 
-  const record = await db[modelName].update({ where: { id: oldRecord.id }, data: updateData, include: ctx.include });
+  const record = await db[modelName].update({ where: { id: oldRecord.id }, data: { ...updateData, ...(ctx.nested || {}) }, include: ctx.include });
   if (hooks.afterUpdate) await hooks.afterUpdate(record, hookContext(db, ctx, oldRecord));
   if (ctx.hydrate) await ctx.hydrate(record);
 
