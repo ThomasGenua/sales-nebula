@@ -197,8 +197,12 @@ describe('POST /api/contacts/bulk-delete', () => {
     expect(res.status).toBe(200);
     expect(res.body.deleted).toBe(2);
 
-    const remaining = await prisma.contact.count();
+    // As a single delete is: soft, and in the recycle bin. A bulk delete was
+    // a deleteMany, permanent, with nothing to restore.
+    const remaining = await prisma.contact.count({ where: { deletedAt: null } });
     expect(remaining).toBe(1);
+    const binned = await prisma.recycleBinItem.findMany({ where: { module: 'contacts' } });
+    expect(binned.map(b => b.recordId).sort()).toEqual([c1.id, c2.id].sort());
   });
 });
 

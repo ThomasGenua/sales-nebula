@@ -30,21 +30,18 @@ const router = createCrudRouter('case', 'cases', {
   },
   numbering: CASE_NUMBER,
   beforeCreate: (data) => (DONE.includes(data.status) ? { ...data, closedAt: new Date() } : data),
-  // A status change from the edit form stamps or clears closedAt, and is
-  // recorded as escalate and resolve record theirs, for the SLA's pauses.
-  beforeUpdate: async (data, req) => {
-    if (data.status === undefined) return data;
-    const current = await req.app.locals.prisma.case.findUnique({ where: { id: req.params.id }, select: { status: true, closedAt: true } });
-    if (!current || current.status === data.status) return data;
-    req._caseStatusChange = { from: current.status, to: data.status };
-    if (DONE.includes(data.status)) return { ...data, closedAt: current.closedAt || new Date() };
+  // A status change stamps or clears closedAt, and is recorded as escalate
+  // and resolve record theirs, for the SLA's pauses: from the edit form, and
+  // from a bulk or mass update, an import or the console's macros alike.
+  beforeUpdate: async (data, { oldRecord }) => {
+    if (data.status === undefined || oldRecord.status === data.status) return data;
+    if (DONE.includes(data.status)) return { ...data, closedAt: oldRecord.closedAt || new Date() };
     return { ...data, closedAt: null };
   },
-  afterUpdate: async (record, req) => {
-    const change = req._caseStatusChange;
-    if (!change) return;
-    await req.app.locals.prisma.caseStatusHistory.create({
-      data: { caseId: record.id, fromStatus: change.from, toStatus: change.to, changedById: req.userId },
+  afterUpdate: async (record, { prisma, oldRecord, userId }) => {
+    if (oldRecord.status === record.status) return;
+    await prisma.caseStatusHistory.create({
+      data: { caseId: record.id, fromStatus: oldRecord.status, toStatus: record.status, changedById: userId },
     }).catch(() => {});
   },
   customRoutes: (router) => {

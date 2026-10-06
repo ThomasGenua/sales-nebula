@@ -34,11 +34,11 @@ module.exports = createCrudRouter('deal', 'deals', {
   orderBy: { updatedAt: 'desc' },
   // A deal's value is in its own currency; an unknown or inactive code is a
   // 400, and none at all means the default currency.
-  beforeCreate: async (data, req) => ({ ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) }),
-  afterUpdate: async (record, req) => {
-    // Track stage changes
-    const prisma = req.app.locals.prisma;
-    const oldStage = req._oldDealStage;
+  beforeCreate: async (data, { prisma }) => ({ ...data, currency: await resolveDealCurrency(prisma, data.currency) }),
+  // A stage move is kept in the deal's stage history, however it was made:
+  // the edit form, a bulk or mass update, an import.
+  afterUpdate: async (record, { prisma, oldRecord, userId, emit }) => {
+    const oldStage = oldRecord.stage;
     if (oldStage && oldStage !== record.stage) {
       // Calculate days in old stage
       const lastHistory = await prisma.dealStageHistory.findFirst({
@@ -54,24 +54,16 @@ module.exports = createCrudRouter('deal', 'deals', {
           dealId: record.id,
           fromStage: oldStage,
           toStage: record.stage,
-          changedById: req.userId,
+          changedById: userId,
           duration,
         },
       });
 
-      if (req.app.locals.emit?.dealStageChanged) {
-        req.app.locals.emit.dealStageChanged(record, oldStage, record.stage);
-      }
+      try { emit?.dealStageChanged?.(record, oldStage, record.stage); } catch (e) { /* Real-time is best-effort */ }
     }
   },
-  beforeUpdate: async (data, req) => {
-    if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(req.app.locals.prisma, data.currency) };
-    // Store old stage for afterUpdate comparison
-    if (data.stage) {
-      const prisma = req.app.locals.prisma;
-      const current = await prisma.deal.findUnique({ where: { id: req.params.id }, select: { stage: true } });
-      req._oldDealStage = current?.stage;
-    }
+  beforeUpdate: async (data, { prisma }) => {
+    if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(prisma, data.currency) };
     return data;
   },
   customRoutes: (router) => {

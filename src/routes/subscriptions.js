@@ -42,10 +42,9 @@ const router = createCrudRouter('subscription', 'subscriptions', {
     return { valid: Object.keys(errors).length === 0, errors };
   },
   beforeCreate: (data) => withTotalPrice(data),
-  beforeUpdate: async (data, req) => {
+  beforeUpdate: async (data, { oldRecord }) => {
     if (data.unitPrice === undefined && data.quantity === undefined) return data;
-    const current = await req.app.locals.prisma.subscription.findUnique({ where: { id: req.params.id }, select: { unitPrice: true, quantity: true, totalPrice: true } });
-    return current ? withTotalPrice(data, current) : data;
+    return withTotalPrice(data, oldRecord);
   },
 });
 

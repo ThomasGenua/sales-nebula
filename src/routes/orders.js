@@ -6,7 +6,7 @@ const { createNumbered, ORDER_NUMBER } = require('../utils/numbering');
 const { lineItemFields } = require('../utils/modelFields');
 
 /** The order's lines as sent, each cut down to the columns an item has. */
-const orderLines = req => (Array.isArray(req.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
+const orderLines = req => (Array.isArray(req?.body?.items) ? req.body.items.map(i => lineItemFields(i)) : []);
 
 const sameValue = (a, b) => String(a) === String(b);
 
@@ -45,7 +45,7 @@ const router = createCrudRouter('order', 'orders', {
     if (!data.accountId) errors.accountId = 'Required';
     return { valid: Object.keys(errors).length === 0, errors };
   },
-  beforeCreate: async (data, req) => {
+  beforeCreate: async (data, { req }) => {
     const lines = orderLines(req);
     if (lines.length) {
       data.subtotal = lines.reduce((sum, line) => sum + line.total, 0);
@@ -53,10 +53,9 @@ const router = createCrudRouter('order', 'orders', {
     }
     return withTotals(data);
   },
-  beforeUpdate: async (data, req) => {
+  beforeUpdate: async (data, { oldRecord }) => {
     if (data.total === undefined && data.totalAmount === undefined) return data;
-    const current = await req.app.locals.prisma.order.findUnique({ where: { id: req.params.id }, select: { total: true, totalAmount: true } });
-    return withTotals(data, current || {});
+    return withTotals(data, oldRecord);
   },
   // The items went to Prisma exactly as sent, as a bare list it rejected.
   nestedWrites: async (req, operation) => {
