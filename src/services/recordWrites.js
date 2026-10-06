@@ -50,6 +50,14 @@ class RecordWriteError extends Error {
     this.body = body;
     this.code = body.code;
   }
+
+  /**
+   * The answer for someone outside the company (a public form, the portal):
+   * the rule's message, without the rule's name or another record's id.
+   */
+  get publicBody() {
+    return { error: this.body.error, ...(this.code ? { code: this.code } : {}) };
+  }
 }
 
 /**

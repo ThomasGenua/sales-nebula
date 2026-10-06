@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { createNumbered, CASE_NUMBER } = require('../utils/numbering');
+const { CASE_NUMBER } = require('../utils/numbering');
+const { createRecord, RecordWriteError } = require('../services/recordWrites');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { columnsFrom } = require('../utils/modelFields');
 
@@ -110,20 +111,25 @@ router.post('/inbound', requireInboundSecret, async (req, res, next) => {
       const attachmentNote = attachments?.length
         ? `\n\nAttachments received but not stored: ${attachments.map(a => a.filename).filter(Boolean).join(', ')}`
         : '';
-      const newCase = await createNumbered(prisma, 'case', CASE_NUMBER, {
-        data: {
-          subject: subject.replace(/^(Re:|Fwd?:|FW:)\s*/gi, '').trim(),
-          description: (body || htmlBody || '') + attachmentNote, origin: 'Email',
-          status: config.defaultStatus || 'New', priority,
-          contactEmail: emailAddr, emailThreadId: threadId || null,
-          lastEmailMessageId: messageId || null, emailCount: 1,
-          ...(contact && { contactId: contact.id, accountId: contact.accountId }),
-        },
-      });
+      // As a case made in the app (services/recordWrites): its rules, a
+      // number, an owner from the assignment rules, then the workflows and
+      // webhooks for new cases, none of which an emailed case had. A
+      // subject that was only "Re:" is kept as something a case can have.
+      const { record: newCase } = await createRecord(prisma, 'cases', {
+        subject: subject.replace(/^(Re:|Fwd?:|FW:)\s*/gi, '').trim() || 'No Subject',
+        description: (body || htmlBody || '') + attachmentNote, origin: 'Email',
+        status: config.defaultStatus || 'New', priority,
+        contactEmail: emailAddr, emailThreadId: threadId || null,
+        lastEmailMessageId: messageId || null, emailCount: 1,
+        ...(contact && { contactId: contact.id, accountId: contact.accountId }),
+      }, { source: 'email-to-case', emit: req.app.locals.emit });
 
       res.status(201).json({ action: 'case_created', caseId: newCase.id, caseNumber: newCase.caseNumber });
     }
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err instanceof RecordWriteError) return res.status(err.status).json(err.publicBody);
+    next(err);
+  }
 });
 
 // Bulk inbound (batch processing)
@@ -137,12 +143,14 @@ router.post('/inbound/bulk', requireInboundSecret, async (req, res, next) => {
     const results = [];
     for (const email of emails.slice(0, 50)) {
       try {
-        const contact = email.from ? await prisma.contact.findFirst({ where: { email: { equals: email.from, mode: 'insensitive' }, deletedAt: null } }) : null;
-        const c = await createNumbered(prisma, 'case', CASE_NUMBER, {
-          data: { subject: email.subject || 'No Subject', description: email.body || '', origin: 'Email', status: 'New', priority: 'Medium', contactEmail: email.from, ...(contact && { contactId: contact.id }) },
-        });
+        // The sender's address, as /inbound reads it ("Name <address>" too).
+        const from = email.from ? senderAddress(email.from) : null;
+        const contact = from ? await prisma.contact.findFirst({ where: { email: { equals: from, mode: 'insensitive' }, deletedAt: null } }) : null;
+        const { record: c } = await createRecord(prisma, 'cases', {
+          subject: email.subject || 'No Subject', description: email.body || '', origin: 'Email', status: 'New', priority: 'Medium', contactEmail: from, ...(contact && { contactId: contact.id }),
+        }, { source: 'email-to-case', emit: req.app.locals.emit });
         results.push({ email: email.from, action: 'created', caseId: c.id });
-      } catch (e) { results.push({ email: email.from, action: 'error', error: e.message }); }
+      } catch (e) { results.push({ email: email.from, action: 'error', error: e instanceof RecordWriteError ? e.publicBody.error : e.message }); }
     }
     res.json({ processed: results.length, results });
   } catch (err) { next(err); }

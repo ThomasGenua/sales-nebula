@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { editableFields, scalarOrderBy } = require('../utils/modelFields');
+const { createRecord } = require('../services/recordWrites');
 
 const router = Router();
 
@@ -343,39 +344,43 @@ router.post('/:id/convert', authenticate, requirePermission('leads', 'edit'), au
     const linkProblem = await linkRefusal(req, 'contact', { accountId });
     if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
 
-    // A lead and a contact need a first name, and a lead a company; a
-    // prospect needs neither, so converting one without them was a 500.
+    // The lead or contact is made as on its own page, with its module's
+    // rules, workflows and webhooks (services/recordWrites), which a
+    // conversion skipped. A lead and a contact need a first name, and a lead
+    // a company; a prospect needs neither. Converting one without a first
+    // name was a 500, then made a lead with a blank one, which the lead's
+    // own form refuses; it now says what to add.
+    if (!prospect.firstName?.trim()) {
+      return res.status(400).json({ error: `Add the prospect's first name before converting: a ${target} needs one.` });
+    }
+    const write = { req, userId: req.userId, source: 'prospect conversion' };
     if (target === 'lead') {
-      const lead = await prisma.lead.create({
-        data: {
-          firstName: prospect.firstName || '', lastName: prospect.lastName,
-          email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
-          company: prospect.accountName || 'Unknown', title: prospect.title,
-          // `leadSource` is a Contact column; on Lead it is `source`. Lead has
-          // no industry column at all, so the prospect's is carried in the
-          // description rather than silently dropped on conversion.
-          source: prospect.source || 'Prospect', status: 'New',
-          description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
-            .filter(Boolean).join('\n') || null,
-          city: prospect.city, state: prospect.state, country: prospect.country,
-          ownerId,
-        },
-      });
+      const { record: lead } = await createRecord(prisma, 'leads', {
+        firstName: prospect.firstName, lastName: prospect.lastName,
+        email: prospect.email, phone: prospect.phoneWork || prospect.phoneMobile,
+        company: prospect.accountName || 'Unknown', title: prospect.title,
+        // `leadSource` is a Contact column; on Lead it is `source`. Lead has
+        // no industry column at all, so the prospect's is carried in the
+        // description rather than silently dropped on conversion.
+        source: prospect.source || 'Prospect', status: 'New',
+        description: [prospect.description, prospect.industry && `Industry: ${prospect.industry}`]
+          .filter(Boolean).join('\n') || null,
+        city: prospect.city, state: prospect.state, country: prospect.country,
+        ownerId,
+      }, write);
       await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedLeadId: lead.id, convertedAt: new Date(), status: 'Converted' } });
       await req.audit({ action: 'update', module: 'prospects', recordId: prospect.id, details: 'Converted to lead' });
       return res.status(201).json({ target: 'lead', record: lead });
     }
 
-    const contact = await prisma.contact.create({
-      data: {
-        firstName: prospect.firstName || '', lastName: prospect.lastName,
-        email: prospect.email, phone: prospect.phoneWork, mobile: prospect.phoneMobile,
-        title: prospect.title, department: prospect.department,
-        description: prospect.description,
-        ownerId,
-        accountId,
-      },
-    });
+    const { record: contact } = await createRecord(prisma, 'contacts', {
+      firstName: prospect.firstName, lastName: prospect.lastName,
+      email: prospect.email, phone: prospect.phoneWork, mobile: prospect.phoneMobile,
+      title: prospect.title, department: prospect.department,
+      description: prospect.description,
+      ownerId,
+      accountId,
+    }, write);
     await prisma.prospect.update({ where: { id: prospect.id }, data: { convertedContactId: contact.id, convertedAt: new Date(), status: 'Converted' } });
     await req.audit({ action: 'update', module: 'prospects', recordId: prospect.id, details: 'Converted to contact' });
     res.status(201).json({ target: 'contact', record: contact });

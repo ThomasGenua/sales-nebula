@@ -165,3 +165,117 @@ describe('Import, the bulk API, mass actions and mobile sync', () => {
     expect((await prisma.deal.findUnique({ where: { id: serverId } })).ownerId).toBe(admin.user.id);
   });
 });
+
+describe('Conversions and the channels customers write through', () => {
+  const EMAIL_SECRET = 'test-email-to-case-secret';
+  beforeAll(() => { process.env.EMAIL_TO_CASE_SECRET = EMAIL_SECRET; });
+
+  test('a lead conversion runs the create rules on what it makes, after it commits, and a rule can refuse it', async () => {
+    const lead = await prisma.lead.create({ data: { firstName: 'Ada', lastName: 'Lovelace', company: 'Engines Ltd', email: 'ada@engines.test', status: 'Qualified' } });
+    const onAccount = await ruleOn('accounts', 'create');
+    const onContact = await ruleOn('contacts', 'create');
+    const onDeal = await ruleOn('deals', 'create');
+    const onLeadMove = await ruleOn('leads', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Converted' }]);
+
+    const res = await post(`/api/leads/${lead.id}/convert`, { createAccount: true, createDeal: true, dealName: 'Engines deal', dealValue: 1000 });
+
+    expect(res.status).toBe(200);
+    expect(await firedFor(onAccount)).toEqual([res.body.account.id]);
+    expect(await firedFor(onContact)).toEqual([res.body.contact.id]);
+    expect(await firedFor(onDeal)).toEqual([res.body.deal.id]);
+    expect(await firedFor(onLeadMove)).toEqual([lead.id]);
+  });
+
+  test("a rule that refuses the new contact refuses the conversion, and nothing is kept", async () => {
+    const lead = await prisma.lead.create({ data: { firstName: 'No', lastName: 'Email', company: 'Quiet Co', status: 'Qualified' } });
+    await prisma.validationRule.create({
+      data: { name: 'Contacts need an email', module: 'contacts', active: true, errorMessage: 'A contact needs an email address', condition: { field: 'email', operator: 'isEmpty' } },
+    });
+
+    const res = await post(`/api/leads/${lead.id}/convert`, { createAccount: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('A contact needs an email address');
+    expect(await prisma.account.count()).toBe(0);
+    expect(await prisma.contact.count()).toBe(0);
+    expect((await prisma.lead.findUnique({ where: { id: lead.id } })).convertedAt).toBeNull();
+  });
+
+  test('web-to-lead takes its owner from the assignment rules and runs the create rules', async () => {
+    const ana = (await createTestUser({ email: 'ana2@paths.test', roleId: role.id })).user;
+    await prisma.assignmentRule.create({
+      data: { name: 'Acme to Ana', module: 'leads', type: 'rule_based', assignees: [ana.id], active: true, conditions: [{ field: 'company', operator: 'contains', value: 'Acme' }] },
+    });
+    const onCreate = await ruleOn('leads', 'create');
+
+    const res = await request(app).post('/api/public/web-to-lead').send({ firstName: 'Web', lastName: 'Visitor', company: 'Acme Corp', email: 'web@acme.test' });
+
+    expect(res.status).toBe(201);
+    const lead = await prisma.lead.findUnique({ where: { id: res.body.leadId } });
+    expect(lead.ownerId).toBe(ana.id);
+    expect(await firedFor(onCreate)).toEqual([lead.id]);
+  });
+
+  test("web-to-lead answers a duplicate rule with its message alone, not the other lead's id", async () => {
+    await prisma.lead.create({ data: { firstName: 'Old', lastName: 'Lead', company: 'Phone Co', email: 'old@phone.test', phone: '555-0100' } });
+    await prisma.duplicateRule.create({
+      data: { name: 'Same phone', module: 'leads', matchFields: [{ field: 'phone', weight: 100 }], threshold: 100, action: 'block', active: true },
+    });
+
+    const res = await request(app).post('/api/public/web-to-lead').send({ firstName: 'New', lastName: 'Lead', company: 'Phone Co', email: 'new@phone.test', phone: '555-0100' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'This looks like a duplicate of an existing lead.', code: 'DUPLICATE_RECORD' });
+  });
+
+  test('a case opened by email, by the web form or in the portal gets a number, an owner and the create rules', async () => {
+    const agent = (await createTestUser({ email: 'agent@paths.test', roleId: role.id })).user;
+    await prisma.assignmentRule.create({ data: { name: 'Support queue', module: 'cases', type: 'round_robin', assignees: [agent.id], active: true } });
+    const onCreate = await ruleOn('cases', 'create');
+    const contact = await prisma.contact.create({ data: { firstName: 'Cat', lastName: 'Customer', email: 'cat@customer.test' } });
+    const customer = await createTestUser({ email: 'cat@customer.test', roleId: role.id });
+    await prisma.user.update({ where: { id: customer.user.id }, data: { isPortalUser: true, contactId: contact.id } });
+
+    const emailed = await request(app).post('/api/public/email-to-case/inbound').set('X-Webhook-Secret', EMAIL_SECRET)
+      .send({ from: 'Cat <cat@customer.test>', subject: 'Printer jammed', body: 'Again.' });
+    const formed = await request(app).post('/api/public/web-to-case').send({ name: 'Cat Customer', email: 'cat@customer.test', subject: 'Scanner too' });
+    const portaled = await request(app).post('/api/portal/my/cases').set(authHeader(customer.token)).send({ subject: 'And the fax' });
+
+    expect([emailed.status, formed.status, portaled.status]).toEqual([201, 201, 201]);
+    const cases = await prisma.case.findMany();
+    expect(cases).toHaveLength(3);
+    expect(cases.every(c => /^CS-\d+$/.test(c.caseNumber) && c.ownerId === agent.id)).toBe(true);
+    expect(await firedFor(onCreate)).toEqual(cases.map(c => c.id).sort());
+  });
+
+  test("an emailed case a rule refuses gets the rule's message back, and no case", async () => {
+    await prisma.validationRule.create({
+      data: { name: 'No spam', module: 'cases', active: true, errorMessage: 'Looks like spam', condition: { field: 'subject', operator: 'contains', value: 'lottery' } },
+    });
+
+    const res = await request(app).post('/api/public/email-to-case/inbound').set('X-Webhook-Secret', EMAIL_SECRET)
+      .send({ from: 'win@lottery.test', subject: 'You won the lottery', body: '...' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'Looks like spam', code: 'VALIDATION_RULE' });
+    expect(await prisma.case.count()).toBe(0);
+  });
+
+  test("a customer's reply reopens a closed case as an edit would: closedAt cleared, history kept, rules run", async () => {
+    const { ingestMessages } = require('../src/services/inboundIngest');
+    const account = await prisma.inboundEmailAccount.create({ data: { name: 'Support', username: 'support@ourco.test', autoCreateCase: true, active: true } });
+    const closed = await prisma.case.create({
+      data: { subject: 'Broken widget', caseNumber: 'CS-0042', status: 'Closed', closedAt: new Date(), contactEmail: 'kim@customer.test' },
+    });
+    const onMove = await ruleOn('cases', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Open' }]);
+
+    const result = await ingestMessages(prisma, account, [{ from: 'kim@customer.test', subject: 'Re: Broken widget [Case# CS-0042]', text: 'Still broken', messageId: '<m1@customer.test>' }]);
+
+    expect(result.repliesLinked).toBe(1);
+    const reopened = await prisma.case.findUnique({ where: { id: closed.id } });
+    expect([reopened.status, reopened.closedAt, reopened.emailCount]).toEqual(['Open', null, 1]);
+    const history = await prisma.caseStatusHistory.findMany({ where: { caseId: closed.id } });
+    expect(history.map(h => [h.fromStatus, h.toStatus])).toEqual([['Closed', 'Open']]);
+    expect(await firedFor(onMove)).toEqual([closed.id]);
+  });
+});

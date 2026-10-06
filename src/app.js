@@ -17,7 +17,7 @@ const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
-const { RecordWriteError } = require('./services/recordWrites');
+const { RecordWriteError, createRecord } = require('./services/recordWrites');
 
 let helmet, hpp, compression;
 try { helmet = require('helmet'); } catch (e) { helmet = null; }
@@ -193,47 +193,45 @@ function createApp(rawPrisma) {
         return res.status(409).json({ error: 'A lead with this email already exists' });
       }
 
-      const lead = await prisma.lead.create({
-        data: {
-          firstName, lastName, email, phone,
-          company, source: source || 'Web Form',
-          description, status: 'New', score: 50,
-        },
-      });
-
-      // Auto-assign via round-robin if rules exist
-      try {
-        const rule = await prisma.assignmentRule.findFirst({ where: { module: 'leads', active: true, type: 'round_robin' } });
-        if (rule && rule.assignees) {
-          const assignees = typeof rule.assignees === 'string' ? JSON.parse(rule.assignees) : rule.assignees;
-          if (assignees.length > 0) {
-            const nextIndex = (rule.lastIndex + 1) % assignees.length;
-            await prisma.lead.update({ where: { id: lead.id }, data: { assignedId: assignees[nextIndex] } });
-            await prisma.assignmentRule.update({ where: { id: rule.id }, data: { lastIndex: nextIndex } });
-          }
-        }
-      } catch (e) { /* Assignment rules optional */ }
-
-      // Auto-score
+      // Scored before it is saved, from the same rules as before, so the lead
+      // is written once.
+      let score = 50;
       try {
         const scoringRules = await prisma.leadScoringRule.findMany({ where: { active: true } });
-        if (scoringRules.length > 0) {
-          let score = 50;
-          for (const r of scoringRules) {
-            const val = String(lead[r.field] || '').toLowerCase();
-            const target = r.value.toLowerCase();
-            let match = false;
-            switch (r.operator) {
-              case 'equals': match = val === target; break;
-              case 'contains': match = val.includes(target); break;
-              case 'startsWith': match = val.startsWith(target); break;
-            }
-            if (match) score += r.points;
+        const submitted = { firstName, lastName, email, phone, company, source: source || 'Web Form', description };
+        for (const r of scoringRules) {
+          const val = String(submitted[r.field] || '').toLowerCase();
+          const target = r.value.toLowerCase();
+          let match = false;
+          switch (r.operator) {
+            case 'equals': match = val === target; break;
+            case 'contains': match = val.includes(target); break;
+            case 'startsWith': match = val.startsWith(target); break;
           }
-          score = Math.max(0, Math.min(100, score));
-          await prisma.lead.update({ where: { id: lead.id }, data: { score } });
+          if (match) score += r.points;
         }
+        score = Math.max(0, Math.min(100, score));
       } catch (e) { /* Scoring optional */ }
+
+      // As a lead made in the app is (services/recordWrites): validation and
+      // duplicate rules, an owner from the assignment rules, then the
+      // workflows and webhooks for new leads, none of which ran for the form
+      // that brings most of them in. It had its own round-robin, which read
+      // only the first such rule, ignored rule-based ones and could hand two
+      // leads to the same person at once.
+      let lead;
+      try {
+        ({ record: lead } = await createRecord(prisma, 'leads', {
+          firstName, lastName, email, phone,
+          company, source: source || 'Web Form',
+          description, status: 'New', score,
+        }, { source: 'web-to-lead', emit: app.locals.emit }));
+      } catch (err) {
+        // The rule's message only: a duplicate's id, or a rule's name, is no
+        // business of an anonymous caller.
+        if (err instanceof RecordWriteError) return res.status(err.status).json(err.publicBody);
+        throw err;
+      }
 
       res.status(201).json({ success: true, leadId: lead.id });
     } catch (err) { next(err); }
