@@ -140,7 +140,7 @@ module.exports = createCrudRouter('activity', 'activities', {
         // As an edit (services/recordWrites): the activity's rules, audit
         // trail, and the workflows on its status, which completing one never
         // reached; the follow-up is made as a new activity is.
-        if (req.body.followUp && (!req.body.followUp.date || Number.isNaN(new Date(req.body.followUp.date).getTime()))) return res.status(400).json({ error: 'A valid follow-up date is required' });
+        if (req.body.followUp?.date !== undefined && (!req.body.followUp.date || Number.isNaN(new Date(req.body.followUp.date).getTime()))) return res.status(400).json({ error: 'A valid follow-up date is required' });
         const after = [];
         const activity = await prisma.$transaction(async tx => {
           const write = { req, userId: req.userId, source: 'completed', after, prisma };

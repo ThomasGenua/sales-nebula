@@ -55,7 +55,7 @@ async function advance(prisma, enrollment, steps, tally) {
   } else {
     await prisma.emailSequenceEnrollment.update({
       where: { id: enrollment.id },
-    data: { currentStep: next, nextSendAt: new Date(Date.now() + (steps[next].delayDays ?? 1) * 86400000) },
+      data: { currentStep: next, nextSendAt: new Date(Date.now() + (steps[next].delayDays ?? 1) * 86400000) },
     });
   }
 }
