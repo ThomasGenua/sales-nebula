@@ -7,6 +7,7 @@ const { complete, aiModel, isConfigured } = require('../services/claude');
 const { limiters } = require('../middleware/rateLimit');
 const { currencyContext } = require('../utils/currency');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate);
 
@@ -129,38 +130,23 @@ router.get('/predictions/history', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Batch lead scoring
-// Wrote a score to up to 100 leads anywhere in the org for anyone signed in;
-// now leads edit, and only leads the caller may change.
-router.post('/leads/batch-score', authenticate, requirePermission('leads', 'edit'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { leadIds } = req.body;
-    const where = await reachableWhere(req, 'leads', 'lead', leadIds?.length ? { id: { in: leadIds } } : { score: null }, 'Edit');
-    const leads = await prisma.lead.findMany({ where, take: 100 });
-    const results = [];
-    for (const lead of leads) {
-      let score = 50;
-      if (lead.email?.includes('.com')) score += 10;
-      if (lead.company) score += 15;
-      if (lead.phone) score += 10;
-      if (lead.title?.match(/CEO|CTO|VP|Director|Head/i)) score += 20;
-      if (lead.source === 'Referral') score += 15;
-      score = Math.min(score, 100);
-      await prisma.lead.update({ where: { id: lead.id }, data: { score } });
-      results.push({ id: lead.id, score });
-    }
-    res.json({ scored: results.length, results });
-  } catch (err) { next(err); }
-});
+// There is no AI lead scoring. This scored with fixed points of its own (+10
+// for an address containing ".com"), ignoring the rules an administrator
+// sets, and wrote the scores past every rule and workflow. Lead scores come
+// from those rules.
+router.post('/leads/batch-score', authenticate, requirePermission('leads', 'edit'), (req, res) => unavailable(res, 'AI_LEAD_SCORING_UNAVAILABLE',
+  'There is no AI lead scoring. Scores come from your lead scoring rules: POST /api/admin/score-all-leads rescores every lead, POST /api/leads/:id/score one lead. No lead was changed.'));
 
-// AI model config
+// What is a model and what is a rule. This listed versioned "models" for lead
+// scoring, deal prediction and a case classification that does not exist, and
+// settings nothing reads.
 router.get('/config', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   res.json({
-    models: { leadScoring: { type: 'rule-based', version: '2.0', features: ['email','company','title','phone','source'] }, dealPrediction: { type: 'rule-based', version: '1.5', features: ['value','stage','age','activities'] }, caseClassification: { type: 'keyword', version: '1.0' } },
-    settings: { autoScore: true, scoreThreshold: 70, predictionConfidenceMin: 0.6 },
     // The model behind the chat, deal-coach, forecast and copilot endpoints.
     generative: { provider: 'anthropic', model: aiModel(), configured: isConfigured() },
+    // Neither of these is a model.
+    leadScoring: { method: 'rules', note: 'The lead scoring rules an administrator sets (/api/admin/scoring-rules).' },
+    dealPrediction: { method: 'stage weights', note: 'A fixed table of stage weights, adjusted for activity, size and age (POST /api/ai/deals/predict).' },
   });
 });
 
@@ -179,6 +165,7 @@ router.post('/deals/predict', authenticate, requirePermission('deals', 'read'), 
     if (deal.value > 100000) probability = Math.max(probability - 5, 5);
     const daysOpen = deal.createdAt ? Math.floor((Date.now() - new Date(deal.createdAt)) / 86400000) : 0;
     if (daysOpen > 90) probability = Math.max(probability - 15, 5);
-    res.json({ dealId, probability, confidence: 0.72, factors: { stage: deal.stage, activityCount: deal.activities?.length || 0, daysOpen, value: deal.value } });
+    // A table lookup, not a model: the "confidence" was always 0.72.
+    res.json({ dealId, probability, method: 'stage weights', factors: { stage: deal.stage, activityCount: deal.activities?.length || 0, daysOpen, value: deal.value } });
   } catch (err) { next(err); }
 });

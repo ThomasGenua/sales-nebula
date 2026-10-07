@@ -98,11 +98,13 @@ router.put('/config', authenticate, requirePermission('admin', 'full'), auditMid
   } catch (err) { next(err); }
 });
 
-// Embed snippet generator
+// How to send cases from a site. There is no hosted form: the snippet framed
+// /web-to-case/form, which does not exist. A site's own form posts here.
 router.get('/embed', authenticate, async (req, res, next) => {
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   res.json({
-    iframeSnippet: `<iframe src="${baseUrl}/web-to-case/form" width="100%" height="600" frameborder="0"></iframe>`,
+    hostedForm: null,
+    note: 'There is no hosted form to embed. Post the fields below from your own form to apiEndpoint.',
     // Where this router is mounted (/api/public/web-to-case); /api/web-to-case does not exist.
     apiEndpoint: `${baseUrl}${req.baseUrl}`,
     examplePayload: { name: 'Jane Doe', email: 'jane@example.com', subject: 'Help needed', description: 'Details...', priority: 'Medium' },

@@ -141,4 +141,14 @@ async function deliverWebhook(prisma, { webhook, event, payload, attempt }) {
  * - forecast.submitted, approval.requested, approval.completed
  */
 
-module.exports = { fireWebhookEvent };
+/**
+ * Queue one event for one webhook, whatever events it takes: a test from its
+ * own page. Sent through fireWebhookEvent, a test went to every webhook that
+ * takes test.ping or *, and to the one being tested only if it was one.
+ */
+function sendToWebhook(prisma, webhook, event, payload) {
+  deliveryQueue.push({ webhook, event, payload, attempt: 1 });
+  if (!processing) processQueue(prisma);
+}
+
+module.exports = { fireWebhookEvent, sendToWebhook };

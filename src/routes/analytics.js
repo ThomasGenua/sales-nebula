@@ -5,6 +5,7 @@ const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
 const { pickModelFields, scalarWhere, scalarSelect, modelHasField } = require('../utils/modelFields');
 const { dealTotalInBase, currencyContext, sumInBase } = require('../utils/currency');
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate);
 
@@ -153,10 +154,9 @@ router.get('/scheduled-reports', async (req, res, next) => {
   catch (err) { next(err); }
 });
 // A scheduled report is its creator's: these changed or deleted anyone's.
-router.post('/scheduled-reports', requirePermission('reports', 'edit'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.scheduledReport.create({ data: { ...pickModelFields('scheduledReport', req.body).data, createdById: req.userId } })); }
-  catch (err) { next(err); }
-});
+// As report schedules (routes/reports.js): nothing sends a scheduled report.
+router.post('/scheduled-reports', requirePermission('reports', 'edit'), (req, res) => unavailable(res, 'REPORT_DELIVERY_UNAVAILABLE',
+  'Scheduled report delivery is not available: nothing runs a schedule or sends a report. No schedule was saved.'));
 router.put('/scheduled-reports/:id', requirePermission('reports', 'edit'), async (req, res, next) => {
   try {
     const { id, createdById, createdAt, updatedAt, ...rest } = req.body || {};

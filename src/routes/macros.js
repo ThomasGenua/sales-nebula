@@ -5,6 +5,7 @@ const { reachableWhere } = require('../middleware/access');
 const { columnsFrom, looksLikeId, plainFieldProblem } = require('../utils/modelFields');
 const { updateRecord, batchClient } = require('../services/recordWrites');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 // `/templates`, `/categories` and `/analytics` were declared after `/:id`,
@@ -102,8 +103,11 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
           if (delegate !== 'case') throw new Error('Comments can only be added to cases');
           await prisma.caseComment.create({ data: { caseId: recordId, text: action.value ?? action.body, isPublic: action.isPublic || false, authorId: req.user.id } });
           results[index] = { action: 'addComment', success: true };
-        } else if (action.type === 'sendEmail') {
-          results[index] = { action: 'sendEmail', success: true, note: 'Email queued' };
+        } else {
+          // Sending email, creating tasks and logging activities are not
+          // macro actions here. sendEmail answered "Email queued" and sent
+          // nothing; the others were skipped without a word.
+          results[index] = { action: action.type, success: false, error: `${action.type} actions are not available in macros; nothing was done for this one` };
         }
       } catch (e) { results[index] = { action: action.type, success: false, error: e.message }; }
     }
@@ -118,8 +122,6 @@ router.post('/:id/execute', authenticate, auditMiddleware, async (req, res, next
           : { action: 'updateField', field: macro.actions[index].field, success: true };
       }
     }
-    // An action type the macro does not know leaves no result, as before.
-    for (let i = results.length - 1; i >= 0; i--) if (results[i] === null) results.splice(i, 1);
     await prisma.macro.update({ where: { id: req.params.id }, data: { executionCount: { increment: 1 }, lastExecutedAt: new Date() } });
     // History and stats read these rows; nothing used to write them.
     await prisma.macroExecution.create({
@@ -174,20 +176,23 @@ router.post('/:id/execute/bulk', authenticate, auditMiddleware, async (req, res,
     if (successCount) {
       await prisma.macro.update({ where: { id: macro.id }, data: { executionCount: { increment: successCount }, lastExecutedAt: new Date() } });
     }
-    res.json({ macroId: macro.id, totalRecords: recordIds.length, successCount, failedCount: recordIds.length - successCount });
+    // A bulk run makes the field updates only: the rest of the macro was
+    // skipped without a word.
+    const notRun = [...new Set(macro.actions.filter(a => a.type !== 'updateField').map(a => a.type))];
+    res.json({ macroId: macro.id, totalRecords: recordIds.length, successCount, failedCount: recordIds.length - successCount,
+      ...(notRun.length && { actionsNotRun: notRun, note: 'A bulk run makes only the field updates; these actions were not run on any record.' }) });
   } catch (err) { next(err); }
 });
 
 module.exports = router;
 
 // Macro templates (pre-built macros)
+// Only macros whose actions run: the follow-up task, call log and thank-you
+// email templates offered actions no macro carries out.
 router.get('/templates', authenticate, async (req, res, next) => {
   const templates = [
     { name: 'Close Case', description: 'Set case status to Closed and add comment', actions: [{ type: 'updateField', field: 'status', value: 'Closed' }, { type: 'addComment', body: 'Case resolved and closed.' }] },
     { name: 'Escalate Case', description: 'Set priority to Critical and reassign', actions: [{ type: 'updateField', field: 'priority', value: 'Critical' }, { type: 'updateField', field: 'status', value: 'Escalated' }] },
-    { name: 'Follow Up Reminder', description: 'Create a follow-up task', actions: [{ type: 'createTask', subject: 'Follow up', dueInDays: 3 }] },
-    { name: 'Log Outbound Call', description: 'Create call activity', actions: [{ type: 'logActivity', activityType: 'Call', direction: 'Outbound' }] },
-    { name: 'Send Thank You', description: 'Send thank you email', actions: [{ type: 'sendEmail', template: 'thank_you' }] },
   ];
   res.json(templates);
 });
@@ -205,16 +210,10 @@ router.get('/:id/history', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Macro scheduling
-router.post('/:id/schedule', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { schedule, targetQuery, module } = req.body;
-    if (!schedule || !module) return res.status(400).json({ error: 'schedule and module required' });
-    const macro = await prisma.macro.update({ where: { id: req.params.id }, data: { scheduled: true, scheduleCron: schedule, scheduleTargetQuery: targetQuery, scheduleModule: module } });
-    res.json({ macroId: macro.id, scheduled: true, schedule, message: 'Macro scheduled' });
-  } catch (err) { next(err); }
-});
+// Nothing runs a scheduled macro: this answered "Macro scheduled" and set
+// flags no job reads.
+router.post('/:id/schedule', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'MACRO_SCHEDULE_UNAVAILABLE',
+  'Scheduling macros is not available: nothing would run them. Nothing was scheduled.'));
 
 // Macro categories
 router.get('/categories', authenticate, async (req, res, next) => {

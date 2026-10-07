@@ -1,15 +1,15 @@
 const { Router } = require('express');
-const { authenticate, requirePermission, permits } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
-const { reachableWhere } = require('../middleware/access');
 // The app integrates Claude only; these templates named gpt-4.
 const { aiModel } = require('../services/claude');
 const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 
-const router = Router();
+const { unavailable } = require('../utils/unavailable');
 
-// The module whose records each agent type's run returns.
-const RUN_MODULES = { SDR: 'leads', DealCoach: 'deals', ServiceAgent: 'cases' };
+const AGENTS = "AI agents don't run yet: nothing calls an AI model with an agent's configuration.";
+
+const router = Router();
 
 // An agent's configuration (its system prompt and tools), its conversations
 // and its past runs' output are admin reads, as its writes are admin's. These
@@ -70,48 +70,18 @@ router.delete('/:id', authenticate, requirePermission('admin', 'full'), async (r
 });
 
 // Activate / deactivate
-router.post('/:id/activate', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
-  try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.update({ where: { id: req.params.id }, data: { active: true } }); res.json(a); } catch (err) { next(err); }
-});
+router.post('/:id/activate', authenticate, requirePermission('admin', 'edit'), (req, res) => unavailable(res, 'AI_AGENTS_UNAVAILABLE', `${AGENTS} It was not activated.`));
 
 router.post('/:id/deactivate', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const a = await prisma.aiAgent.update({ where: { id: req.params.id }, data: { active: false } }); res.json(a); } catch (err) { next(err); }
 });
 
-// Run agent
-router.post('/:id/run', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const agent = await prisma.aiAgent.findUnique({ where: { id: req.params.id } });
-    if (!agent || agent.deletedAt || !agent.active) return res.status(400).json({ error: 'Agent not found or inactive' });
-    // A run returned the top new leads or open cases across the org to anyone
-    // signed in. It now takes read on the module it returns, and lists only
-    // records the caller can see.
-    const module = RUN_MODULES[agent.type];
-    if (module && !permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
-    const { input, context } = req.body;
-    const run = await prisma.aiAgentRun.create({
-      data: { agentId: req.params.id, trigger: 'manual', input: input || {}, context: context || {}, status: 'Running', startedAt: new Date(), triggeredById: req.user.id },
-    });
-    // Execute agent logic based on type
-    let output = {};
-    if (agent.type === 'SDR') {
-      const leads = await prisma.lead.findMany({ where: await reachableWhere(req, 'leads', 'lead', { status: 'New' }), take: 10, orderBy: { score: 'desc' } });
-      output = { action: 'lead_prioritization', leads: leads.map(l => ({ id: l.id, name: `${l.firstName} ${l.lastName}`, score: l.score })), recommendation: `Found ${leads.length} new leads to prioritize` };
-    } else if (agent.type === 'DealCoach') {
-      const deals = await prisma.deal.findMany({ where: { ownerId: req.user.id, stage: { notIn: ['Closed Won', 'Closed Lost'] }, deletedAt: null }, take: 5, orderBy: { value: 'desc' } });
-      output = { action: 'deal_coaching', deals: deals.map(d => ({ id: d.id, name: d.name, stage: d.stage, value: d.value })), recommendation: 'Focus on highest-value deals first' };
-    } else if (agent.type === 'ServiceAgent') {
-      const cases = await prisma.case.findMany({ where: await reachableWhere(req, 'cases', 'case', { status: { in: ['New', 'Open'] } }), take: 10, orderBy: { priority: 'asc' } });
-      output = { action: 'case_triage', cases: cases.map(c => ({ id: c.id, subject: c.subject, priority: c.priority })), recommendation: `${cases.length} cases need attention` };
-    } else {
-      output = { action: 'generic', message: 'Agent execution completed' };
-    }
-    await prisma.aiAgentRun.update({ where: { id: run.id }, data: { status: 'Completed', completedAt: new Date(), output } });
-    await prisma.aiAgent.update({ where: { id: req.params.id }, data: { runCount: { increment: 1 }, lastRunAt: new Date() } });
-    res.json({ runId: run.id, agentId: agent.id, output });
-  } catch (err) { next(err); }
-});
+// An agent is a stored configuration. A run called no model: it listed the
+// top new leads, the caller's largest deals or open cases under a canned
+// "recommendation", or for any other type said "Agent execution completed",
+// and was recorded as a completed run. Training stored data nothing reads.
+// They now say so, and change nothing.
+router.post('/:id/run', authenticate, (req, res) => unavailable(res, 'AI_AGENTS_UNAVAILABLE', `${AGENTS} Nothing was run.`));
 
 // Run history
 // Past runs' output names the leads and cases each run found for whoever ran it.
@@ -168,14 +138,7 @@ router.get('/:id/training', authenticate, requirePermission('admin', 'read'), as
   } catch (err) { next(err); }
 });
 
-router.put('/:id/training', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { trainingData, examples } = req.body;
-    const updated = await prisma.aiAgent.update({ where: { id: req.params.id }, data: { trainingData, examples, lastTrainedAt: new Date() } });
-    res.json(updated);
-  } catch (err) { next(err); }
-});
+router.put('/:id/training', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'AI_AGENTS_UNAVAILABLE', `${AGENTS} Nothing was trained.`));
 
 // Agent analytics
 router.get('/:id/analytics', authenticate, async (req, res, next) => {

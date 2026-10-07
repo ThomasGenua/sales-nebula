@@ -4,6 +4,7 @@ const { canReach, reachableWhere, linkRefusal } = require('../middleware/access'
 const { isAdmin } = require('../middleware/rowSecurity');
 const { currencyContext, sumInBase } = require('../utils/currency');
 const { columnsFrom } = require('../utils/modelFields');
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate);
 
@@ -150,17 +151,10 @@ router.post('/streams', requirePermission('admin', 'edit'), async (req, res, nex
   try { res.status(201).json(await req.app.locals.prisma.dataStream.create({ data: columnsFrom('dataStream', req.body) })); }
   catch (err) { next(err); }
 });
-router.post('/streams/:id/ingest', requirePermission('contacts', 'edit'), async (req, res, next) => {
-  try {
-    const stream = await req.app.locals.prisma.dataStream.findUnique({ where: { id: req.params.id } });
-    // A stream that does not exist was answered as inactive, 400.
-    if (!stream) return res.status(404).json({ error: 'Stream not found' });
-    if (!stream.active) return res.status(400).json({ error: 'Stream inactive' });
-    const records = req.body.records || [];
-    await req.app.locals.prisma.dataStream.update({ where: { id: stream.id }, data: { lastSyncAt: new Date(), recordCount: { increment: records.length } } });
-    res.json({ ingested: records.length });
-  } catch (err) { next(err); }
-});
+// Ingest counted the records, stamped the stream as synced, and kept none of
+// them. Nothing stores a stream's records.
+router.post('/streams/:id/ingest', requirePermission('contacts', 'edit'), (req, res) => unavailable(res, 'CDP_INGEST_UNAVAILABLE',
+  'Ingesting stream records is not available: nothing would store them. Nothing was ingested.'));
 
 module.exports = router;
 

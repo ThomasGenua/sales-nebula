@@ -5,6 +5,7 @@ const { reachableWhere } = require('../middleware/access');
 const { editableFields, columnsFrom } = require('../utils/modelFields');
 const { createRecord, updateRecord, batchClient } = require('../services/recordWrites');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 // The modules offline sync carries, and the table each lives in.
@@ -14,7 +15,9 @@ const SYNC_MODELS = { contacts: 'contact', leads: 'lead', deals: 'deal', activit
 router.get('/config', authenticate, async (req, res, next) => {
   res.json({
     version: '1.0.0', minVersion: '1.0.0',
-    features: { offlineSync: true, pushNotifications: true, biometricAuth: true, darkMode: true },
+    // What this server provides: sync, yes; push delivery and biometric
+    // sign-in, no (both said true).
+    features: { offlineSync: true, pushNotifications: false, biometricAuth: false, darkMode: true },
     syncModules: ['contacts', 'leads', 'deals', 'accounts', 'activities', 'cases'],
     refreshInterval: 300,
   });
@@ -39,15 +42,9 @@ router.post('/devices', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Push notification
-router.post('/push', authenticate, async (req, res, next) => {
-  try {
-    const { userId, title, body, data } = req.body;
-    if (!title) return res.status(400).json({ error: 'title required' });
-    // Queue notification (would integrate with FCM/APNS in production)
-    res.json({ queued: true, title, body, targetUser: userId || 'broadcast' });
-  } catch (err) { next(err); }
-});
+// No push service (FCM, APNs) is connected: this said "queued" and nothing was.
+router.post('/push', authenticate, (req, res) => unavailable(res, 'PUSH_UNAVAILABLE',
+  'Push notifications are not available: no push service is connected. Nothing was sent or queued.'));
 
 // Mobile notifications feed. `limit` was ignored (always 50), and unread
 // counted every row: the column is `read`, not `readAt`. `body` is the
@@ -225,12 +222,7 @@ router.put('/push-preferences', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Offline conflict resolution
-router.post('/sync/resolve', authenticate, async (req, res, next) => {
-  try {
-    const { conflicts } = req.body;
-    if (!conflicts?.length) return res.status(400).json({ error: 'conflicts array required' });
-    const resolved = conflicts.map(c => ({ ...c, resolution: c.strategy === 'client_wins' ? 'client' : c.strategy === 'server_wins' ? 'server' : 'latest_timestamp', resolvedAt: new Date() }));
-    res.json({ resolved: resolved.length, conflicts: resolved });
-  } catch (err) { next(err); }
-});
+// Resolving a conflict echoed the conflicts back as resolved, and applied
+// nothing. Push the winning change through /sync instead.
+router.post('/sync/resolve', authenticate, (req, res) => unavailable(res, 'CONFLICT_RESOLUTION_UNAVAILABLE',
+  'Resolving sync conflicts here is not available: nothing would be applied. Send the change you want to keep through /api/mobile/sync.'));
