@@ -5881,7 +5881,7 @@ const NAV_ITEMS = [
         children: [
           { id: "import", label: "Import", icon: Upload },
           { id: "tags", label: "Tags", icon: Tag },
-          { id: "webhooks", label: "Webhooks", icon: Webhook },
+          { id: "webhooks", label: "Webhooks", icon: Webhook, requires: { module: "settings", level: "read" } },
           { id: "studio", label: "Studio", icon: Wrench },
           { id: "securityGroups", label: "Security Groups", icon: Lock },
           { id: "privacy", label: "Privacy", icon: Shield, requires: { module: "admin", level: "edit" } },
