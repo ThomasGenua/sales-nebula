@@ -11,6 +11,8 @@ marked **(public)**. The browser app uses a cookie session instead: sign in with
 
 Modules built with CRUD factory include: GET / (list), GET /:id, POST /, PUT /:id, DELETE /:id -- marked **[CRUD]**.
 
+A list (GET /) takes filters on the record's own columns, `?accountId=<id>&status=Open`, as a record page does to list an account's contacts. It also takes a range on a column, `?createdAtFrom=2026-01-01&createdAtTo=2026-01-31`, and `sortBy`, `sortDir`, `page`, `limit` (at most 200) and `search`. It answers `{ data, meta: { total, page, limit, pages } }`. A filter on anything but a column, such as a related record's field, is ignored. Deleted records are never listed, whatever the filters; the recycle bin lists them. The quotes and invoices lists take the same column filters, though not the From/To ranges.
+
 ---
 
 ## Table of Contents

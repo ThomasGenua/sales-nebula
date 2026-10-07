@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { pickModelFields, lineItemFields, scalarOrderBy } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields, scalarOrderBy, scalarWhere } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
@@ -84,7 +84,7 @@ const lineKey = l => [l.productId, l.description ?? null, l.quantity, l.unitPric
 router.get('/', requirePermission('quotes', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { page = 1, limit = 50, status, search, sortBy, sortDir = 'desc' } = req.query;
+    const { page = 1, limit = 50, status, search, sortBy, sortDir = 'desc', ...filters } = req.query;
     const take = Math.min(parseInt(limit) || 50, 200);
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
     let where = {};
@@ -92,6 +92,10 @@ router.get('/', requirePermission('quotes', 'read'), async (req, res, next) => {
     // By number or name: the page lists quotes by name, and a search matched
     // the number alone.
     if (search) where.OR = ['number', 'quoteNumber', 'name'].map(f => ({ [f]: { contains: String(search), mode: 'insensitive' } }));
+    // Filters on a quote's own columns (?accountId=, ?dealId=), as the CRUD
+    // lists take them: a record page lists its quotes so. Other keys were
+    // ignored, so ?accountId= answered with every quote.
+    Object.assign(where, scalarWhere('quote', filters));
     // Quotes the caller may see, sorted on one of a quote's own columns.
     where = await reachableWhere(req, 'quotes', 'quote', where);
     const [quotes, total] = await Promise.all([
