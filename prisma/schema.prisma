@@ -261,6 +261,8 @@ model Account {
 }
 
 model Activity {
+  leadId     String?
+  @@index([leadId])
   id         String    @id @default(uuid())
   type       String    // Call, Meeting, Email, Task
   subject    String
@@ -1346,6 +1348,8 @@ model EmailSequence {
 }
 
 model EmailSequenceEnrollment {
+  lastError   String?
+  lastSentAt  DateTime?
   id          String   @id @default(uuid())
   sequenceId  String
   sequence    EmailSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
@@ -4922,6 +4926,11 @@ model SearchIndexQueue {
 // ═══════════════════════════════════════════════════════════
 
 model InboundEmailAccount {
+  ownerId           String?   // Personal sales mailbox; null means a shared support mailbox.
+  @@index([ownerId])
+  oauthStateHash    String?
+  oauthStateExpiresAt DateTime?
+  syncCursor       String?
   id                String    @id @default(uuid())
   name              String
   provider          String    @default("imap") // imap, pop3, microsoft
@@ -4971,6 +4980,12 @@ model InboundEmailAccount {
 }
 
 model InboundEmailMessage {
+  contactId      String?
+  dealId         String?
+  replyBody      String?
+  direction      String    @default("inbound")
+  @@index([contactId])
+  @@index([dealId])
   id             String    @id @default(uuid())
   accountId      String
   account        InboundEmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)

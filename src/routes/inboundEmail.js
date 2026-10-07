@@ -15,10 +15,21 @@ const graphMailbox = require('../services/graphMailbox');
 const { MAIL_SCOPES } = require('../services/microsoftGraph');
 
 const router = Router();
+router.use(authenticate);
+router.param('id', async (req, res, next, id) => {
+  try {
+    const db = req.app.locals.prisma;
+    const personal = req.path.startsWith('/accounts/')
+      ? await db.inboundEmailAccount.findFirst({ where: { id, ownerId: { not: null } }, select: { id: true } })
+      : req.path.startsWith('/messages/') ? await db.inboundEmailMessage.findFirst({ where: { id, account: { is: { ownerId: { not: null } } } }, select: { id: true } }) : null;
+    if (personal) return res.status(404).json({ error: 'Not found' });
+    next();
+  } catch (e) { next(e); }
+});
 
 /** Strip an account payload of its secret before returning it. */
 function safeAccount(account) {
-  const { password, oauthAccessToken, oauthRefreshToken, ...rest } = account;
+  const { password, oauthAccessToken, oauthRefreshToken, oauthStateHash, oauthStateExpiresAt, ...rest } = account;
   return {
     ...rest,
     passwordSet: !!password,
@@ -31,7 +42,7 @@ function safeAccount(account) {
 router.get('/accounts', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const accounts = await prisma.inboundEmailAccount.findMany({ where: { deletedAt: null }, orderBy: { name: 'asc' } });
+    const accounts = await prisma.inboundEmailAccount.findMany({ where: { ownerId: null, deletedAt: null }, orderBy: { name: 'asc' } });
     res.json(accounts.map(safeAccount));
   } catch (err) { next(err); }
 });
@@ -109,6 +120,7 @@ router.put('/accounts/:id', authenticate, requirePermission('admin', 'full'), au
   try {
     const prisma = req.app.locals.prisma;
     const data = columnsFrom('inboundEmailAccount', req.body);
+    for (const key of ['ownerId', 'oauthStateHash', 'oauthStateExpiresAt']) delete data[key];
     // Only re-encrypt when a new password was actually supplied
     if (data.password) data.password = encrypt(data.password);
     else delete data.password;
@@ -322,7 +334,7 @@ router.post('/messages/:id/reply', authenticate, requirePermission('cases', 'edi
 router.get('/accounts/due/poll', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const accounts = await prisma.inboundEmailAccount.findMany({ where: { deletedAt: null, active: true, status: { not: 'Disabled' } } });
+    const accounts = await prisma.inboundEmailAccount.findMany({ where: { ownerId: null, deletedAt: null, active: true, status: { not: 'Disabled' } } });
     const now = Date.now();
     const due = accounts.filter(a => !a.lastPolledAt || (now - new Date(a.lastPolledAt).getTime()) >= a.pollIntervalMinutes * 60000);
     res.json({
@@ -346,7 +358,7 @@ router.get('/messages', authenticate, requirePermission('cases', 'read'), async 
     // took in deleted ones), and a page size that is a number and capped.
     const take = Math.min(parseInt(limit) || 50, 200);
     const current = Math.max(parseInt(page) || 1, 1);
-    const where = { deletedAt: null };
+    const where = { deletedAt: null, account: { is: { ownerId: null } } };
     if (accountId) where.accountId = accountId;
     if (status) where.status = status;
     if (search) where.OR = [{ subject: { contains: search, mode: 'insensitive' } }, { fromEmail: { contains: search, mode: 'insensitive' } }];
@@ -436,7 +448,7 @@ router.post('/messages/:id/ignore', authenticate, requirePermission('cases', 'ed
  * customer portal account became the owner of every case the rule routed.
  */
 async function ruleTargetProblem(prisma, { accountId, assignToId }) {
-  if (accountId && !(await prisma.inboundEmailAccount.findFirst({ where: { id: String(accountId), deletedAt: null }, select: { id: true } }))) {
+  if (accountId && !(await prisma.inboundEmailAccount.findFirst({ where: { id: String(accountId), ownerId: null, deletedAt: null }, select: { id: true } }))) {
     return 'accountId does not name an inbound email account';
   }
   if (assignToId && !(await prisma.user.findFirst({ where: { id: String(assignToId), active: true, isPortalUser: false }, select: { id: true } }))) {
@@ -546,9 +558,9 @@ router.get('/analytics', authenticate, requirePermission('admin', 'read'), async
     const since = new Date(Date.now() - days * 86400000);
 
     const [accounts, logs, messages] = await Promise.all([
-      prisma.inboundEmailAccount.findMany({ where: { deletedAt: null }, select: { id: true, name: true, status: true, lastPolledAt: true, lastError: true, active: true } }),
-      prisma.emailPollLog.findMany({ where: { startedAt: { gte: since } }, take: 5000 }),
-      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since }, deletedAt: null }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
+      prisma.inboundEmailAccount.findMany({ where: { ownerId: null, deletedAt: null }, select: { id: true, name: true, status: true, lastPolledAt: true, lastError: true, active: true } }),
+      prisma.emailPollLog.findMany({ where: { startedAt: { gte: since }, account: { is: { ownerId: null } } }, take: 5000 }),
+      prisma.inboundEmailMessage.findMany({ where: { createdAt: { gte: since }, deletedAt: null, account: { is: { ownerId: null } } }, select: { status: true, isAutomated: true, createdCaseId: true, createdLeadId: true }, take: 10000 }),
     ]);
 
     res.json({

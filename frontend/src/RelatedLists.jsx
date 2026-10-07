@@ -10,6 +10,7 @@ import { fmt, money } from './prefs';
 
 /** Which modules link to a module's records, and by which column. */
 export const RELATED = {
+  leads: [['activities', 'leadId']],
   accounts: [['contacts', 'accountId'], ['deals', 'accountId'], ['cases', 'accountId'], ['activities', 'accountId'],
     ['quotes', 'accountId'], ['invoices', 'accountId'], ['contracts', 'accountId'], ['orders', 'accountId']],
   contacts: [['deals', 'contactId'], ['cases', 'contactId'], ['activities', 'contactId'], ['emails', 'contactId'],
@@ -41,7 +42,7 @@ const FIRST = 5; // rows before "Show all"
 const MOST = 50; // rows fetched, newest first
 
 function RelatedList({ module, field, record }) {
-  const { apiFetch } = useAuth();
+  const { apiFetch, user, demoMode } = useAuth();
   const { navigate } = useContext(RouteContext);
   const [state, setState] = useState({ loading: true });
   const [all, setAll] = useState(false);
@@ -62,7 +63,7 @@ function RelatedList({ module, field, record }) {
     <section aria-label={label} className="bg-[#0B1228] border border-[#182550] rounded-xl">
       <div className="px-4 py-3 border-b border-[#182550] flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-[#C8C2B4]">{label}</h3>
-        {!state.loading && !state.error && <span className="text-xs text-[#4A5168]">{state.total}</span>}
+        <div className="flex gap-3 items-center">{!state.loading && !state.error && <span className="text-xs text-[#4A5168]">{state.total}</span>}{!demoMode && can(user, module, 'edit') && <button type="button" className="text-sm text-[#F5A623]" onClick={() => navigate(module, null, { values: { [field]: record.id, ...(module === 'activities' && { type: 'Task', status: 'Scheduled' }), ...(field === 'dealId' && record.accountId && { accountId: record.accountId }) }, label: record.name || record.subject || [record.firstName, record.lastName].filter(Boolean).join(' ') })}>New {label === 'Activities' ? 'task' : label === 'Cases' ? 'case' : label.slice(0, -1).toLowerCase()}</button>}</div>
       </div>
       <div className="p-2">
         {state.loading ? <p className="text-xs text-[#4A5168] px-2 py-3">Loading…</p>

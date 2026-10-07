@@ -29,11 +29,12 @@ Something can be missing in three ways:
 | Sign-in | Password, with account lockout; authenticator-app (TOTP) two-factor; API keys; Sales Nebula as an OAuth 2.0 provider for connected apps (authorization code with PKCE); Google and Microsoft sign-in APIs for existing accounts, which the sign-in page does not offer yet. |
 | Approvals | Multi-step processes. A step's approvers are a user, a role, the submitter's manager or a queue, and the first to decide settles the step. Entry conditions, and final approve and reject actions. Processes are set up through the API; the **Approvals** screen lists pending requests to approve or reject. |
 | Workflows | Run on create, update, status change and on a schedule. Actions: update a field, create a task, notify, send an email; other action types are ignored. They are set up through the API: the screen has no condition or action editor. |
-| Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. Sequences send their due steps every 10 minutes when SMTP is set up, as written (no merge fields). Mail arriving in a connected Microsoft mailbox opens cases or leads, and replies thread onto their case. |
+| Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. The sequence editor supports steps, delays, templates, enrollment and delivery status; sequences send every 10 minutes with SMTP, as written (no merge fields). Shared support mailboxes route incoming mail to cases or leads. Personal Outlook mailboxes sync Inbox and Sent Items, associate visible contacts/deals, and support private threaded replies. |
+| Sales workspace | My Day queues, atomic completion and follow-ups, a pipeline board with stage age and next actions, saved list views, and creation from related lists. See [setup and behavior](SALES_WORKSPACE.md). |
 | Webhooks | Outbound, signed with HMAC-SHA256, retried, with delivery logs. |
 | Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. They print from the browser as HTML: no PDF file is generated. |
 | Forecasts | Built from the owner's open deals in the period and refreshed every 4 hours; quotas are entered by hand. Deals that move into the period later are not added. |
-| Reports | Running a report returns real rows and totals, limited to what the viewer may see. The API exports CSV or JSON. |
+| Reports | The report builder supports columns, filters, grouping, measures, charts, shared definitions and drilldown into accessible records. The screen exports displayed rows or groups as CSV; the API exports detail rows as CSV or JSON. Sales performance uses actual deal history. |
 | Calendar, projects, SLA | Recurring events with invitees and an iCal feed; projects with a critical path; SLA timers that count business hours only. |
 | Search | Global search across modules, matching substrings. |
 | Collaboration | Chatter posts with likes and comments; notes; tags; favorites. |
@@ -47,7 +48,7 @@ Something can be missing in three ways:
 | AI Copilot without a key | Answers from fixed rules using your open deals, cases and activities; the screen says so under each answer. | `/api/copilot/chat` answers 503. Conversation threads exist in the API only. |
 | Lead scoring | Scores leads by your rules. Not AI. | Runs by itself only for leads from the web-to-lead form; other leads are scored on request (`POST /api/leads/:id/score`). |
 | Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
-| Reports | Tabular, summary and chart reports, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. Export gives the raw rows, not the totals. There is no report builder screen. |
+| Reports | Tabular, summary and chart reports, a report builder, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. The API export gives raw rows; the builder exports the displayed detail or summary. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
 | Campaigns | Planning, members, recipients, responses, ROI. Attribution models computed from the campaign touches you enter. | Bulk sending (501). Nothing creates touches from campaign members. |
 | Import | CSV files, with columns matched by name. | Excel. A column-mapping screen (the API takes a mapping). |
@@ -78,7 +79,7 @@ Something can be missing in three ways:
 | Customer portal | One configuration with branding; portal logins for contacts, created by an administrator. | Self-registration; portals for partners or employees (the portal type is a label). |
 | Timeline | A record's own activities, emails, notes, cases, changes and posts. | Items from child records (an account's contacts or deals); quotes, invoices and events. |
 | Scheduler | Booking with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; editing skips the overlap check; "availability" only says who is busy now. |
-| Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. | Only deals have a currency, and reports add up unconverted amounts. No rate history. |
+| Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. Pipeline board totals and monetary builder groups keep currencies separate. | Only deals have a currency. Arbitrary API reports can still aggregate unconverted amounts. No rate history. |
 | Revenue recognition | Schedules split evenly by month. | Periods are recognized by hand; the recognition method is ignored. |
 | Flows | Flows can be designed and saved. | Nothing runs them: run, test, activate and publish (501). |
 | AI agents | Agents can be configured and saved. | No model is called with an agent's settings: run, activate and training (501). |
@@ -130,13 +131,10 @@ Saving these changes nothing:
 
 ## Not built
 
-- Mail and calendar sync with Gmail or Outlook. Only the Microsoft mailbox connection exists.
+- Gmail mail sync and Google/Outlook calendar sync. Personal Outlook email sync exists; attachments, remote deletions and moves are not synchronized.
 - E-signature.
 - Slack or Teams.
 - PDF files of quotes and invoices; they print from the browser.
-- A Kanban board for deals.
-- A screen for saved list views (the API, `/api/views`, exists).
-- A report builder screen.
 - A mobile app (the `/api/mobile` endpoints exist).
 - Multi-tenancy: one install serves one company.
 - A visual flow designer, and anything that runs flows.

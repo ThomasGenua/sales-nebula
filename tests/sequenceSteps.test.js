@@ -98,6 +98,8 @@ describe('a step that goes out', () => {
     expect(email.sentAt).toBeInstanceOf(Date);
     const after = await reload(row.id);
     expect(after.currentStep).toBe(1);
+    expect(after.lastSentAt).toBeInstanceOf(Date);
+    expect(after.lastError).toBeNull();
     expect(after.nextSendAt.getTime()).toBeGreaterThan(Date.now() + 2 * DAY - 60000);
     expect(after.nextSendAt.getTime()).toBeLessThan(Date.now() + 2 * DAY + 60000);
   });
@@ -145,6 +147,7 @@ describe('a send that fails', () => {
     expect(result).toMatchObject({ sent: 0, retrying: 1, bounced: 0 });
     const after = await reload(row.id);
     expect(after).toMatchObject({ currentStep: 0, status: 'Active' });
+    expect(after.lastError).toBe('mailbox unavailable');
     expect(after.nextSendAt.getTime()).toBeGreaterThan(Date.now() + HOUR - 60000);
     expect(after.nextSendAt.getTime()).toBeLessThan(Date.now() + HOUR + 60000);
     expect(await prisma.email.findFirst()).toMatchObject({ status: 'failed', sentAt: null });

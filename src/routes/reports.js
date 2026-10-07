@@ -85,6 +85,9 @@ const MODULE_CONFIG = {
     fields: {
       id: { type: 'string', label: 'ID' },
       name: { type: 'string', label: 'Deal Name' },
+      ownerId: { type: 'string', label: 'Owner ID' },
+      currency: { type: 'string', label: 'Currency' },
+      lossReason: { type: 'string', label: 'Loss Reason' },
       value: { type: 'number', label: 'Value' },
       stage: { type: 'string', label: 'Stage' },
       probability: { type: 'number', label: 'Probability' },
@@ -615,6 +618,13 @@ async function executeReport(prisma, definition, req) {
     result.totals = await executeAggregations(prisma, config.model, where, report.aggregations, []);
   }
 
+  // Labels only for owners of rows included in this caller's result; never
+  // expose the user directory, credentials, or another report's records.
+  const ownerIds = [...new Set([...(result.rows || []), ...(result.summary?.type === 'grouped' ? result.summary.data : [])].map(r => r.ownerId).filter(Boolean))];
+  if (ownerIds.length) {
+    const owners = await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, firstName: true, lastName: true } });
+    result.labels = { ownerId: Object.fromEntries(owners.map(u => [u.id, `${u.firstName} ${u.lastName}`.trim()])) };
+  }
   result.executionMs = Date.now() - startTime;
   return result;
 }

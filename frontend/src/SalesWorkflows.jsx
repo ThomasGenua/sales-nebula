@@ -11,7 +11,7 @@ const lineTotal = item => round(Number(item.quantity || 0) * Number(item.unitPri
 function Problem({ message }) { return message ? <p role="alert" className="text-sm text-[#F87171] my-3">{message}</p> : null; }
 
 /** Search the actual record list, rather than limiting a picker to its first page. */
-function RecordPicker({ module, label, value, selected, onChange }) {
+export function RecordPicker({ module, label, value, selected, onChange }) {
   const { apiFetch } = useAuth();
   const [search, setSearch] = useState('');
   const [records, setRecords] = useState([]);

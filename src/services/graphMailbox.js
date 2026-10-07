@@ -69,12 +69,17 @@ async function withToken(prisma, account, fn) {
 }
 
 /** Store the tokens from a completed consent redirect. */
-async function connect(prisma, account, { code, redirectUri }) {
-  const tokens = await graph.exchangeCode({ ...credentials(account), code, redirectUri });
-  const profile = await graph.getProfile({
+async function connect(prisma, account, { code, redirectUri, codeVerifier }) {
+  const tokens = await graph.exchangeCode({ ...credentials(account), code, redirectUri, ...(codeVerifier && { codeVerifier }) });
+  const profileRequest = graph.getProfile({
     accessToken: tokens.accessToken,
-    mailboxAddress: account.mailboxAddress,
-  }).catch(() => null);
+    mailboxAddress: account.ownerId ? null : account.mailboxAddress,
+  });
+  const profile = account.ownerId ? await profileRequest : await profileRequest.catch(() => null);
+  const address = profile?.mail || profile?.userPrincipalName;
+  if (account.ownerId && (!address || (account.mailboxAddress && account.mailboxAddress.toLowerCase() !== address.toLowerCase()))) {
+    throw Object.assign(new Error('Connect the same Outlook address, or add another mailbox.'), { status: 409 });
+  }
 
   return prisma.inboundEmailAccount.update({
     where: { id: account.id },
@@ -107,6 +112,7 @@ async function testConnection(prisma, account) {
  * Throttling is surfaced rather than swallowed so the scheduler can back off.
  */
 async function pollAccount(prisma, account) {
+  if (account.ownerId) return require('./salesMailbox').pollPersonalMailbox(prisma, account);
   const startedAt = Date.now();
   await prisma.inboundEmailAccount.update({ where: { id: account.id }, data: { status: 'Polling' } });
 

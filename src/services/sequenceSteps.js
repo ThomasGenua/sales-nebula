@@ -55,7 +55,7 @@ async function advance(prisma, enrollment, steps, tally) {
   } else {
     await prisma.emailSequenceEnrollment.update({
       where: { id: enrollment.id },
-      data: { currentStep: next, nextSendAt: new Date(Date.now() + (steps[next].delayDays || 1) * 86400000) },
+      data: { currentStep: next, nextSendAt: new Date(Date.now() + (steps[next].delayDays ?? 1) * 86400000) },
     });
   }
 }
@@ -101,6 +101,7 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
     });
 
     if (!delivery.delivered) {
+      await prisma.emailSequenceEnrollment.update({ where: { id: enrollment.id }, data: { lastError: delivery.error || 'Email delivery failed; retrying in one hour.' } });
       // Stay on this step: the claim already put its retry an hour ahead. Stop after three.
       const failures = await prisma.email.count({
         where: { toEmail: to, subject, status: 'failed', createdAt: { gte: enrollment.enrolledAt } },
@@ -114,6 +115,7 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
       return;
     }
     tally.sent++;
+    await prisma.emailSequenceEnrollment.update({ where: { id: enrollment.id }, data: { lastError: null, lastSentAt: new Date() } });
   }
 
   await advance(prisma, enrollment, steps, tally);
