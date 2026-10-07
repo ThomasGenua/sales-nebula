@@ -4,6 +4,7 @@ const { invalidateOrgWideDefaultCache, invalidateHierarchyCache } = require('../
 const { columnsFrom } = require('../utils/modelFields');
 const { checkValidationRules } = require('../services/recordRules');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'edit'));
 
@@ -131,35 +132,12 @@ router.get('/field-permissions', async (req, res, next) => {
     res.json({ data: await req.app.locals.prisma.fieldPermission.findMany({ where }) });
   } catch (err) { next(err); }
 });
-// A permission's own columns, found by role, module and field. The body went
-// to create whole, so a stray key or a missing one was a 500.
-const fieldPermissionUpsert = (prisma, body) => {
-  const data = columnsFrom('fieldPermission', body);
-  if (!data.roleId || !data.module || !data.field) return null;
-  return prisma.fieldPermission.upsert({
-    where: { roleId_module_field: { roleId: data.roleId, module: data.module, field: data.field } },
-    update: { visible: data.visible, editable: data.editable },
-    create: data,
-  });
-};
-router.post('/field-permissions', requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const upsert = fieldPermissionUpsert(req.app.locals.prisma, req.body);
-    if (!upsert) return res.status(400).json({ error: 'roleId, module and field required' });
-    res.json(await upsert);
-  } catch (err) { next(err); }
-});
-router.post('/field-permissions/bulk', requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const { permissions } = req.body || {};
-    if (!Array.isArray(permissions) || permissions.some(p => !p?.roleId || !p.module || !p.field)) {
-      return res.status(400).json({ error: 'permissions must be a list of { roleId, module, field, visible, editable }' });
-    }
-    const results = [];
-    for (const p of permissions) results.push(await fieldPermissionUpsert(req.app.locals.prisma, p));
-    res.json({ data: results });
-  } catch (err) { next(err); }
-});
+// Nothing reads these when a record is read, listed, exported or written, so
+// a field marked hidden or read-only was neither while the setting said it
+// was. Saving them now says so; the ones already saved are still listed.
+const FIELD_SECURITY = 'Field-level security is not available: nothing hides or locks a field when records are read or written.';
+router.post('/field-permissions', requirePermission('admin', 'full'), (req, res) => unavailable(res, 'FIELD_SECURITY_UNAVAILABLE', `${FIELD_SECURITY} Nothing was saved.`));
+router.post('/field-permissions/bulk', requirePermission('admin', 'full'), (req, res) => unavailable(res, 'FIELD_SECURITY_UNAVAILABLE', `${FIELD_SECURITY} Nothing was saved.`));
 
 // ─── ROLE HIERARCHY ───
 router.get('/role-hierarchy', async (req, res, next) => {

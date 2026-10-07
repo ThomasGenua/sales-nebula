@@ -5,6 +5,7 @@ const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
 const { evaluate } = require('../services/recordRules');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 const STUDIO_MODULES = [
@@ -36,49 +37,6 @@ const RESERVED_NAMES = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ow
 /** Normalize a label into a safe storage key. */
 function slugifyFieldName(label) {
   return String(label).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
-}
-
-/** Coerce and validate a value against a field definition. */
-function coerceValue(field, raw) {
-  const type = field.fieldType;
-  if (raw === null || raw === undefined || raw === '') {
-    if (field.required) return { error: `${field.label} is required` };
-    return { value: null, column: FIELD_TYPES[type]?.storage || 'valueText' };
-  }
-
-  const column = FIELD_TYPES[type]?.storage || 'valueText';
-
-  if (['number', 'currency', 'percent'].includes(type)) {
-    const n = Number(raw);
-    if (isNaN(n)) return { error: `${field.label} must be a number` };
-    if (field.minValue != null && n < field.minValue) return { error: `${field.label} must be at least ${field.minValue}` };
-    if (field.maxValue != null && n > field.maxValue) return { error: `${field.label} must be at most ${field.maxValue}` };
-    return { value: +n.toFixed(field.precision ?? 2), column };
-  }
-
-  if (['date', 'datetime'].includes(type)) {
-    const d = new Date(raw);
-    if (isNaN(d)) return { error: `${field.label} must be a valid date` };
-    return { value: d, column };
-  }
-
-  if (type === 'boolean') return { value: raw === true || raw === 'true' || raw === 1 || raw === '1', column };
-
-  if (type === 'multiselect') {
-    const list = Array.isArray(raw) ? raw : String(raw).split(',').map(s => s.trim()).filter(Boolean);
-    return { value: list, column };
-  }
-
-  const str = String(raw);
-  if (field.maxLength && str.length > field.maxLength) return { error: `${field.label} exceeds ${field.maxLength} characters` };
-  if (type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)) return { error: `${field.label} must be a valid email address` };
-  if (type === 'url' && !/^https?:\/\/.+/.test(str)) return { error: `${field.label} must start with http:// or https://` };
-  if (field.regex) {
-    try {
-      if (!new RegExp(field.regex).test(str)) return { error: field.regexMessage || `${field.label} does not match the required format` };
-    } catch { /* an invalid stored pattern should not block the save */ }
-  }
-  return { value: str, column };
 }
 
 /*
@@ -267,48 +225,11 @@ router.get('/values/:module/:recordId', authenticate, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-router.put('/values/:module/:recordId', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { values } = req.body;
-    if (!values || typeof values !== 'object') return res.status(400).json({ error: 'values object required' });
-
-    const fields = await prisma.customFieldDef.findMany({ where: { module: req.params.module, deletedAt: null, active: true } });
-    const byName = new Map(fields.map(f => [f.name, f]));
-
-    const errors = [], saved = [];
-    // Validate everything before writing anything
-    const pending = [];
-    for (const [name, raw] of Object.entries(values)) {
-      const field = byName.get(name);
-      if (!field) { errors.push(`Unknown field: ${name}`); continue; }
-      if (field.readOnly) { errors.push(`${field.label} is read only`); continue; }
-      const result = coerceValue(field, raw);
-      if (result.error) { errors.push(result.error); continue; }
-      pending.push({ field, ...result });
-    }
-
-    // Required fields with no value anywhere
-    for (const f of fields.filter(x => x.required)) {
-      if (Object.prototype.hasOwnProperty.call(values, f.name)) continue;
-      const existing = await prisma.customFieldValue.findFirst({ where: { customFieldId: f.id, recordId: req.params.recordId } });
-      if (!existing) errors.push(`${f.label} is required`);
-    }
-
-    if (errors.length) return res.status(400).json({ error: 'Validation failed', errors });
-
-    for (const { field, value, column } of pending) {
-      const data = { valueText: null, valueNumber: null, valueDate: null, valueBool: null, valueJson: null, [column]: value };
-      const existing = await prisma.customFieldValue.findFirst({ where: { customFieldId: field.id, recordId: req.params.recordId } });
-      if (existing) await prisma.customFieldValue.update({ where: { id: existing.id }, data });
-      else await prisma.customFieldValue.create({ data: { ...data, customFieldId: field.id, module: req.params.module, recordId: req.params.recordId } });
-      saved.push(field.name);
-    }
-
-    await req.audit({ action: 'update', module: 'studio', recordId: req.params.recordId, details: `Custom fields updated: ${saved.join(', ')}` });
-    res.json({ saved: saved.length, fields: saved });
-  } catch (err) { next(err); }
-});
+// A value has nowhere to go: the table's columns are not the ones this
+// wrote (it failed every time), and no form, list, report or export shows a
+// custom field. Definitions and validation rules still work.
+router.put('/values/:module/:recordId', authenticate, (req, res) => unavailable(res, 'CUSTOM_FIELD_VALUES_UNAVAILABLE',
+  'Custom field values cannot be stored yet, and no form, list or report shows them. Nothing was saved.'));
 
 // ── PICKLISTS ─────────────────────────────────────────────────────────
 

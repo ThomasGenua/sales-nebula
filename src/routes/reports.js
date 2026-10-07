@@ -12,6 +12,7 @@ const { authenticate } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { cache, cacheMiddleware } = require('../services/cache');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate, auditMiddleware);
 
@@ -722,10 +723,9 @@ router.post('/:id/schedule', async (req, res, next) => {
     const report = await prisma.report.findUnique({ where: { id: req.params.id }, select: { createdById: true } });
     if (!report) return res.status(404).json({ error: 'Report not found' });
     if (report.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can schedule' });
-    const schedule = await prisma.reportSchedule.create({
-      data: { reportId: req.params.id, cron, format: format || 'csv', recipients: recipients || [] },
-    });
-    res.status(201).json(schedule);
+    // No job runs a schedule or sends a report: one was saved, and nobody got
+    // anything. Removing one still works.
+    unavailable(res, 'REPORT_DELIVERY_UNAVAILABLE', 'Scheduled report delivery is not available: nothing runs a schedule or sends a report. No schedule was saved.');
   } catch (err) { next(err); }
 });
 

@@ -1,15 +1,11 @@
 const { Router } = require('express');
-const crypto = require('crypto');
 const { authenticate, requirePermission } = require('../middleware/auth');
-const { auditMiddleware } = require('../middleware/audit');
 const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
 const bcrypt = require('bcryptjs');
 const { limiters } = require('../middleware/rateLimit');
-const jwt = require('jsonwebtoken');
-const { JWT_SECRET } = require('../middleware/auth');
-const { queryWithIncludes, pickModelFields, columnsFrom } = require('../utils/modelFields');
-const { encrypt } = require('../utils/secretBox');
+const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 // ─── SSO CONFIG ───
@@ -126,36 +122,11 @@ router.post('/mfa/verify', authenticate, limiters.account, async (req, res, next
  * hands back, rather than a userId from the body: the old version let anyone
  * mint challenges for any account they could name.
  */
-// Before sign-in, per address; each call writes a row.
-router.post('/mfa/challenge', limiters.auth, async (req, res, next) => {
-  try {
-    const { mfaToken, deviceId } = req.body || {};
-    let decoded;
-    try {
-      decoded = jwt.verify(mfaToken, JWT_SECRET);
-    } catch {
-      return res.status(401).json({ error: 'That sign-in attempt expired. Start again.' });
-    }
-    if (decoded.purpose !== 'mfa-pending' || !decoded.sub) {
-      return res.status(401).json({ error: 'That sign-in attempt expired. Start again.' });
-    }
-
-    const prisma = req.app.locals.prisma;
-    const device = await prisma.mfaDevice.findFirst({
-      where: { id: deviceId, userId: decoded.sub, verified: true },
-    });
-    if (!device) return res.status(400).json({ error: 'Device not verified' });
-
-    // randomInt is drawn from the CSPRNG; Math.random is predictable.
-    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
-    const challenge = await prisma.mfaChallenge.create({
-      data: { userId: decoded.sub, deviceId, code, expiresAt: new Date(Date.now() + 300000) },
-    });
-    // Delivery over SMS/email is not implemented; the code is stored for
-    // /api/auth/mfa/verify to check once a transport exists.
-    res.json({ challengeId: challenge.id, expiresIn: 300 });
-  } catch (err) { next(err); }
-});
+// Before sign-in, per address. Nothing delivers a code by SMS or email: this
+// stored one and answered as if it were on its way, and the user waited for
+// it. The authenticator app's codes are the second factor.
+router.post('/mfa/challenge', limiters.auth, (req, res) => unavailable(res, 'MFA_CODE_DELIVERY_UNAVAILABLE',
+  'Sending a sign-in code by SMS or email is not available. Use the code from your authenticator app. No code was sent.'));
 // Only the caller's own device. This deleted any account's device by id, so
 // anyone signed in could strip an administrator's second factor.
 router.delete('/mfa/devices/:id', authenticate, limiters.account, async (req, res, next) => {
@@ -171,25 +142,13 @@ router.delete('/mfa/devices/:id', authenticate, limiters.account, async (req, re
 router.get('/encryption/policies', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try { res.json({ data: await req.app.locals.prisma.encryptionPolicy.findMany() }); } catch (err) { next(err); }
 });
-router.post('/encryption/policies', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.status(201).json(await req.app.locals.prisma.encryptionPolicy.create({ data: columnsFrom('encryptionPolicy', req.body) })); } catch (err) { next(err); }
-});
-router.put('/encryption/policies/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.json(await req.app.locals.prisma.encryptionPolicy.update({ where: { id: req.params.id }, data: columnsFrom('encryptionPolicy', req.body) })); } catch (err) { next(err); }
-});
-router.post('/encryption/rotate-key', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const latest = await prisma.encryptionKey.findFirst({ orderBy: { version: 'desc' } });
-    const newVersion = (latest?.version || 0) + 1;
-    // Sealed with the server's secret (utils/secretBox), as the column says it
-    // is: the raw key sat in the database in the clear.
-    const keyMaterial = encrypt(crypto.randomBytes(32).toString('hex'));
-    const key = await prisma.encryptionKey.create({ data: { version: newVersion, keyMaterial, status: 'Active' } });
-    if (latest) await prisma.encryptionKey.update({ where: { id: latest.id }, data: { status: 'Archived', archivedAt: new Date() } });
-    res.json({ version: key.version, status: key.status });
-  } catch (err) { next(err); }
-});
+// Nothing encrypts records by policy, and no key in EncryptionKey encrypts
+// anything (secrets are sealed with the server's own key, utils/secretBox):
+// a policy or a rotated key protected nothing while it said it did.
+const ENCRYPTION = "Encryption policies are not available: nothing encrypts records by policy, and no key encrypts any data.";
+router.post('/encryption/policies', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'ENCRYPTION_UNAVAILABLE', `${ENCRYPTION} No policy was saved.`));
+router.put('/encryption/policies/:id', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'ENCRYPTION_UNAVAILABLE', `${ENCRYPTION} No policy was changed.`));
+router.post('/encryption/rotate-key', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'ENCRYPTION_UNAVAILABLE', `${ENCRYPTION} No key was rotated.`));
 router.get('/encryption/keys', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try {
     const keys = await req.app.locals.prisma.encryptionKey.findMany({ orderBy: { version: 'desc' }, select: { id: true, version: true, status: true, activatedAt: true, archivedAt: true } });
@@ -237,14 +196,7 @@ router.get('/sessions', authenticate, requirePermission('admin', 'read'), requir
 });
 
 // IP allowlist/blocklist management
-router.post('/ip-rules', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { ip, type, reason } = req.body;
-    if (!ip || !type) return res.status(400).json({ error: 'ip and type (allow/block) required' });
-    const rule = await prisma.ipRule.create({ data: { ip, type, reason, createdById: req.user.id } }).catch(() => null);
-    if (!rule) return res.status(500).json({ error: 'Failed to create rule' });
-    await req.audit({ action: 'create', module: 'security', recordId: rule.id, details: `${type} IP ${ip}` });
-    res.status(201).json(rule);
-  } catch (err) { next(err); }
-});
+// Nothing checks an address against these rules at sign-in or on any request,
+// so an allow or block rule protected nothing while it said it did.
+router.post('/ip-rules', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'IP_RULES_UNAVAILABLE',
+  'IP allow and block rules are not available: nothing would check them, at sign-in or after. No rule was saved.'));

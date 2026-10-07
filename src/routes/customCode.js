@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes, summaryRoute } = require('../utils/moduleStatus');
 const { looksLikeId, columnsFrom } = require('../utils/modelFields');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 // A segment that is not an id (`/count`) falls through to the routes below.
@@ -43,15 +44,10 @@ router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'),
   try { await req.app.locals.prisma.customCode.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
-// Activate/deactivate
-router.post('/:id/activate', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const script = await prisma.customCode.update({ where: { id: req.params.id }, data: { active: true } });
-    await req.audit({ action: 'update', module: 'customCode', recordId: script.id, details: 'Activated' });
-    res.json(script);
-  } catch (err) { next(err); }
-});
+// Nothing runs a script: no trigger, job or request executes custom code, so
+// activating or scheduling one changed a flag nothing reads. They now say so.
+const NEVER_RUNS = "Custom code doesn't run yet: nothing executes a script.";
+router.post('/:id/activate', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'CUSTOM_CODE_UNAVAILABLE', `${NEVER_RUNS} It was not activated.`));
 
 router.post('/:id/deactivate', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const s = await prisma.customCode.update({ where: { id: req.params.id }, data: { active: false } }); res.json(s); } catch (err) { next(err); }
@@ -64,8 +60,8 @@ router.post('/:id/test', authenticate, requirePermission('admin', 'full'), async
     const script = await prisma.customCode.findUnique({ where: { id: req.params.id } });
     if (!script) return res.status(404).json({ error: 'Not found' });
     const startTime = Date.now();
-    // Sandboxed execution would go here; for safety, just validate syntax
-    try { new Function(script.code); res.json({ success: true, executionTime: Date.now() - startTime, message: 'Syntax validation passed' }); }
+    // A syntax check, not a run: the code is parsed and never called.
+    try { new Function(script.code); res.json({ success: true, executionTime: Date.now() - startTime, message: 'The syntax is valid. This only checks that the code parses: custom code never runs.' }); }
     catch (e) { res.json({ success: false, error: e.message, message: 'Syntax error' }); }
   } catch (err) { next(err); }
 });
@@ -114,15 +110,7 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Schedule execution
-router.post('/:id/schedule', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { cron, enabled } = req.body;
-    const updated = await prisma.customCode.update({ where: { id: req.params.id }, data: { schedule: cron, scheduleEnabled: enabled !== false } });
-    res.json(updated);
-  } catch (err) { next(err); }
-});
+router.post('/:id/schedule', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'CUSTOM_CODE_UNAVAILABLE', `${NEVER_RUNS} Nothing was scheduled.`));
 
 // Dependencies
 // Read from the script's `code`; `source` is not a column, so this always

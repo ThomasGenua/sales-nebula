@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 
 const { pickModelFields } = require('../utils/modelFields');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 /*
@@ -155,14 +156,10 @@ router.get('/:id/schedule', authenticate, requirePermission('admin', 'read'), as
   } catch (err) { next(err); }
 });
 
-router.put('/:id/schedule', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { syncFrequency, syncEnabled } = req.body;
-    const updated = await prisma.integration.update({ where: { id: req.params.id }, data: { syncFrequency, syncEnabled, nextSyncAt: syncEnabled ? new Date(Date.now() + 3600000) : null } });
-    res.json(present(updated));
-  } catch (err) { next(err); }
-});
+// Nothing syncs an integration (POST /:id/sync answers 501), so a schedule
+// would run nothing: this set one and promised the next sync in an hour.
+router.put('/:id/schedule', authenticate, requirePermission('admin', 'edit'), (req, res) => unavailable(res, 'INTEGRATION_SYNC_UNAVAILABLE',
+  'Scheduled sync is not available: no integration can sync yet. No schedule was set.'));
 
 // Field mapping
 router.get('/:id/mappings', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
@@ -192,6 +189,8 @@ router.get('/:id/health', authenticate, requirePermission('admin', 'read'), asyn
     if (!int) return res.status(404).json({ error: 'Not found' });
     const recentLogs = await prisma.syncLog.findMany({ where: { integrationId: req.params.id }, orderBy: { startedAt: 'desc' }, take: 10 });
     const errorCount = recentLogs.filter(l => ['error', 'Failed'].includes(l.status)).length;
-    res.json({ status: errorCount > 3 ? 'unhealthy' : errorCount > 0 ? 'degraded' : 'healthy', recentErrors: errorCount, lastSync: int.lastSyncAt, recentLogs: recentLogs.slice(0, 5) });
+    // One that has never synced is not "healthy": that is all this said of it.
+    const status = !recentLogs.length ? 'never synced' : errorCount > 3 ? 'unhealthy' : errorCount > 0 ? 'degraded' : 'healthy';
+    res.json({ status, recentErrors: errorCount, lastSync: int.lastSyncAt, recentLogs: recentLogs.slice(0, 5) });
   } catch (err) { next(err); }
 });

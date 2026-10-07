@@ -2,127 +2,142 @@
 
 ## What Is Sales Nebula?
 
-Sales Nebula is an enterprise CRM platform that provides complete Salesforce feature parity in a modern, self-hosted Node.js stack. It covers the full customer lifecycle -- from lead capture through deal closure, service delivery, and renewal -- with 173 data models, 576+ API endpoints, and a Bloomberg Terminal-inspired React frontend.
+Sales Nebula is a self-hosted CRM for one company's sales and service teams:
+accounts, contacts, leads, deals, quotes, invoices and cases, with the rules,
+approvals and automation that act on them. It runs on Node.js and PostgreSQL,
+with a React app in a Bloomberg Terminal-inspired dark design.
+
+It is not a Salesforce replacement feature for feature. Earlier versions of
+this page claimed "complete Salesforce feature parity" and "132/132"
+features; that was wrong, and the claim is withdrawn. Many modules store
+configuration that nothing acts on yet, and where an action would do
+nothing the API now refuses it with a 501 instead of reporting success.
+[Feature status](FEATURE_STATUS.md) lists what works, what is limited and
+what is unavailable.
 
 ## Who Is It For?
 
-**Startups** replacing Salesforce to cut costs while keeping full CRM functionality. Sales Nebula has no per-seat licensing -- host it yourself and add unlimited users.
+**Teams that want their CRM data on their own servers**, and need the core
+records with real rules behind them: validation, duplicate and assignment
+rules, workflows, approvals and an audit trail. There is no per-seat
+licence.
 
-**Enterprises** wanting a self-hosted, customizable CRM with full control over data residency, compliance, and extensibility. Every feature is API-first, so integrations are straightforward.
+**Developers** building on a REST API: every module has one, the standard
+modules share one list, filter and write pattern, and webhooks and an OAuth
+2.0 provider connect other systems.
 
-**Developers** building CRM-powered applications on a well-documented REST API. The CRUD router factory means new modules take minutes to scaffold, and the 253-index database is tuned for performance.
-
-**Agencies** needing a white-label CRM for client deployments. The design system, branding, and configuration are all themeable.
+**Not yet for teams that need:** mail and calendar sync with Gmail or
+Outlook, e-signature, Slack, PDF documents, a mobile app, running visual
+flows or AI agents, or several companies in one install. See
+[Feature status](FEATURE_STATUS.md#not-built).
 
 ---
 
 ## Core Capabilities
 
-### 1. Lead-to-Cash Pipeline
+### 1. Sales
 
-**Lead Management** -- Capture leads from web forms (Web-to-Lead), email (Email-to-Case), API, or manual entry. Automatic lead scoring assigns points based on configurable rules (company size, engagement, demographics). Assignment rules distribute leads to reps by territory, round-robin, or load balancing. CSV import handles bulk data migration.
+**Leads** -- Capture leads from the web-to-lead form, imports, the API or by
+hand. Assignment rules route new leads. Scoring rules score leads
+from the web form automatically, and other leads on request.
 
-**Deal Pipeline** -- Full pipeline management with configurable stages, probability tracking, and weighted pipeline forecasting. Each deal tracks contact roles (Decision Maker, Champion, Budget Holder), revenue splits across reps, competitive intelligence, and complete stage-change history. Built-in analytics cover velocity (average days per stage), aging (stale deals), and win/loss analysis with rep-level breakdown.
+**Deals** -- A pipeline with stages and probabilities, contact roles,
+competitors, stage history, and velocity, aging and win/loss figures.
 
-**Configure-Price-Quote (CPQ)** -- Build complex quotes from product bundles with dynamic pricing. The CPQ engine supports tiered discount schedules, product rules (compatibility, exclusions), price rules (volume discounts, term-based), and guided selling questionnaires that recommend products based on answers. Quote validation catches errors before they reach customers.
+**Quotes and invoices** -- Quotes with line items, discounts and totals;
+accepting a quote, turning it into an invoice or an order, and versions.
+Quotes and invoices print from the browser; no PDF file is generated.
 
-**Order and Contract Management** -- Convert won deals to orders, generate invoices from quotes with line items auto-calculated, and manage contract lifecycles with activation and renewal tracking. Revenue recognition schedules handle period-based revenue allocation.
+**Forecasts** -- Built from each owner's open deals in the period and
+refreshed every 4 hours. Quotas are entered by managers.
 
-**Territory Management** -- Define territory models (Planning, Active, Archived), build hierarchical territory trees, set assignment rules (geography, industry, revenue band), and map accounts to territories. Multiple models support what-if planning.
+**Territories** -- A territory hierarchy, with accounts mapped to territories
+by hand. Territory assignment rules are stored but do not run yet.
 
 ### 2. Service and Support
 
-**Case Management** -- Create cases from email, web forms, API, or the agent interface. Cases support SLA policies with response and resolution targets, escalation rules, and entitlement verification. Comments and resolution tracking maintain a complete case history.
+**Cases** -- From the agent screen, the web-to-case form, email-to-case, a
+connected Microsoft mailbox, or the API. SLA timers count business hours
+only, and a case's status history is kept.
 
-**Knowledge Base** -- Author and version articles with categories, attachments, and full-text search. Articles can be published, voted on, and organized into a self-service portal.
+**Knowledge Base** -- Articles with categories, publishing and search.
 
-**Omnichannel Routing** -- Route work items (cases, chats, calls) to agents based on availability, capacity, and skill matching. Real-time presence tracking shows which agents are online and at capacity. Chat sessions support accept, message, transfer, and end flows.
+**Field Service** -- Work orders that are dispatched, scheduled to a
+technician and dates, completed or cancelled.
 
-**Field Service** -- Dispatch work orders with line items and schedule service appointments. Tracks technician assignments, parts usage, and completion status.
+**Scheduler and Surveys** -- Appointment booking, and CSAT, NPS and CES
+surveys with their responses.
 
-**Scheduler** -- Salesforce Scheduler equivalent for booking appointments. Define available slots, let contacts book, and manage cancellations. Availability queries return open slots for a given user and date.
+### 3. Marketing
 
-**Surveys** -- Create CSAT, NPS, CES, or custom surveys with JSONB question definitions. Collect responses tied to contacts and cases. Analytics endpoint returns total responses and average score.
+**Campaigns** -- Planning, members, recipients, responses and ROI. Sending a
+campaign to its recipients is not available yet: the send action answers 501
+and changes nothing. Individual sales emails go out when SMTP is set up.
 
-### 3. Marketing and Campaigns
+**Email sequences** -- Multi-step sequences whose steps are sent every 10
+minutes when SMTP is set up.
 
-**Campaign Management** -- Plan campaigns with member and recipient lists, record responses and measure ROI. Multi-touch attribution models show which campaigns influenced which deals and what percentage of revenue each campaign drove. Bulk campaign delivery is unavailable: the send action returns 501 and does not change delivery state. Individual sales emails can be sent through the separate email workflow when SMTP is configured.
+### 4. Automation
 
-**Email Automation** -- Build multi-step drip sequences with enrollment tracking. Templates support merge fields. Sending tracks opens (tracking pixel), clicks, and bounces via the EmailTracking model. Sequences can be activated, paused, and processed on schedule.
+**One write path** -- Every save of a module's records, from a screen, an
+import, the bulk API, a job or a conversion, runs the same rules: validation
+on every save, duplicate and assignment rules on create, then audit,
+workflows and webhooks.
 
-### 4. AI and Analytics
+**Workflows** -- Run on create, update, status change or a schedule, and
+update fields, create tasks, notify people or send email.
 
-**AI Agents** -- Configure autonomous agents powered by Anthropic Claude. Each agent has a defined task, system prompt, model configuration, and knowledge base. Execution history logs every run with input, output, token usage, and duration.
+**Approval processes** -- Sequential steps whose approver is a user, a role,
+the submitter's manager or a queue, with entry conditions and final actions.
 
-**Copilot** -- Conversational AI assistant with message threading. Start conversations, ask questions, and execute actions through natural language.
+**Webhooks** -- Signed, retried, and logged outbound events.
 
-**Conversation Intelligence** -- Upload call recordings for transcription, sentiment analysis, and key moment extraction. Integrated dialer supports initiating, connecting, and ending calls.
+### 5. AI and Analytics
 
-**Reports and Dashboards** -- Build custom reports with the report builder, choosing modules, fields, filters, and groupings. Schedule recurring delivery via email. Compose dashboards from multiple datasets. Export in CSV, JSON, or XLSX.
+**AI Copilot** -- Answers questions about your deals, cases and activities
+using Claude when an Anthropic API key is set. Without one it answers from
+fixed rules, and says so.
 
-**Revenue Forecasting** -- Quota-based forecasting with roll-up hierarchies. Forecast items track individual deals with categories (Pipeline, Best Case, Commit, Closed). Submit and approve workflows enforce forecast discipline.
+**Reports** -- Saved tabular, summary and chart reports that return real
+figures, limited to what each viewer may see, with CSV and JSON export
+through the API. Scheduled delivery is not available.
 
-### 5. Platform and Extensibility
+**Analytics** -- A pipeline and activity overview, an ad-hoc query, and
+funnel and cohort figures.
 
-**Custom Objects** -- Create new data entities at runtime with typed fields (text, number, date, picklist, lookup, checkbox, currency, email, phone, url, textarea). Records are stored as flexible JSONB, so schema changes don't require database migrations.
+AI agents, AI lead scoring and call transcription are not available.
 
-**Flow Builder** -- Visual automation builder with versioning. Flows have Draft and Active states. Each execution is logged with status, input/output data, and error messages.
+### 6. Security and Administration
 
-**Approval Processes** -- Multi-step approval chains with configurable approvers per step. Requests move through Pending, Approved, Rejected, Recalled states. Steps support sequential processing.
+**Users** -- A Users screen to invite people, change their role, deactivate
+and reactivate them, and send password resets. Public sign-up creates a
+request that an administrator approves.
 
-**Marketplace** -- AppExchange-equivalent for third-party integrations. Browse listings publicly, install with authentication. Track installs and reviews.
+**Access control** -- Roles with read, edit or full access per module, and
+row-level security from record owners, the role hierarchy, org-wide
+defaults, sharing rules and security groups. Nobody can grant more access
+than they hold.
 
-**Generic Integrations** -- Store third-party integration configuration, field mappings and schedule settings. Generic sync and connection tests are unavailable and return 501; saving settings does not connect a provider or start a sync worker. The separate Microsoft mailbox APIs, outbound webhooks and Connected Apps remain available.
+**Sign-in** -- Passwords with account lockout, authenticator-app (TOTP)
+two-factor, API keys, and Sales Nebula as an OAuth 2.0 provider for
+connected apps. SSO through SAML or OIDC, SMS or email codes, IP rules,
+field-level security and encryption policies are not available.
 
-**Environments** -- Create sandbox environments for testing. Export metadata (custom fields, validation rules, workflows, record types, page layouts, roles, sharing rules) and import into another environment. Change sets bundle related metadata for deployment.
+**Audit and monitoring** -- An audit log of record changes and audited
+actions, kept 90 days, and login history.
 
-### 6. Security and Compliance
-
-**Role-Based Access Control** -- Three-tier permission model (read, edit, full) per module per role. Field-level security controls which fields each role can see and edit. Org-wide defaults set baseline record visibility.
-
-**Sharing Model** -- Org-wide defaults (Private, Public Read, Public Read-Write) with sharing rules for exceptions. Record-level sharing supports role hierarchies. Check endpoints verify current user access to specific records.
-
-**Shield (Monitoring)** -- Login history tracks every authentication attempt with IP, browser, platform, status, and session ID. Event logs capture API calls, data exports, report runs, and URI access with risk scoring. Summary endpoint shows 24-hour event counts by type.
-
-**GDPR Compliance** -- Consent records track opt-in/opt-out by type (email marketing, data processing, data sharing, profiling). Self-service opt-out endpoint lets data subjects withdraw consent directly via email lookup. Records include consent date, expiry, source, and IP address.
-
-**Encryption** -- Platform encryption policies for sensitive fields with key management and rotation.
-
-**Authentication Security** -- Bcrypt password hashing, account lockout after configurable failed attempts, authenticator-app MFA (TOTP), and API key authentication for server-to-server integrations. SMS/email MFA and generic SAML/OIDC sign-in are unavailable; SSO configuration is stored only. Separate Google and Microsoft sign-in APIs work for existing active accounts when explicitly enabled and configured, but the current browser login uses password sign-in and has no provider buttons or OAuth callback flow.
+**Privacy** -- Consent records with opt-in and opt-out, and a log of privacy
+requests.
 
 ---
 
 ## Admin Dashboard
 
-The admin dashboard provides a real-time command center with:
-
-**System Health** -- Uptime, memory usage, Node version, model/endpoint/index counts. Red alerts for memory exceeding 500MB.
-
-**Data Volume** -- Record counts for 29 key modules (users, contacts, leads, deals, accounts, cases, activities, products, campaigns, invoices, contracts, orders, and more) with total record count.
-
-**Security Metrics** -- Stored SSO configurations (not working sign-in providers), MFA devices enrolled, encryption policies, active API keys, logins in last 24 hours, events in last 24 hours, active duplicate records. Color-coded: green for healthy, red for issues.
-
-**Revenue Pipeline** -- Pipeline value, won value, open deals, won deals.
-
-**Automation** -- Active workflows, active flows, pending approvals. Red alert for more than 5 pending approvals.
-
-**Activity Feeds** -- Last 8 logins with status and IP, last 8 audit entries with action and module.
-
----
-
-## User Management
-
-Full user lifecycle management from the Settings page:
-
-**Add Users** -- Modal form with first name, last name, email, password (8-character minimum), role assignment from dropdown, and active/inactive toggle. Validation enforces required fields.
-
-**Edit Users** -- Inline edit button on each user row. Same modal with pre-populated fields. Password field is optional on edit (leave blank to keep current).
-
-**Deactivate/Activate** -- One-click toggle without deleting. Inactive users see a red "INACTIVE" badge and cannot log in.
-
-**Delete Users** -- Confirmation dialog with user's full name and email. Backend prevents self-deletion. Permanent action.
-
-**Role Assignment** -- Dropdown populated from all system roles with permission counts. Roles tab shows user count per role.
+The Admin page shows system health (database, uptime, memory), record counts
+across the main modules, security figures (sign-ins in the last 24 hours,
+enrolled two-factor devices, active API keys), the revenue pipeline, pending
+approvals, and the latest sign-ins and audit entries. It takes `admin: read`
+and `users: read`.
 
 ---
 
@@ -133,53 +148,26 @@ Full user lifecycle management from the Settings page:
 | Runtime | Node.js 20 (LTS) |
 | Framework | Express.js |
 | ORM | Prisma |
-| Database | PostgreSQL 16 |
-| Cache | Redis 7 |
-| Auth | JWT (HS256) dual tokens |
-| AI | Anthropic Claude API |
-| Container | Docker (Alpine, ~150MB) |
-| Frontend | React with Tailwind CSS |
+| Database | PostgreSQL 16 (SQLite fallback in development) |
+| Cache and queues | Redis 7, optional |
+| Auth | JWT access and refresh tokens, httpOnly cookies in the browser |
+| AI | Anthropic Claude API, optional |
+| Container | Docker (Node 20 Alpine) |
+| Frontend | React with Tailwind CSS, built with Vite |
 
-### Scale
+### Size
+
+Counted from the code in October 2026:
 
 | Metric | Value |
 |--------|-------|
-| Database models | 173 |
-| API endpoints | 576+ |
-| Route modules | 86 |
-| Database indexes | 253 |
-| Frontend pages | 28 |
-| Automated tests | 246 |
-| Codebase | ~22,000 lines |
-| Salesforce features | 132/132 (100% parity) |
-| Bonus models | +39 beyond Salesforce |
+| Database models | 286 |
+| Route files | 100 |
+| Frontend pages | 55 |
+| Jest test files | 51 |
+| Browser test specs | 5 |
 
-### Performance
-
-- Startup: ~3 seconds
-- Simple CRUD latency: <50ms
-- Complex aggregations: <200ms
-- Supports thousands of concurrent users with connection pooling
-- Memory footprint: 80-150MB typical
-
----
-
-## Salesforce Feature Parity
-
-132 features across all major clouds, verified by automated audit:
-
-| Cloud | Features |
-|-------|----------|
-| Sales Cloud | Leads, Contacts, Accounts, Person Accounts, Opportunities (Deals), Products, Pricebooks, Quotes, Quote Templates, Quote Line Items, Orders, Contracts, Invoices, Subscriptions, Revenue Recognition, Forecasts, Territories, Sales Path, CPQ, Advanced CPQ, Teams, Assets, Partners |
-| Service Cloud | Cases, Knowledge, Entitlements, SLA, Omnichannel, Field Service, Macros, Email-to-Case, Web-to-Case, Scheduler, Surveys |
-| Marketing Cloud | Campaigns, Campaign Members, Campaign Influence, Email Templates, Email Sequences, Email Tracking |
-| Experience Cloud | Portal Configuration, Portal Users, Chatter/Feed |
-| Platform | Custom Objects, Custom Fields, Validation Rules, Record Types, Page Layouts, Flows, Workflows, Approvals, Platform Events, Environments, Change Sets, Formula Fields, Custom Code, Custom Components |
-| Analytics | Reports, Report Types, Scheduled Reports, Dashboards, Datasets |
-| Einstein AI | AI Agents, Copilot, Conversation Intelligence, Lead Scoring |
-| Shield | Login History, Event Logs, Encryption, Field-Level Security |
-| Data | Import Wizard, Data Export, Bulk API, Webhooks, Connected Apps, OAuth Provider, Marketplace, CDP |
-| Compliance | Consent (GDPR), Duplicate Management, Sharing Rules, OWD, Role Hierarchy, Recycle Bin, Audit Log |
+No performance figures are claimed: the app has not been benchmarked.
 
 ---
 
@@ -188,37 +176,25 @@ Full user lifecycle management from the Settings page:
 ### Docker (Recommended)
 
 ```bash
-docker compose up -d
-```
-
-One command deploys PostgreSQL, Redis, API server, and runs migrations. Persistent volumes protect data.
-
-### Manual
-
-```bash
-npm run setup && npm run dev
-```
-
-### Cloud
-
-Compatible with Kubernetes, ECS, Cloud Run, or any container orchestrator. Health checks pre-configured for load balancer integration.
-
----
-
-## Getting Started
-
-```bash
-# Clone and configure
-git clone <repo-url> && cd sales-nebula-backend
 cp .env.example .env
-# Set DATABASE_URL and JWT_SECRET
-
-# Start
-docker compose up -d
-
-# Login
-# http://localhost:4000
-# thomas@salesnebula.com / password123
+# Set POSTGRES_PASSWORD, JWT_SECRET, INITIAL_ADMIN_EMAIL,
+# INITIAL_ADMIN_PASSWORD and FRONTEND_URL, and configure SMTP.
+docker compose up --build -d
 ```
 
-Full documentation: README.md, docs/API_REFERENCE.md, docs/ARCHITECTURE.md
+This starts PostgreSQL, Redis and the API, applies the migrations and
+creates the first administrator from `INITIAL_ADMIN_EMAIL`. Production
+creates no demo users or records. The app is at `http://localhost:7544`;
+sign in at `/login` with that administrator.
+
+### Locally
+
+```bash
+npm run setup && npm start
+```
+
+See the [README](../README.md) for the seeded development administrator,
+and [Sales pilot setup](SALES_PILOT.md) for a pilot install.
+
+Full documentation: [README](../README.md), [Feature status](FEATURE_STATUS.md),
+[API reference](API_REFERENCE.md), [Architecture](ARCHITECTURE.md).

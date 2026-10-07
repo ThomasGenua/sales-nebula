@@ -55,7 +55,6 @@ const ALLOWED = {
   'src/routes/sla.js': { named: 1, why: 'the SLA due date and status, recomputed from the policy' },
   'src/routes/prospects.js': { named: 2, why: 'the opt-out set on every prospect with a suppressed address, and the bulk rescore after a scoring change' },
   'src/routes/admin.js': { named: 2, why: "the bulk lead rescore, and the old default currency stamped on deals that had none" },
-  'src/routes/ai.js': { named: 1, why: 'the bulk lead rescore' },
 };
 
 function sourceFiles(dir) {
