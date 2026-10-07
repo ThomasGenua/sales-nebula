@@ -135,7 +135,7 @@ Permission levels are cumulative: `full` implies `edit` which implies `read`. Th
 
 ### API Key Authentication
 
-Server-to-server integrations use API keys passed via `X-API-Key` header. Only a SHA-256 of each key is stored, and a key acts with at most the creator's permissions. Each key tracks last-used timestamp and request count.
+Server-to-server integrations use API keys passed via `X-API-Key` header. Only a SHA-256 of each key is stored, and a key acts with at most the creator's permissions. Each key records when it was last used, and allows its `rateLimit` of requests per hour.
 
 ## Security Layers
 
