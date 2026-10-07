@@ -1347,22 +1347,29 @@ function CampaignsPage() {
   </div>;
 }
 
+// "queued" is a message no mail server took: email is not set up, and
+// nothing sends it later.
+function EmailStatus({ value }) {
+  const s = (value || 'draft').toLowerCase();
+  if (s === 'queued') return <span title="Email is not set up on this server, so this was recorded and not sent"><Badge color="warning">not sent</Badge></span>;
+  return <Badge color={s==='sent'?'success':s==='failed'?'danger':'neutral'}>{s}</Badge>;
+}
+
 function EmailsPage() {
   return <ModulePage title="Emails" icon={Mail} endpoint="/emails" permissionModule="emails"
     detailExtras={(record, onChanged) => <EmailActions record={record} module="emails" onChanged={onChanged} />}
     columns={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To", render: (v, row) => v || row?.toEmail || "-" },
-      { key: "status", label: "Status", render: v => { const s = (v || 'draft').toLowerCase(); return <Badge color={s==='sent'?'success':s==='queued'?'info':s==='failed'?'danger':'neutral'}>{s}</Badge>; } },
+      { key: "status", label: "Status", render: v => <EmailStatus value={v} /> },
       { key: "sentAt", label: "Sent", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Queued","Sent","Failed"] },
+      { key: "status", label: "Status", type: "select", options: ["Draft", { value: "Queued", label: "Not sent (email not set up)" }, "Sent", "Failed"] },
     ]}
     detailFields={[
       { key: "subject", label: "Subject" }, { key: "to", label: "To" }, { key: "from", label: "From" },
-      { key: "status", label: "Status" }, { key: "body", label: "Body" },
+      { key: "status", label: "Status", render: v => <EmailStatus value={v} /> }, { key: "body", label: "Body" },
       { key: "sentAt", label: "Sent At", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
-      { key: "openedAt", label: "Opened At", render: v => v ? new Date(v).toLocaleString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "subject", label: "Subject", required: true },{ key: "to", label: "To", required: true },{ key: "body", label: "Body", type: "textarea" }]}
   />;
@@ -1503,7 +1510,9 @@ function CustomObjectsPage() {
   />;
 }
 function AiAgentsPage() {
-  return <ModulePage title="AI Agents" icon={Zap} endpoint="/ai-agents"
+  return <div className="space-y-4">
+    <FeatureAvailability features={["aiAgents"]} />
+    <ModulePage title="AI Agents" icon={Zap} endpoint="/ai-agents"
     columns={[
       { key: "name", label: "Name" }, { key: "type", label: "Type" },
       { key: "active", label: "Active", render: v => <Badge color={v?'success':'neutral'}>{v?'Active':'Inactive'}</Badge> },
@@ -1520,10 +1529,13 @@ function AiAgentsPage() {
       { key: "config", label: "Configuration" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["SDR","DealCoach","ServiceAgent","Admin"] },{ key: "description", label: "Description" }]}
-  />;
+  />
+  </div>;
 }
 function FlowBuilderPage() {
-  return <ModulePage title="Flow Builder" icon={GitBranch} endpoint="/flows"
+  return <div className="space-y-4">
+    <FeatureAvailability features={["flows"]} />
+    <ModulePage title="Flow Builder" icon={GitBranch} endpoint="/flows"
     columns={[
       { key: "name", label: "Name" }, { key: "type", label: "Type" }, { key: "module", label: "Module" },
       { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Draft'?'neutral':'warning'}>{v||'Draft'}</Badge> },
@@ -1539,10 +1551,13 @@ function FlowBuilderPage() {
       { key: "triggerType", label: "Trigger" }, { key: "description", label: "Description" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["RecordTriggered","ScreenFlow","Scheduled","AutoLaunched"] },{ key: "module", label: "Module" },{ key: "description", label: "Description" }]}
-  />;
+  />
+  </div>;
 }
 function MarketplacePage() {
-  return <ModulePage title="Marketplace" icon={Globe} endpoint="/marketplace"
+  return <div className="space-y-4">
+    <FeatureAvailability features={["marketplace"]} />
+    <ModulePage title="Marketplace" icon={Globe} endpoint="/marketplace"
     columns={[
       { key: "name", label: "Name" }, { key: "category", label: "Category" },
       { key: "author", label: "Author" },
@@ -1561,7 +1576,8 @@ function MarketplacePage() {
       { key: "description", label: "Description" }, { key: "version", label: "Version" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "author", label: "Author", required: true },{ key: "category", label: "Category", type: "select", options: ["Utility","Analytics","Integration","Sales","Service","Marketing"] },{ key: "pricing", label: "Pricing", type: "select", options: ["Free","Paid","Freemium"] },{ key: "description", label: "Description" }]}
-  />;
+  />
+  </div>;
 }
 
 // ========================================================================
@@ -3524,14 +3540,14 @@ function CopilotPage() {
   const { apiFetch } = useAuth();
   const [messages, setMessages] = useState([]); const [input, setInput] = useState(""); const [loading, setLoading] = useState(false);
   const chatRef = useRef(null);
-  const send = async () => { if (!input.trim()||loading) return; setMessages(p=>[...p,{role:'user',text:input}]); setInput(""); setLoading(true); try { const d=await apiFetch('/copilot/ask',{method:'POST',body:{question:input}}); setMessages(p=>[...p,{role:'assistant',text:d.answer||d.response||JSON.stringify(d)}]); } catch(e){ setMessages(p=>[...p,{role:'assistant',text:`Error: ${e.message}`}]); } finally{setLoading(false);} };
+  const send = async () => { if (!input.trim()||loading) return; setMessages(p=>[...p,{role:'user',text:input}]); setInput(""); setLoading(true); try { const d=await apiFetch('/copilot/ask',{method:'POST',body:{question:input}}); setMessages(p=>[...p,{role:'assistant',text:d.answer||d.response||JSON.stringify(d),ruleBased:d.model==='rule-based'}]); } catch(e){ setMessages(p=>[...p,{role:'assistant',text:`Error: ${e.message}`}]); } finally{setLoading(false);} };
   useEffect(()=>{chatRef.current?.scrollTo(0,chatRef.current.scrollHeight);},[messages]);
   return (
     <div className="flex flex-col h-[calc(100dvh-140px)] sm:h-[calc(100dvh-110px)]">
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-3">AI Copilot</h1>
       <div ref={chatRef} className="flex-1 overflow-y-auto space-y-3 mb-3 overscroll-contain">
         {messages.length===0&&<EmptyState icon={Zap} title="Ask me anything" subtitle="Deals, contacts, tasks, insights" />}
-        {messages.map((m,i)=>(<div key={i} className={`flex ${m.role==='user'?'justify-end':'justify-start'}`}><div className={`max-w-[85%] sm:max-w-[70%] px-4 py-3 rounded-2xl text-sm ${m.role==='user'?'bg-[#F5A623] text-[#060B1A] rounded-br-md':'bg-[#0B1228] border border-[#182550] text-[#C8C2B4] rounded-bl-md'}`}>{m.text}</div></div>))}
+        {messages.map((m,i)=>(<div key={i} className={`flex ${m.role==='user'?'justify-end':'justify-start'}`}><div className={`max-w-[85%] sm:max-w-[70%] px-4 py-3 rounded-2xl text-sm ${m.role==='user'?'bg-[#F5A623] text-[#060B1A] rounded-br-md':'bg-[#0B1228] border border-[#182550] text-[#C8C2B4] rounded-bl-md'}`}>{m.text}{m.ruleBased&&<span className="block mt-2 text-xs text-[#7E8598]">No AI model is set up, so this answer comes from fixed rules, not AI.</span>}</div></div>))}
         {loading&&<div className="flex justify-start"><div className="bg-[#0B1228] border border-[#182550] rounded-2xl rounded-bl-md px-4 py-3 text-sm text-[#4A5168] animate-pulse">Thinking...</div></div>}
       </div>
       <div className="flex gap-2"><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder="Ask about your CRM data..." className="flex-1 px-4 py-3 bg-[#0E1630] border border-[#182550] rounded-xl text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] min-h-[48px]" /><Button onClick={send} disabled={loading} size="lg" icon={Send} ariaLabel="Send"><span className="hidden sm:inline">Send</span></Button></div>
@@ -3540,22 +3556,57 @@ function CopilotPage() {
 }
 
 // ── Chatter/Feed ──
+// A post, with its likes and comments. The like and comment buttons did
+// nothing; the API took both all along.
+function ChatterPost({ post: p, onChanged, onError }) {
+  const { apiFetch } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [reply, setReply] = useState("");
+  const [busy, setBusy] = useState(false);
+  const name = person => `${person?.firstName || 'User'} ${person?.lastName || ''}`.trim();
+  const act = async work => { setBusy(true); try { await work(); onChanged(); } catch (e) { onError(e.message); } finally { setBusy(false); } };
+  const like = () => act(() => apiFetch(`/chatter/${p.id}/like`, { method: 'POST', body: {} }));
+  const comment = () => reply.trim() && act(async () => { await apiFetch(`/chatter/${p.id}/comments`, { method: 'POST', body: { body: reply.trim() } }); setReply(""); });
+  const comments = p.comments || [];
+  return (
+    <article aria-label={`Post by ${name(p.author)}`} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xs font-bold text-[#F0EDE5]">{(p.author?.firstName?.[0]||'U')}</div><div><div className="text-sm font-medium text-[#F0EDE5]">{name(p.author)}</div><div className="text-xs text-[#4A5168]">{p.createdAt?new Date(p.createdAt).toLocaleString(...fmt()):''}</div></div></div>
+      <div className="text-sm text-[#C8C2B4]">{p.body}</div>
+      <div className="flex items-center gap-3 mt-3 pt-2 border-t border-[#182550]/40">
+        <button type="button" onClick={like} disabled={busy} aria-pressed={!!p.likedByMe} aria-label={`${p.likedByMe ? 'Unlike' : 'Like'} (${p.likeCount || 0})`}
+          className={`text-xs flex items-center gap-1 touch-manipulation ${p.likedByMe ? 'text-[#F5A623]' : 'text-[#4A5168] hover:text-[#F5A623]'}`}><Star size={12} />{p.likeCount||0}</button>
+        <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} aria-label={`Comments (${p.commentCount || 0})`}
+          className="text-xs text-[#4A5168] hover:text-[#60A5FA] flex items-center gap-1 touch-manipulation"><MessageSquare size={12} />{p.commentCount||0}</button>
+      </div>
+      {open && (
+        <div className="mt-3 space-y-2">
+          {comments.map(c => (
+            <div key={c.id} className="text-sm bg-[#0E1630] rounded-lg px-3 py-2"><span className="font-medium text-[#F0EDE5]">{name(c.author)}</span> <span className="text-[#C8C2B4]">{c.body}</span></div>
+          ))}
+          <div className="flex gap-2">
+            <Input placeholder="Write a comment" value={reply} onChange={setReply} className="flex-1" />
+            <Button size="sm" onClick={comment} disabled={busy || !reply.trim()}>Comment</Button>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function ChatterPage() {
   const { apiFetch } = useAuth();
   const [posts, setPosts] = useState([]); const [newPost, setNewPost] = useState(""); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
-  const load = useCallback(()=>{setLoading(true);apiFetch('/chatter?limit=30').then(d=>setPosts(d.data||d||[])).catch(()=>setPosts([])).finally(()=>setLoading(false));}, [apiFetch]);
+  // A refresh after a post, like or comment keeps the list on screen, so an
+  // open comment thread stays open; only the first load shows the spinner.
+  const load = useCallback((refresh = false)=>{if(!refresh)setLoading(true);apiFetch('/chatter?limit=30').then(d=>setPosts(d.data||d||[])).catch(()=>{if(!refresh)setPosts([]);}).finally(()=>setLoading(false));}, [apiFetch]);
   useEffect(()=>{load();},[load]);
-  const post = async()=>{if(!newPost.trim())return;try{await apiFetch('/chatter',{method:'POST',body:{body:newPost}});setNewPost("");load();}catch(e){setToast({message:e.message,type:'error'});}};
+  const post = async()=>{if(!newPost.trim())return;try{await apiFetch('/chatter',{method:'POST',body:{body:newPost}});setNewPost("");load(true);}catch(e){setToast({message:e.message,type:'error'});}};
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Chatter</h1>
       <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 mb-4"><TextArea value={newPost} onChange={setNewPost} placeholder="Share an update..." rows={2} /><div className="flex justify-end mt-2"><Button onClick={post} size="sm" icon={Send}>Post</Button></div></div>
       {loading ? <Spinner /> : posts.length===0 ? <EmptyState icon={MessageSquare} title="No posts yet" /> : (
-        <div className="space-y-3">{posts.map(p=>(<div key={p.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#F5A623] to-[#E8961A] flex items-center justify-center text-xs font-bold text-[#F0EDE5]">{(p.author?.firstName?.[0]||'U')}</div><div><div className="text-sm font-medium text-[#F0EDE5]">{p.author?.firstName||'User'} {p.author?.lastName||''}</div><div className="text-xs text-[#4A5168]">{p.createdAt?new Date(p.createdAt).toLocaleString(...fmt()):''}</div></div></div>
-          <div className="text-sm text-[#C8C2B4]">{p.body}</div>
-          <div className="flex items-center gap-3 mt-3 pt-2 border-t border-[#182550]/40"><button className="text-xs text-[#4A5168] hover:text-[#F5A623] flex items-center gap-1"><Star size={12} />{p.likeCount||0}</button><button className="text-xs text-[#4A5168] hover:text-[#60A5FA] flex items-center gap-1"><MessageSquare size={12} />{p.commentCount||0}</button></div>
-        </div>))}</div>)}
+        <div className="space-y-3">{posts.map(p => <ChatterPost key={p.id} post={p} onChanged={() => load(true)} onError={message => setToast({ message, type: 'error' })} />)}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );
@@ -5122,6 +5173,7 @@ function StudioPage() {
 
       {loading ? <Spinner /> : (
         <>
+          {tab === "fields" && <div className="mb-3"><FeatureAvailability features={["customFields"]} /></div>}
           {tab === "fields" && (fields.length === 0 ? <EmptyState icon={Wrench} title={`No custom fields on ${module}`} subtitle="Add fields without touching the schema" /> : (
             <div className="space-y-2">
               {fields.map(f => (

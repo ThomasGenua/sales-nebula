@@ -13,6 +13,22 @@ const FEATURES = {
     title: "Custom SSO providers",
     description: "Sign-in through custom SAML or OpenID Connect (OIDC) providers is unavailable. Use password sign-in, with authenticator-app two-factor authentication if enabled.",
   },
+  flows: {
+    title: "Running flows",
+    description: "Flows can be designed and saved here, but nothing runs them: activating, publishing, testing and running a flow are unavailable. Workflows run automation on every save.",
+  },
+  aiAgents: {
+    title: "Running AI agents",
+    description: "Agents can be configured and saved here, but nothing runs them: no AI model is called with an agent's settings, and activating, running and training are unavailable. AI Copilot answers questions when an AI model is set up.",
+  },
+  customFields: {
+    title: "Custom fields on records",
+    description: "Custom fields can be defined here, but no record form, list, report or export shows them yet, and their values cannot be stored. The validation rules defined here do apply on every save.",
+  },
+  marketplace: {
+    title: "Installing apps",
+    description: "The marketplace is a catalog to browse. Installing an app is unavailable: nothing would be installed, connected or run.",
+  },
 };
 
 export function FeatureAvailability({ features = ["campaigns", "integrations", "sso"] }) {
