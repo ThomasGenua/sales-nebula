@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { pickModelFields, lineItemFields, scalarOrderBy } = require('../utils/modelFields');
+const { pickModelFields, lineItemFields, scalarOrderBy, scalarWhere } = require('../utils/modelFields');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
@@ -85,13 +85,17 @@ const lineKey = l => [l.productId, l.description ?? null, l.quantity, l.unitPric
 router.get('/', requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { status, page = 1, limit = 50, search, sortBy, sortDir = 'desc' } = req.query;
+    const { status, page = 1, limit = 50, search, sortBy, sortDir = 'desc', ...filters } = req.query;
     const take = Math.min(parseInt(limit) || 50, 200);
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
     let where = {};
     if (status && status !== 'All') where.status = status;
     // By either number column; an invoice made with invoiceNumber was not found by it.
     if (search) where.OR = ['number', 'invoiceNumber'].map(f => ({ [f]: { contains: String(search), mode: 'insensitive' } }));
+    // Filters on an invoice's own columns (?accountId=, ?quoteId=), as the
+    // CRUD lists take them: a record page lists its invoices so. Other keys
+    // were ignored, so ?accountId= answered with every invoice.
+    Object.assign(where, scalarWhere('invoice', filters));
     // Invoices the caller may see, sorted on one of an invoice's own columns.
     where = await reachableWhere(req, 'invoices', 'invoice', where);
     const [invoices, total] = await Promise.all([

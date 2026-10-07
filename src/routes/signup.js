@@ -395,8 +395,15 @@ router.get('/invites', authenticate, requirePermission('users', 'read'), async (
       },
     });
 
+    // The role each invite gives, by name, for the Users screen: as each
+    // user's role is listed to whoever may list users.
+    const roles = await prisma.role.findMany({
+      where: { id: { in: [...new Set(invites.map(i => i.roleId).filter(Boolean))] } },
+      select: { id: true, name: true },
+    });
+    const roleName = new Map(roles.map(r => [r.id, r.name]));
     const now = new Date();
-    res.json(invites.map(i => ({ ...i, expired: i.status === 'Pending' && new Date(i.expiresAt) < now })));
+    res.json(invites.map(i => ({ ...i, roleName: roleName.get(i.roleId) || null, expired: i.status === 'Pending' && new Date(i.expiresAt) < now })));
   } catch (err) { next(err); }
 });
 
@@ -448,6 +455,9 @@ router.post('/invites/:id/revoke', authenticate, requirePermission('users', 'ful
     const invite = await prisma.userInvite.findUnique({ where: { id: req.params.id } });
     if (!invite) return res.status(404).json({ error: 'Invite not found' });
     if (invite.status === 'Accepted') return res.status(409).json({ error: 'That invite has already been accepted' });
+    // Only someone who could have sent it: one whose role has gone can go.
+    const refusal = await roleGrantRefusal(prisma, req.user, invite.roleId);
+    if (refusal && refusal !== 'Role not found') return res.status(403).json({ error: refusal });
 
     await prisma.userInvite.update({ where: { id: invite.id }, data: { status: 'Revoked', tokenHash: `revoked-${invite.id}` } });
     await req.audit({ action: 'update', module: 'signup', recordId: invite.id, details: `Invite revoked: ${invite.email}` });
@@ -461,6 +471,12 @@ router.post('/invites/:id/resend', authenticate, requirePermission('users', 'ful
     const invite = await prisma.userInvite.findUnique({ where: { id: req.params.id } });
     if (!invite) return res.status(404).json({ error: 'Invite not found' });
     if (invite.status !== 'Pending') return res.status(409).json({ error: `Cannot resend an invite that is ${invite.status.toLowerCase()}` });
+    // Only someone who could have sent it. A resend hands its sender the new
+    // link where email is not sent, so anyone with users: full could take an
+    // administrator's invite and accept it as their own.
+    const refusal = await roleGrantRefusal(prisma, req.user, invite.roleId);
+    if (refusal === 'Role not found') return res.status(409).json({ error: 'The role this invite gives no longer exists. Revoke it and send a new one.' });
+    if (refusal) return res.status(403).json({ error: refusal });
     if (invite.resendCount >= 5) return res.status(429).json({ error: 'Resend limit reached for this invite. Revoke it and issue a new one.' });
 
     const { raw, hash } = makeToken();
@@ -534,8 +550,10 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
     if (!first || !last) return res.status(400).json({ error: 'First and last name are required' });
 
     const hash = await bcrypt.hash(password, 12);
+    // Accepting signs them in, so it is their first sign-in: the Users screen
+    // said they had never signed in until they did so again.
     const user = await prisma.user.create({
-      data: { email: invite.email, password: hash, firstName: first, lastName: last, roleId: invite.roleId },
+      data: { email: invite.email, password: hash, firstName: first, lastName: last, roleId: invite.roleId, lastLoginAt: new Date() },
       include: { role: { include: { permissions: true } } },
     });
 

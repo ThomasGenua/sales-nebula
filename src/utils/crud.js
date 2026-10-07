@@ -121,7 +121,10 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         wanted[column] = { ...range, [end === 'From' ? 'gte' : 'lte']: bound };
         delete wanted[key];
       }
-      where = { ...where, ...scalarWhere(modelName, wanted) };
+      // Live records only, whatever the filters say: a filter on deletedAt
+      // (?deletedAt[gte]=..., ?deletedAtFrom=...) replaced this condition and
+      // listed deleted records, which only the recycle bin should show.
+      where = { ...where, ...scalarWhere(modelName, wanted), ...notDeleted() };
 
       const take = Math.min(parseInt(limit) || 50, 200); // Cap at 200
       const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;

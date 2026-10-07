@@ -11,6 +11,8 @@ marked **(public)**. The browser app uses a cookie session instead: sign in with
 
 Modules built with CRUD factory include: GET / (list), GET /:id, POST /, PUT /:id, DELETE /:id -- marked **[CRUD]**.
 
+A list (GET /) takes filters on the record's own columns, `?accountId=<id>&status=Open`, as a record page does to list an account's contacts. It also takes a range on a column, `?createdAtFrom=2026-01-01&createdAtTo=2026-01-31`, and `sortBy`, `sortDir`, `page`, `limit` (at most 200) and `search`. It answers `{ data, meta: { total, page, limit, pages } }`. A filter on anything but a column, such as a related record's field, is ignored. Deleted records are never listed, whatever the filters; the recycle bin lists them. The quotes and invoices lists take the same column filters, though not the From/To ranges.
+
 ---
 
 ## Table of Contents
@@ -68,7 +70,8 @@ User CRUD, roles, permissions, preferences, online status
 | GET | `/api/users` | List all users |
 | GET | `/api/users/:id` | Get user by ID |
 | POST | `/api/users` | Create new user |
-| PUT | `/api/users/:id` | Update user |
+| PUT | `/api/users/:id` | Update user (name, email, role, active) |
+| POST | `/api/users/:id/password-reset` | Email the user a one-time link to choose a new password |
 | DELETE | `/api/users/:id` | Delete user |
 | GET | `/api/users/roles/all` | List all roles |
 | POST | `/api/users/roles` | Create role |
@@ -78,6 +81,13 @@ User CRUD, roles, permissions, preferences, online status
 | GET | `/api/users/me/preferences` | Get user preferences |
 | PUT | `/api/users/me/preferences` | Update user preferences |
 | GET | `/api/users/me/activity` | Get current user activity log |
+
+Rules for managing users:
+- Creating, editing, deactivating or deleting a user, and sending a reset link, take `users: full`. Nobody may grant a role, or manage a user whose role, needs more access than they have; only an administrator manages administrators.
+- You can't deactivate or delete your own account. The last active administrator can't be demoted, so someone can always manage users and roles.
+- A deactivated user is refused on their next request (`403 Account disabled`), and can't sign in until reactivated.
+- `password-reset` answers `{ emailSent: true }` once the email has gone. Where this server sends no email, it answers `{ emailSent: false, resetUrl }` so the link can be passed on, as an invite's is.
+- Invites (`/api/signup/invites`) are held to the same ceiling: resending or revoking one takes the access its role grants. Their list carries `roleName`.
 
 ---
 
