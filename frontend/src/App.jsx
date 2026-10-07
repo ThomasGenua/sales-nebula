@@ -3,6 +3,7 @@ import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
 import { AuthContext, RouteContext, useAuth, can } from "./contexts";
 import { LeadActions, EmailActions, QuoteActions, QuoteFormExtras, RelatedRecords, LineItems, validateQuoteForm } from "./SalesWorkflows";
+import { RELATED, RelatedLists } from "./RelatedLists";
 import { FeatureAvailability } from "./FeatureAvailability";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
@@ -540,11 +541,11 @@ function FilterPanel({ open, onClose, filters = [], values = {}, onChange, onApp
 }
 
 // ========================================================================
-// RECORD DETAIL VIEW -- full record with tabs, related lists
+// RECORD DETAIL VIEW -- the record's fields, and the records related to it
 // ========================================================================
-function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, onDelete, title, actions = [] }) {
+function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onDelete, title, actions = [] }) {
   const [activeTab, setActiveTab] = useState("details");
-  const tabs = ["details", ...relatedLists.map(r => r.key)];
+  const tabs = ["details", ...(related ? ["related"] : [])];
 
   if (!record) return null;
   return (
@@ -570,11 +571,11 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
       {/* Tabs */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 mb-4 -mx-3 px-3 sm:mx-0 sm:px-0">
         {tabs.map(tab => (
-          <button key={tab} onClick={() => setActiveTab(tab)}
+          <button key={tab} type="button" aria-pressed={activeTab === tab} onClick={() => setActiveTab(tab)}
             className={`px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-colors touch-manipulation min-h-[36px] ${
               activeTab === tab ? "bg-[rgba(245,166,35,0.08)] text-[#F5A623]" : "text-[#7E8598] hover:bg-[#0E1630] hover:text-[#C8C2B4]"
             }`}>
-            {tab === "details" ? "Details" : relatedLists.find(r => r.key === tab)?.label || tab}
+            {tab === "details" ? "Details" : "Related"}
           </button>
         ))}
       </div>
@@ -598,32 +599,7 @@ function RecordDetail({ record, fields = [], relatedLists = [], onBack, onEdit, 
         </div>
       )}
 
-      {/* Related lists */}
-      {relatedLists.map(rl => activeTab === rl.key && (
-        <div key={rl.key} className="bg-[#0B1228] border border-[#182550] rounded-xl overflow-hidden">
-          <div className="p-4 border-b border-[#182550] flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-[#C8C2B4]">{rl.label}</h3>
-            {rl.count !== undefined && <span className="text-xs text-[#4A5168]">{rl.count} records</span>}
-          </div>
-          <div className="p-3">
-            {rl.items?.length ? (
-              <div className="space-y-2">
-                {rl.items.map((item, i) => (
-                  <div key={i} className="flex items-center justify-between p-3 rounded-lg bg-[#0E1630] border border-[#182550]/50 hover:border-[#203060]">
-                    <div>
-                      <div className="text-sm text-[#F0EDE5]">{item.name || item.subject || item.title || "Record"}</div>
-                      <div className="text-xs text-[#7E8598] mt-0.5">{item.status || item.type || item.stage || ""}</div>
-                    </div>
-                    <div className="text-xs text-[#4A5168]">{item.createdAt ? new Date(item.createdAt).toLocaleDateString(...fmt()) : ""}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-6 text-xs text-[#4A5168]">No {rl.label.toLowerCase()} found</div>
-            )}
-          </div>
-        </div>
-      ))}
+      {activeTab === "related" && related}
     </div>
   );
 }
@@ -1034,6 +1010,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       <>
         <RecordDetail
           record={detailRecord}
+          related={RELATED[endpoint.slice(1)] ? <RelatedLists module={endpoint.slice(1)} record={detailRecord} /> : null}
           title={detailRecord[nameField] || detailRecord.firstName || detailRecord.subject}
           fields={detailFields || formFields?.map(f => ({ key: f.key, label: f.label, render: f.render })) || columns}
           onBack={() => { setDetailRecord(null); closeRecord(); }}
