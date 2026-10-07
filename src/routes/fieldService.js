@@ -85,7 +85,8 @@ router.post('/:id/cancel', authenticate, requirePermission('fieldService', 'edit
   } catch (err) { next(err); }
 });
 
-// Technician route optimization (simple nearest-neighbor)
+// A technician's day: their scheduled work orders in start order. No route
+// is optimized (no location or distance is used), and the answer says so.
 router.get('/route/optimize', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -103,7 +104,7 @@ router.get('/route/optimize', authenticate, async (req, res, next) => {
       orderBy: { startDate: 'asc' },
       include: { account: { select: { name: true } } },
     });
-    res.json({ date: targetDate.toISOString().split('T')[0], workOrders, count: workOrders.length });
+    res.json({ date: targetDate.toISOString().split('T')[0], orderedBy: 'startDate', optimized: false, workOrders, count: workOrders.length });
   } catch (err) { next(err); }
 });
 

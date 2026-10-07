@@ -149,15 +149,17 @@ router.post('/full-export', authenticate, requirePermission('admin', 'full'), as
   } catch (err) { next(err); }
 });
 
-// Data retention policy
+// Data retention policy: what the scheduled cleanups delete (jobs/scheduler),
+// and what nothing does. This said audit logs were kept a year (the job
+// deletes them after 90 days), login history six months (nothing deletes it),
+// and named email tracking and system events, which nothing records.
 router.get('/retention-policy', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   res.json({
     policies: [
-      { module: 'auditLogs', retentionDays: 365, description: 'Audit logs retained for 1 year' },
-      { module: 'loginHistory', retentionDays: 180, description: 'Login history retained 6 months' },
-      { module: 'recycleBin', retentionDays: 30, description: 'Deleted records recoverable for 30 days' },
-      { module: 'emailLogs', retentionDays: 90, description: 'Email tracking data retained 90 days' },
-      { module: 'eventLogs', retentionDays: 30, description: 'System events retained 30 days' },
+      { module: 'auditLogs', retentionDays: 90, description: 'Audit log entries are deleted after 90 days' },
+      { module: 'notifications', retentionDays: 30, description: 'Read notifications are deleted after 30 days' },
+      { module: 'recycleBin', retentionDays: 30, description: 'Deleted records can be restored for 30 days, then are purged' },
+      { module: 'loginHistory', retentionDays: null, description: 'Login history is kept; nothing deletes it' },
     ],
   });
 });

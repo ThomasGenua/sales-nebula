@@ -4,6 +4,10 @@ const { auditMiddleware } = require('../middleware/audit');
 const { statusRoutes } = require('../utils/moduleStatus');
 const { looksLikeId, columnsFrom } = require('../utils/modelFields');
 
+const { unavailable } = require('../utils/unavailable');
+
+const SANDBOXES = "Sandboxes are not available: no environment is provisioned or copied, and nothing is deployed to one.";
+
 const router = Router();
 
 // A segment that is not an id (`/count`) falls through to the routes below.
@@ -22,15 +26,12 @@ router.get('/:id', authenticate, idParam, requirePermission('admin', 'read'), as
   try { const prisma = req.app.locals.prisma; const env = await prisma.environment.findFirst({ where: { id: req.params.id, deletedAt: null } }); if (!env) return res.status(404).json({ error: 'Not found' }); res.json(env); } catch (err) { next(err); }
 });
 
-router.post('/', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { name, type, description, url } = req.body;
-    if (!name || !type) return res.status(400).json({ error: 'name and type required' });
-    const env = await prisma.environment.create({ data: { name, type, description, url, status: 'Active', createdById: req.user.id } });
-    res.status(201).json(env);
-  } catch (err) { next(err); }
-});
+// An environment is a record of one, nothing more: nothing provisions or copies
+// a sandbox, deploys to one, imports into one or rolls one back. Each of those
+// answered as if it had (an environment "Active", a deployment "Completed" by
+// a two-second timer, an import "queued", a rollback recorded); they now say
+// so and change nothing. The list, export and history still answer.
+router.post('/', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'SANDBOXES_UNAVAILABLE', `${SANDBOXES} No environment was created.`));
 
 router.put('/:id', authenticate, idParam, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try { const prisma = req.app.locals.prisma; const env = await prisma.environment.update({ where: { id: req.params.id }, data: columnsFrom('environment', req.body) }); res.json(env); } catch (err) { next(err); }
@@ -40,23 +41,7 @@ router.delete('/:id', authenticate, idParam, requirePermission('admin', 'full'),
   try { await req.app.locals.prisma.environment.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } }); res.json({ success: true }); } catch (err) { next(err); }
 });
 
-// Deploy to environment (change sets)
-router.post('/:id/deploy', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { components, description } = req.body;
-    if (!components?.length) return res.status(400).json({ error: 'components required' });
-    const deployment = await prisma.deployment.create({
-      data: { environmentId: req.params.id, components, description, status: 'Pending', userId: req.user.id },
-    });
-    // Simulate deployment
-    setTimeout(async () => {
-      try { await prisma.deployment.update({ where: { id: deployment.id }, data: { status: 'Completed', completedAt: new Date() } }); } catch (e) {}
-    }, 2000);
-    await req.audit({ action: 'create', module: 'environments', recordId: req.params.id, details: `Deployment initiated: ${components.length} components` });
-    res.status(201).json(deployment);
-  } catch (err) { next(err); }
-});
+router.post('/:id/deploy', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'SANDBOXES_UNAVAILABLE', `${SANDBOXES} Nothing was deployed.`));
 
 // Compare environments
 router.get('/:id/compare', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
@@ -69,10 +54,9 @@ router.get('/:id/compare', authenticate, requirePermission('admin', 'read'), asy
       prisma.environment.findUnique({ where: { id: targetId } }),
     ]);
     if (!source || !target) return res.status(404).json({ error: 'One or both environments not found' });
-    // Compare metadata snapshots
-    const sourceComponents = Array.isArray(source.components) ? source.components : [];
-    const targetComponents = Array.isArray(target.components) ? target.components : [];
-    res.json({ source: { id: source.id, name: source.name }, target: { id: target.id, name: target.name }, sourceComponents: sourceComponents.length, targetComponents: targetComponents.length });
+    // An environment holds no metadata to compare (it read a column that does
+    // not exist, and so reported 0 against 0 for any pair).
+    unavailable(res, 'SANDBOXES_UNAVAILABLE', `${SANDBOXES} There is nothing in either environment to compare.`);
   } catch (err) { next(err); }
 });
 
@@ -85,16 +69,7 @@ router.get('/change-sets', authenticate, requirePermission('admin', 'read'), asy
   } catch (err) { next(err); }
 });
 
-router.post('/change-sets', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { name, components, sourceEnvironmentId, targetEnvironmentId } = req.body;
-    const cs = await prisma.deployment.create({
-      data: { name, components, environmentId: targetEnvironmentId, sourceEnvironmentId, status: 'Draft', userId: req.user.id },
-    });
-    res.status(201).json(cs);
-  } catch (err) { next(err); }
-});
+router.post('/change-sets', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'SANDBOXES_UNAVAILABLE', `${SANDBOXES} No change set was created.`));
 
 // Metadata export/import
 router.get('/metadata/export', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
@@ -112,14 +87,7 @@ router.get('/metadata/export', authenticate, requirePermission('admin', 'full'),
   } catch (err) { next(err); }
 });
 
-router.post('/metadata/import', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const { metadata } = req.body;
-    if (!metadata) return res.status(400).json({ error: 'metadata required' });
-    await req.audit({ action: 'create', module: 'environments', recordId: 'metadata', details: 'Metadata import processed' });
-    res.json({ success: true, message: 'Metadata import queued for processing' });
-  } catch (err) { next(err); }
-});
+router.post('/metadata/import', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'SANDBOXES_UNAVAILABLE', "Importing metadata is not available. Nothing was imported or queued."));
 
 module.exports = router;
 
@@ -135,19 +103,4 @@ router.get('/:id/deployments', authenticate, requirePermission('admin', 'read'),
   } catch (err) { next(err); }
 });
 
-// Rollback deployment
-router.post('/:id/rollback', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { deploymentId } = req.body;
-    if (!deploymentId) return res.status(400).json({ error: 'deploymentId required' });
-    // A deployment of this environment. Its metadata, which deploys never set,
-    // was copied as a plain null, which a Json column refuses, so every
-    // rollback failed; empty columns are now left out.
-    const deployment = await prisma.deployment.findFirst({ where: { id: String(deploymentId), environmentId: req.params.id } });
-    if (!deployment) return res.status(404).json({ error: 'Deployment not found' });
-    const rollback = await prisma.deployment.create({ data: { environmentId: req.params.id, status: 'RolledBack', type: 'rollback', rollbackOfId: deployment.id, userId: req.user.id, metadata: deployment.metadata ?? undefined, components: deployment.components ?? undefined } });
-    await req.audit({ action: 'rollback', module: 'environments', recordId: req.params.id, details: `Rolled back deployment ${deploymentId}` });
-    res.json(rollback);
-  } catch (err) { next(err); }
-});
+router.post('/:id/rollback', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'SANDBOXES_UNAVAILABLE', `${SANDBOXES} Nothing was rolled back.`));

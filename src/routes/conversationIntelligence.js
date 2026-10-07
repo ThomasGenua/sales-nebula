@@ -6,6 +6,7 @@ const { isAdmin } = require('../middleware/rowSecurity');
 const { modelHasField } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 // CallRecording has no deletedAt, and filtering on it failed every list.
@@ -112,7 +113,9 @@ router.post('/analyze', authenticate, async (req, res, next) => {
     const posCount = positiveWords.filter(w => words.has(w)).length;
     const negCount = negativeWords.filter(w => words.has(w)).length;
     const sentiment = posCount > negCount ? 'Positive' : negCount > posCount ? 'Negative' : 'Neutral';
+    // Word lists, not a model, and the analysis says so.
     const analysis = {
+      method: 'keyword matching',
       wordCount, sentenceCount: sentences.length, questionCount: questions.length,
       detectedTopics, sentiment, talkRatio: 'N/A (single transcript)',
       keyMoments: detectedTopics.map(t => ({ topic: t, context: 'Detected in conversation' })),
@@ -175,35 +178,15 @@ router.get('/trends', authenticate, async (req, res, next) => {
 });
 
 // Dialer
+// There is no telephony: no provider places, records or transcribes calls.
+// The status said "ready" with click-to-call, recording and transcription,
+// and a call was filed "InProgress" with nothing dialled.
 router.get('/dialer/status', authenticate, async (req, res, next) => {
-  res.json({ status: 'ready', provider: 'built-in', features: ['click-to-call', 'recording', 'transcription'] });
+  res.json({ status: 'unavailable', provider: null, features: [], message: 'No calling provider is connected: calls cannot be placed, recorded or transcribed.' });
 });
 
-router.post('/dialer/call', authenticate, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const { contactId, phone } = req.body;
-    if (!phone && !contactId) return res.status(400).json({ error: 'phone or contactId required' });
-    // A contact it names, whose number it dials and on whom the call is filed,
-    // must be a live one the caller can see: any contact's number went back
-    // to anyone signed in, by id, and then a deleted contact's still did, as
-    // canReach does not look at deletedAt.
-    let contact = null;
-    if (contactId) {
-      contact = permits(req, 'contacts', 'read') && await prisma.contact.findFirst({
-        where: await reachableWhere(req, 'contacts', 'contact', { id: String(contactId) }),
-        select: { id: true, phone: true },
-      });
-      if (!contact) return res.status(404).json({ error: 'Contact not found' });
-    }
-    const phoneNumber = phone || contact?.phone;
-    if (!phoneNumber) return res.status(400).json({ error: 'No phone number available' });
-    const call = await prisma.callRecording.create({
-      data: { title: `Call to ${phoneNumber}`, userId: req.user.id, contactId: contact?.id, status: 'InProgress' },
-    });
-    res.json({ callId: call.id, phone: phoneNumber, status: 'connecting' });
-  } catch (err) { next(err); }
-});
+router.post('/dialer/call', authenticate, (req, res) => unavailable(res, 'DIALER_UNAVAILABLE',
+  'Calling is not available: no calling provider is connected. No call was placed or recorded.'));
 
 module.exports = router;
 

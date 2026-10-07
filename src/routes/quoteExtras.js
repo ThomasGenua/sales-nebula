@@ -5,6 +5,7 @@ const { canReach, reachableWhere } = require('../middleware/access');
 const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
 const { summaryRoute } = require('../utils/moduleStatus');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 
 /**
@@ -30,22 +31,13 @@ const editableQuote = quoteReach('Edit');
 // amount is `total`, kept equal to `totalAmount` by quotes.js; the amounts
 // read here as subtotalAmount and taxAmount are not columns.
 
-// Quote approvals
-router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    // As an edit of the quote (services/recordWrites): its rules, audit
-    // trail, workflows and webhooks.
-    const { record: quote } = await updateRecord(prisma, 'quotes', req.params.id, { status: 'Pending Approval', submittedAt: new Date() }, {
-      req, userId: req.userId, source: 'submitted for approval',
-    });
-    // Create approval record
-    await prisma.approval.create({
-      data: { module: 'quotes', recordId: quote.id, status: 'Pending', requesterId: req.user.id, approverId: req.body.approverId || null },
-    });
-    res.json(quote);
-  } catch (err) { next(err); }
-});
+// A quote goes to approval through an approval process for quotes, as any
+// record does (POST /api/approvals/requests): its approvers are notified, and
+// approving or rejecting it runs the process's final actions. This marked the
+// quote "Pending Approval" and filed a row nothing reads, so nobody was asked
+// and nothing ever approved it.
+router.post('/:id/submit-approval', authenticate, requirePermission('quotes', 'edit'), (req, res) => unavailable(res, 'QUOTE_APPROVAL_UNAVAILABLE',
+  'Submit quotes through an approval process instead: set one up for quotes under Approvals, then POST /api/approvals/requests. The quote was not changed.'));
 
 // Apply discount to all line items
 router.post('/:id/apply-discount', authenticate, requirePermission('quotes', 'edit'), editableQuote, auditMiddleware, async (req, res, next) => {

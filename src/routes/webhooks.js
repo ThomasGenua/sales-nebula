@@ -4,7 +4,7 @@ const { Prisma } = require('@prisma/client');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validate, schemas } = require('../middleware/validate');
-const { fireWebhookEvent } = require('../services/webhooks');
+const { sendToWebhook } = require('../services/webhooks');
 const { assertPublicHttpUrl } = require('../utils/outboundUrl');
 
 const router = Router();
@@ -145,13 +145,13 @@ router.post('/:id/test', requirePermission('settings', 'full'), async (req, res,
     const webhook = await prisma.webhook.findUnique({ where: { id: req.params.id } });
     if (!webhook) return res.status(404).json({ error: 'Not found' });
 
-    await fireWebhookEvent(prisma, 'test.ping', {
+    sendToWebhook(prisma, webhook, 'test.ping', {
       message: 'Test webhook delivery',
       timestamp: new Date().toISOString(),
       webhookId: webhook.id,
     });
 
-    res.json({ success: true, message: 'Test event queued for delivery' });
+    res.json({ success: true, message: 'Test event queued for delivery to this webhook' });
   } catch (err) { next(err); }
 });
 

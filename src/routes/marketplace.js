@@ -22,6 +22,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes, looksLikeId, columnsFrom } = require('../utils/modelFields');
 
+const { unavailable } = require('../utils/unavailable');
 const router = Router();
 router.use(authenticate);
 
@@ -168,21 +169,10 @@ router.delete('/:id', requirePermission('admin', 'full'), auditMiddleware, async
 
 // ─── Installs ───
 
-router.post('/:id/install', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
-  try {
-    const prisma = req.app.locals.prisma;
-    const app = await prisma.appListing.findFirst({ where: { id: req.params.id, deletedAt: null } });
-    if (!app) return res.status(404).json({ error: 'Listing not found' });
-    if (await prisma.installedApp.findFirst({ where: { appId: app.id } })) return res.status(409).json({ error: 'Already installed' });
-
-    const installed = await prisma.installedApp.create({
-      data: { appId: app.id, userId: req.userId, version: app.version, status: 'Active' },
-    });
-    await prisma.appListing.update({ where: { id: app.id }, data: { installCount: { increment: 1 } } });
-    await req.audit({ action: 'create', module: 'marketplace', recordId: app.id, details: `Installed: ${app.name}` });
-    res.status(201).json(installed);
-  } catch (err) { next(err); }
-});
+// The marketplace is a catalog. Installing recorded the app as "Active" and
+// counted an install, and nothing was installed, connected or run.
+router.post('/:id/install', requirePermission('admin', 'full'), (req, res) => unavailable(res, 'APP_INSTALL_UNAVAILABLE',
+  'Installing apps is not available: the marketplace is a catalog, and nothing would be installed, connected or run. Nothing was installed.'));
 
 router.delete('/:id/uninstall', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
   try {

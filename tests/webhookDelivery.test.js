@@ -10,10 +10,11 @@
 jest.mock('../src/utils/outboundUrl', () => ({ assertPublicHttpUrl: async () => ({ ok: true }) }));
 
 const http = require('http');
-const { setup, teardown, cleanDatabase, createTestRole, createTestUser } = require('./setup');
+const request = require('supertest');
+const { setup, teardown, cleanDatabase, createTestRole, createTestUser, authHeader } = require('./setup');
 const { fireWebhookEvent } = require('../src/services/webhooks');
 
-let prisma, user;
+let prisma, app, user;
 const servers = [];
 
 /** A local server, and the requests it has seen. */
@@ -44,7 +45,7 @@ const makeWebhook = (url, over = {}) => prisma.webhook.create({
 });
 const firstLog = webhookId => until(() => prisma.webhookLog.findFirst({ where: { webhookId } }));
 
-beforeAll(async () => { ({ prisma } = await setup()); });
+beforeAll(async () => { ({ prisma, app } = await setup()); });
 afterAll(async () => {
   // fetch keeps its connections alive, and close() would wait for them.
   await Promise.all(servers.map(server => new Promise(resolve => {
@@ -103,5 +104,27 @@ describe('webhook delivery', () => {
     expect(endpoint.seen[0].headers['x-webhook-event']).toBe('deal.created');
     expect(endpoint.seen[0].headers['x-webhook-signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
     expect(JSON.parse(endpoint.seen[0].body).data).toMatchObject({ id: 'deal-3' });
+  });
+});
+
+describe('testing a webhook', () => {
+  it('pings the webhook tested, and no other', async () => {
+    // The one tested takes deal events only; the other takes test.ping. The
+    // test was an event, so it went to the other and never to this one.
+    const tested = await listen((req, res) => res.end('ok'));
+    const bystander = await listen((req, res) => res.end('ok'));
+    const hook = await makeWebhook(`${tested.url}/hook`);
+    const other = await makeWebhook(`${bystander.url}/hook`, { events: ['test.ping'] });
+
+    const res = await request(app).post(`/api/webhooks/${hook.id}/test`).set(authHeader(user.token));
+    expect(res.status).toBe(200);
+    const log = await firstLog(hook.id);
+
+    expect(log).toMatchObject({ success: true, event: 'test.ping' });
+    expect(tested.seen).toHaveLength(1);
+    expect(JSON.parse(tested.seen[0].body).data).toMatchObject({ webhookId: hook.id });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(bystander.seen).toHaveLength(0);
+    expect(await prisma.webhookLog.count({ where: { webhookId: other.id } })).toBe(0);
   });
 });
