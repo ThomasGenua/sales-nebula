@@ -2,14 +2,27 @@
 
 All notable changes to Sales Nebula CRM.
 
+## Unreleased
+
+### Features that do not exist now say so
+- Thirty-four endpoints that reported success without doing anything now answer **501** with a `code` naming the feature, and change nothing: running flows and AI agents, sandboxes, custom code, app installs, the dialer, mobile push, CDP ingest, IP rules, field-level security, encryption policies, SMS and email sign-in codes, scheduled reports, integration sync schedules, custom field values, quote approval without a process, and AI batch lead scoring.
+- Answers that claimed more than they do say what they are: rule-based Copilot answers, stage-weight deal prediction, keyword call analysis, the route "optimizer", integration health, the retention policy.
+- Flow Builder, AI Agents, Marketplace and Studio's custom fields say on the page what does not run. An email no mail server took shows as "not sent".
+- Chatter's like and comment buttons work. A webhook test goes only to the webhook being tested.
+
+### Documentation
+- The "132/132 Salesforce feature parity" claim is withdrawn: it was never true. [Feature status](FEATURE_STATUS.md) now says what works, what is limited, what answers 501 and what is not built.
+- The README, product overview, architecture guide and API reference were corrected against the code, including their model, endpoint, page and test counts.
+
 ## v1.0.0 -- Production Release
 
 ### Platform Totals
+The counts are as of this release. The parity line was never true; see [Feature status](FEATURE_STATUS.md) for what the app does.
 - 173 database models with 253 indexes
 - 576+ API endpoints across 86 route modules
 - 28 frontend pages (Bloomberg Terminal aesthetic)
 - 246 automated tests
-- 132/132 Salesforce feature parity + 39 bonus models
+- ~~132/132 Salesforce feature parity + 39 bonus models~~ (withdrawn: many of these features stored configuration that nothing acted on)
 
 ### Core CRM
 - Lead management with web-to-lead, scoring, assignment rules, CSV import, duplicate detection

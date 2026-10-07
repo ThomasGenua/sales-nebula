@@ -257,4 +257,10 @@ describe('what the answers claim', () => {
     const days = Object.fromEntries(policies.map(p => [p.module, p.retentionDays]));
     expect(days).toEqual({ auditLogs: 90, notifications: 30, recycleBin: 30, loginHistory: null });
   });
+
+  test('the audit cleanup job is described as deleting, which it does', async () => {
+    const jobs = (await call('get', '/api/admin/jobs')).body.data;
+    // It said "Archive old audit log entries"; nothing archives them.
+    expect(jobs.find(j => j.name === 'cleanupAuditLogs').description).toBe('Delete audit log entries older than 90 days');
+  });
 });

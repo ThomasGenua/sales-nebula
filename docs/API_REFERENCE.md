@@ -1,8 +1,8 @@
 # Sales Nebula CRM -- Complete API Reference
 
-> 576+ endpoints across 86 route modules. Every endpoint listed.
+> The main endpoints of each module. Not every endpoint is listed: the route files in `src/routes` are the full set. An endpoint marked **501** belongs to a feature this install does not have; it refuses with a `code` naming the feature and changes nothing. See [Feature status](FEATURE_STATUS.md).
 
-Base URL: `http://localhost:4000`
+Base URL: `http://localhost:7544`
 
 All endpoints require `Authorization: Bearer <token>` (or an `X-API-Key`) unless
 marked **(public)**. The browser app uses a cookie session instead: sign in with
@@ -159,10 +159,7 @@ Deal contact roles, revenue splits, stage history
 | GET | `/api/deals/:id/contact-roles` | List contact roles for deal |
 | POST | `/api/deals/:id/contact-roles` | Add contact roles to deal |
 | DELETE | `/api/deals/:id/contact-roles/:roleId` | Remove contact roles from deal |
-| GET | `/api/deals/:id/splits` | List splits for deal |
-| POST | `/api/deals/:id/splits` | Add splits to deal |
-| DELETE | `/api/deals/:id/splits/:splitId` | Remove splits from deal |
-| GET | `/api/deals/:id/history` | Get deal history |
+| GET | `/api/deals/:id/stage-history` | List the deal's stage changes, oldest first, with who made each change and the days spent in each stage |
 
 ### `/api/products` -- **[CRUD]**
 
@@ -197,12 +194,6 @@ Quote templates and line items with auto-calculated totals
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/quotes/templates` | List quote templates |
-| POST | `/api/quotes/templates` | Create new quote |
-| PUT | `/api/quotes/templates/:id` | Update quote |
-| GET | `/api/quotes/:id/line-items` | List quote line items |
-| POST | `/api/quotes/:id/line-items` | Add line item to quote |
-| DELETE | `/api/quotes/:id/line-items/:itemId` | Remove line item from quote |
 
 ### `/api/orders` -- **[CRUD]**
 
@@ -254,7 +245,7 @@ Revenue schedules with period-based recognition
 |--------|------|-------------|
 | GET | `/api/revenue/schedules` | List revenue recognition schedules |
 | POST | `/api/revenue/schedules` | Create revenue recognition schedule |
-| POST | `/api/revenue/schedules/:id/recognize` | Add recognize to revenue recognition |
+| POST | `/api/revenue/recognize` | Mark one period of a schedule recognized (body: `scheduleId` plus `entryId`, period number or period date); updates the recognized total and completes the schedule when no period is left |
 
 ### `/api/forecasts`
 
@@ -280,14 +271,12 @@ Territory models, hierarchies, and assignment
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/territories/models` | List territory models |
-| POST | `/api/territories/models` | Create new territory |
-| PUT | `/api/territories/models/:id` | Update territory |
 | GET | `/api/territories` | List all territories |
 | POST | `/api/territories` | Create new territory |
 | PUT | `/api/territories/:id` | Update territory |
 | DELETE | `/api/territories/:id` | Delete territory |
 | POST | `/api/territories/:id/assign` | Assign records to territory |
-| DELETE | `/api/territories/:id/assign/:assignId` | Assign territory to user |
+| DELETE | `/api/territories/:id/members/:memberId` | Remove a user from the territory's members; 404 if not a member |
 
 ### `/api/sales-path`
 
@@ -427,7 +416,7 @@ Service entitlements with milestones and consumption
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/entitlements/:id/milestones` | Add milestones to entitlement |
+| POST | `/api/entitlements/processes` | Create an entitlement process (body: `name`, `entitlementId`, `milestones`); milestones are stored as ordered steps and nothing tracks them |
 | GET | `/api/entitlements/check/:accountId` | Check entitlements for account |
 | POST | `/api/entitlements/:id/consume` | Add consume to entitlement |
 
@@ -474,10 +463,9 @@ Appointment slots, booking, availability
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/scheduler/slots` | Get available appointment slots |
-| POST | `/api/scheduler/slots` | Create new appointment |
-| PUT | `/api/scheduler/slots/:id` | Update appointment |
-| POST | `/api/scheduler/slots/:id/book` | Add book to appointment |
-| POST | `/api/scheduler/slots/:id/cancel` | Cancel appointment |
+| POST | `/api/scheduler` | Book an appointment (`subject`, `startTime`, `endTime` required); 409 if it overlaps the host's other appointments |
+| PUT | `/api/scheduler/:id` | Update one of your appointments (admins: anyone's); the host cannot be changed |
+| POST | `/api/scheduler/:id/cancel` | Cancel one of your appointments, saving an optional `reason` |
 | GET | `/api/scheduler/availability` | Get agent availability |
 
 ### `/api/surveys`
@@ -492,7 +480,7 @@ CSAT/NPS/CES surveys with analytics
 | PUT | `/api/surveys/:id` | Update survey |
 | DELETE | `/api/surveys/:id` | Delete survey |
 | POST | `/api/surveys/:id/respond` | Add respond to survey |
-| GET | `/api/surveys/:id/analytics` | List analytics for survey |
+| GET | `/api/surveys/:id/results` | Results: total responses, per-question figures (average, min, max, choice counts) and an NPS score for NPS surveys |
 
 ---
 
@@ -566,11 +554,10 @@ Experience Cloud portal configuration and users
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/portal` | List all portals |
-| POST | `/api/portal` | Create new portal |
-| PUT | `/api/portal/:id` | Update portal |
-| GET | `/api/portal/:id/users` | List users for portal |
-| POST | `/api/portal/:id/users` | Add users to portal |
+| GET | `/api/portal/config` | Get the portal configuration (defaults until one is saved) |
+| PUT | `/api/portal/config` | Save the portal configuration, creating it if none exists |
+| GET | `/api/portal/users` | List portal user accounts, paged, with `?search` on name or email |
+| POST | `/api/portal/users` | Create a portal login for a contact you can see (body: `contactId`, `password`); 409 if that email already has a user |
 
 ### `/api/chatter`
 
@@ -593,12 +580,11 @@ Activity feed with posts, comments, likes, pins
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/feed` | List all feeds |
-| POST | `/api/feed` | Create new feed |
+| GET | `/api/feed/:module/:id` | List the posts on a record you can see, newest first (`?limit` up to 200, `?before`); a module-wide list is `GET /api/feed/module/:module` |
+| POST | `/api/feed/:module/:id` | Post to the feed of a record you can see (`body` required; `type` defaults to TextPost) |
 | DELETE | `/api/feed/:id` | Delete feed |
 | POST | `/api/feed/:id/like` | Add like to feed |
-| POST | `/api/feed/:id/pin` | Pin/unpin feed |
-| POST | `/api/feed/:id/comments` | List feed comments |
+| POST | `/api/feed/:id/comment` | Comment on a post you can see (`body` required) |
 
 ---
 
@@ -632,8 +618,7 @@ Server-side script management and execution
 | POST | `/api/custom-code` | Create new custom code |
 | PUT | `/api/custom-code/:id` | Update custom code |
 | DELETE | `/api/custom-code/:id` | Delete custom code |
-| POST | `/api/custom-code/:id/execute` | Execute custom code |
-| POST | `/api/custom-code/:id/validate` | Add validate to custom code |
+| POST | `/api/custom-code/:id/test` | Check that the script parses; a syntax check only, as custom code never runs |
 
 ### `/api/custom-components`
 
@@ -646,7 +631,7 @@ UI component registry and preview
 | POST | `/api/custom-components` | Create new custom component |
 | PUT | `/api/custom-components/:id` | Update custom component |
 | DELETE | `/api/custom-components/:id` | Delete custom component |
-| POST | `/api/custom-components/:id/preview` | Preview custom component |
+| GET | `/api/custom-components/:id/preview` | The component's stored preview data: name, type, markup, script, styles, properties (nothing renders it) |
 
 ### `/api/configuration`
 
@@ -670,8 +655,8 @@ Validation rules, record types, page layouts, OWD, FLS, role hierarchy
 | GET | `/api/configuration/owd` | Get org-wide defaults |
 | PUT | `/api/configuration/owd/:module` | Update org-wide default for module |
 | GET | `/api/configuration/field-permissions` | List field-level permissions |
-| POST | `/api/configuration/field-permissions` | Set field-level permission |
-| POST | `/api/configuration/field-permissions/bulk` | Bulk update field permissions |
+| POST | `/api/configuration/field-permissions` | **501: unavailable** (`FIELD_SECURITY_UNAVAILABLE`). Set field-level permission |
+| POST | `/api/configuration/field-permissions/bulk` | **501: unavailable** (`FIELD_SECURITY_UNAVAILABLE`). Bulk update field permissions |
 | GET | `/api/configuration/role-hierarchy` | Get role hierarchy tree |
 | PUT | `/api/configuration/role-hierarchy/:roleId` | Update role hierarchy position |
 
@@ -685,8 +670,8 @@ Visual flow builder with versioning and execution
 | GET | `/api/flows/:id` | Get flow by ID |
 | POST | `/api/flows` | Create new flow |
 | PUT | `/api/flows/:id` | Update flow |
-| POST | `/api/flows/:id/activate` | Activate flow |
-| POST | `/api/flows/:id/run` | Add run to flow |
+| POST | `/api/flows/:id/activate` | **501: unavailable** (`FLOWS_UNAVAILABLE`). Activate flow |
+| POST | `/api/flows/:id/run` | **501: unavailable** (`FLOWS_UNAVAILABLE`). Add run to flow |
 | DELETE | `/api/flows/:id` | Delete flow |
 
 ### `/api/workflows`
@@ -749,15 +734,14 @@ Sandboxes, metadata export/import, change sets
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/environments` | List all environments |
-| POST | `/api/environments` | Create new environment |
-| POST | `/api/environments/:id/refresh` | Add refresh to environment |
+| POST | `/api/environments` | **501: unavailable** (`SANDBOXES_UNAVAILABLE`). Create new environment |
 | DELETE | `/api/environments/:id` | Delete environment |
 | GET | `/api/environments/change-sets` | List environment change sets |
-| POST | `/api/environments/change-sets` | Create change set |
-| PUT | `/api/environments/change-sets/:id` | Update environment |
-| POST | `/api/environments/change-sets/:id/deploy` | Add deploy to environment |
+| POST | `/api/environments/change-sets` | **501: unavailable** (`SANDBOXES_UNAVAILABLE`). Create change set |
+| PUT | `/api/environments/:id` | Update an environment record's fields; nothing is provisioned |
+| POST | `/api/environments/:id/deploy` | **501: unavailable** (`SANDBOXES_UNAVAILABLE`). Nothing is deployed |
 | GET | `/api/environments/metadata/export` | Export environment metadata |
-| POST | `/api/environments/metadata/import` | Import environment metadata |
+| POST | `/api/environments/metadata/import` | **501: unavailable** (`SANDBOXES_UNAVAILABLE`). Import environment metadata |
 
 ### `/api/formulas`
 
@@ -805,7 +789,7 @@ Report builder with folders, scheduling, export, clone
 | GET | `/api/reports/folders/all` | List all report folders |
 | POST | `/api/reports/folders` | Create report folder |
 | DELETE | `/api/reports/folders/:id` | Delete report |
-| POST | `/api/reports/:id/schedule` | Add schedule to report |
+| POST | `/api/reports/:id/schedule` | **501: unavailable** (`REPORT_DELIVERY_UNAVAILABLE`). Add schedule to report |
 | DELETE | `/api/reports/schedule/:id` | Delete report |
 | POST | `/api/reports/:id/clone` | Clone report |
 
@@ -825,7 +809,7 @@ Datasets, dashboards, queries, report types, schedules
 | GET | `/api/analytics/report-types` | List analytics report types |
 | POST | `/api/analytics/report-types` | Create analytics report type |
 | GET | `/api/analytics/scheduled-reports` | List scheduled analytics reports |
-| POST | `/api/analytics/scheduled-reports` | Schedule analytics report |
+| POST | `/api/analytics/scheduled-reports` | **501: unavailable** (`REPORT_DELIVERY_UNAVAILABLE`). Schedule analytics report |
 | PUT | `/api/analytics/scheduled-reports/:id` | Update scheduled analytics report |
 | DELETE | `/api/analytics/scheduled-reports/:id` | Delete scheduled analytics report |
 
@@ -840,7 +824,7 @@ Configurable AI agents with execution history
 | POST | `/api/ai-agents` | Create new AI agent |
 | PUT | `/api/ai-agents/:id` | Update AI agent |
 | DELETE | `/api/ai-agents/:id` | Delete AI agent |
-| POST | `/api/ai-agents/:id/run` | Add run to AI agent |
+| POST | `/api/ai-agents/:id/run` | **501: unavailable** (`AI_AGENTS_UNAVAILABLE`). Add run to AI agent |
 | GET | `/api/ai-agents/:id/runs` | List AI agent execution runs |
 
 ### `/api/ai`
@@ -859,8 +843,8 @@ Conversational AI assistant with threading
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/copilot/conversations` | List copilot conversations |
-| POST | `/api/copilot/conversations` | Start copilot conversation |
+| GET | `/api/copilot/threads` | Your 50 most recently updated Copilot threads, with message counts |
+| POST | `/api/copilot/chat` | Send a Copilot message (body: `message`, optional `threadId`); starts a thread if none is given and returns its `threadId` with the reply. 503 when no AI key is set |
 | POST | `/api/copilot/ask` | Ask copilot a question |
 | POST | `/api/copilot/actions` | Execute copilot action |
 
@@ -872,11 +856,9 @@ Call recording, transcription, sentiment, dialer
 |--------|------|-------------|
 | GET | `/api/conversation-intelligence/recordings` | List call recordings |
 | POST | `/api/conversation-intelligence/recordings` | Upload call recording |
-| POST | `/api/conversation-intelligence/recordings/:id/analyze` | Add analyze to conversation intelligence |
+| POST | `/api/conversation-intelligence/analyze` | Keyword-matching analysis of a transcript (body: `recordingId` or `transcript`): topics, sentiment, counts; saved on the recording when `recordingId` is given |
 | GET | `/api/conversation-intelligence/dialer/status` | Get dialer status |
-| POST | `/api/conversation-intelligence/dialer/call` | Initiate outbound call |
-| POST | `/api/conversation-intelligence/dialer/:id/connect` | Add connect to conversation intelligence |
-| POST | `/api/conversation-intelligence/dialer/:id/end` | Add end to conversation intelligence |
+| POST | `/api/conversation-intelligence/dialer/call` | **501: unavailable** (`DIALER_UNAVAILABLE`). Initiate outbound call |
 
 ---
 
@@ -969,7 +951,7 @@ Generic third-party integration configuration storage. No sync connectors or con
 | GET | `/api/integrations/health` | Summarize stored statuses and recent sync logs |
 | GET | `/api/integrations/:id/health` | Summarize recent log errors for an integration |
 | GET | `/api/integrations/:id/schedule` | Read stored schedule settings |
-| PUT | `/api/integrations/:id/schedule` | Store schedule settings; does not schedule delivery or sync |
+| PUT | `/api/integrations/:id/schedule` | **501: unavailable** (`INTEGRATION_SYNC_UNAVAILABLE`). Store schedule settings; does not schedule delivery or sync |
 | GET | `/api/integrations/:id/mappings` | List stored field mappings |
 | PUT | `/api/integrations/:id/mappings` | Replace stored field mappings |
 
@@ -1002,9 +984,9 @@ App listings, install, reviews
 | GET | `/api/marketplace/:id` | Get marketplace listing by ID |
 | POST | `/api/marketplace` | Create new marketplace listing |
 | PUT | `/api/marketplace/:id` | Update marketplace listing |
-| POST | `/api/marketplace/:id/install` | Install marketplace app |
-| POST | `/api/marketplace/:id/uninstall` | Add uninstall to marketplace listing |
-| GET | `/api/marketplace/:id/installations` | List installations for marketplace listing |
+| POST | `/api/marketplace/:id/install` | **501: unavailable** (`APP_INSTALL_UNAVAILABLE`). Install marketplace app |
+| DELETE | `/api/marketplace/:id/uninstall` | Delete the app's installation record and lower its install count; 404 if not installed |
+| GET | `/api/marketplace/installed` | List installed apps with their listing and who installed them |
 
 ### `/api/cdp`
 
@@ -1019,7 +1001,7 @@ Customer Data Platform with profiles, segments, streams
 | POST | `/api/cdp/segments/calculate` | Create new CDP |
 | GET | `/api/cdp/streams` | List all CDPs |
 | POST | `/api/cdp/streams` | Create new CDP |
-| POST | `/api/cdp/streams/:id/ingest` | Add ingest to CDP |
+| POST | `/api/cdp/streams/:id/ingest` | **501: unavailable** (`CDP_INGEST_UNAVAILABLE`). Add ingest to CDP |
 
 ### `/api/mobile`
 
@@ -1029,7 +1011,7 @@ Device registration, push notifications, sync
 |--------|------|-------------|
 | POST | `/api/mobile/devices` | Register mobile device |
 | DELETE | `/api/mobile/devices/:deviceId` | Bulk delete mobiles |
-| POST | `/api/mobile/push` | Send push notification |
+| POST | `/api/mobile/push` | **501: unavailable** (`PUSH_UNAVAILABLE`). Send push notification |
 | GET | `/api/mobile/notifications` | List mobile notifications |
 | GET | `/api/mobile/feed` | Get mobile activity feed |
 | POST | `/api/mobile/sync` | Sync data for offline use |
@@ -1051,12 +1033,12 @@ SSO configuration storage, authenticator-app MFA and encryption policies. Generi
 | GET | `/api/security/mfa/devices` | List MFA devices |
 | POST | `/api/security/mfa/enroll` | Enroll an authenticator-app (TOTP) device; SMS/email types are unsupported |
 | POST | `/api/security/mfa/verify` | Verify MFA code |
-| POST | `/api/security/mfa/challenge` | Legacy challenge storage only; no SMS/email code is delivered. Use authenticator-app MFA |
+| POST | `/api/security/mfa/challenge` | **501: unavailable** (`MFA_CODE_DELIVERY_UNAVAILABLE`). Legacy challenge storage only; no SMS/email code is delivered. Use authenticator-app MFA |
 | DELETE | `/api/security/mfa/devices/:id` | Remove devices from security |
 | GET | `/api/security/encryption/policies` | List encryption policies |
-| POST | `/api/security/encryption/policies` | Create encryption policy |
-| PUT | `/api/security/encryption/policies/:id` | Update policies for security |
-| POST | `/api/security/encryption/rotate-key` | Rotate encryption key |
+| POST | `/api/security/encryption/policies` | **501: unavailable** (`ENCRYPTION_UNAVAILABLE`). Create encryption policy |
+| PUT | `/api/security/encryption/policies/:id` | **501: unavailable** (`ENCRYPTION_UNAVAILABLE`). Update policies for security |
+| POST | `/api/security/encryption/rotate-key` | **501: unavailable** (`ENCRYPTION_UNAVAILABLE`). Rotate encryption key |
 | GET | `/api/security/encryption/keys` | List encryption keys |
 
 ### `/api/sharing`
@@ -1082,7 +1064,7 @@ GDPR consent records with self-service opt-out
 |--------|------|-------------|
 | GET | `/api/consent` | List all consent records |
 | POST | `/api/consent` | Record consent preference |
-| PUT | `/api/consent/:id` | Update consent record |
+| PUT | `/api/consent/preferences/:contactId` | Set a contact's consent per type (body: `preferences`, `{ type: true/false }`); each is saved as a new consent record |
 | POST | `/api/consent/opt-out` | Process opt-out request |
 
 ### `/api/monitoring`
@@ -1093,7 +1075,7 @@ Login history, event logs, summary
 |--------|------|-------------|
 | GET | `/api/monitoring/login-history` | Get login history log |
 | GET | `/api/monitoring/event-logs` | Get platform event logs |
-| GET | `/api/monitoring/event-logs/summary` | Get monitoring summary |
+| GET | `/api/monitoring/metrics` | Summary: active users, sign-ins and failed sign-ins in the last 24 hours, API calls and 5xx errors in the last hour, uptime and memory |
 
 ### `/api/duplicates`
 
@@ -1173,8 +1155,8 @@ File attachments on any parent record
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/attachments` | List all attachments |
-| POST | `/api/attachments` | Create new attachment |
+| GET | `/api/attachments/:parentModule/:parentId` | List the attachments on a record you can see, newest first, with download URLs; the latest across records is `GET /api/attachments/recent` |
+| POST | `/api/attachments/:parentModule/:parentId` | Upload one file (multipart field `file`, optional `description`) to a record you can see; 413 over the size limit |
 | DELETE | `/api/attachments/:id` | Delete attachment |
 
 ### `/api/tags`
