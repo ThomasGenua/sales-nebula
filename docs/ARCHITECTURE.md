@@ -11,32 +11,33 @@
             +----------+----------+--------+--------+----------+
             |          |          |        |        |          |
         Middleware   Routes    CRUD     Prisma   Audit    Background
-         Stack      (86 files) Factory   ORM     Logger    Jobs
+         Stack     (100 files) Factory   ORM     Logger    Jobs
             |          |          |        |        |          |
             +----------+----------+--------+--------+----------+
                                            |
                               +------------+------------+
                               |                         |
-                        PostgreSQL 16              Redis 7
-                        (primary store)         (cache, queues)
+                        PostgreSQL 16         Redis 7, optional
+                        (primary store)   (job queues, sign-outs)
 ```
 
 ## Request Lifecycle
 
 Every HTTP request follows this exact path:
 
-1. **CORS** -- Cross-origin headers applied (configurable allowed origins)
-2. **Helmet** -- 15 security headers injected (CSP, HSTS, X-Frame-Options, etc.)
-3. **Compression** -- Gzip response compression for bodies > 1KB
-4. **Body Parser** -- JSON body parsing with 10MB limit
-5. **Rate Limiter** -- Per-IP throttling (default: 200 req/15 min)
-6. **XSS Sanitizer** -- All string inputs in request body sanitized
-7. **Route Matching** -- Express router dispatches to correct module
-8. **JWT Authentication** -- Token verified, `req.userId` set (skipped for public routes)
-9. **Permission Check** -- `requirePermission(module, level)` validates RBAC
-10. **Audit Middleware** -- Injects `req.audit()` for mutation logging
-11. **Route Handler** -- Business logic executes
-12. **Error Handler** -- Catches and formats errors with appropriate HTTP status
+1. **Helmet** -- Security headers (HSTS, X-Frame-Options and others; a content security policy in production)
+2. **Compression** -- Gzip response compression for bodies over 1KB
+3. **Request ID** and **CORS** -- Cross-origin headers for the configured origins
+4. **Body Parser** -- JSON bodies up to 1MB (10MB for documents, 2MB for AI requests)
+5. **HPP and XSS filtering** -- Repeated query parameters collapsed; string values in JSON and form bodies and query strings filtered (multipart fields are not)
+6. **Logging and metrics**
+7. **Rate Limiter** -- Per-IP throttling on `/api` (default 1000 requests per 15 minutes, kept in memory; tighter fixed limits on sign-in)
+8. **Route Matching** -- Express router dispatches to correct module
+9. **JWT Authentication** -- Token verified, `req.userId` set (skipped for public routes)
+10. **Permission Check** -- `requirePermission(module, level)` validates RBAC
+11. **Audit Middleware** -- Injects `req.audit()` for mutation logging
+12. **Route Handler** -- Business logic executes
+13. **Error Handler** -- Catches and formats errors with appropriate HTTP status
 
 ## Module System
 
@@ -58,7 +59,9 @@ module.exports = createCrudRouter('deal', 'deals', {
 
 **Generated endpoints:** GET / (paginated list), GET /:id, POST /, PUT /:id, DELETE /:id (soft delete), plus search and field selection.
 
-17 modules use createCrudRouter. The remaining 69 define custom routes.
+17 of the 100 route files use createCrudRouter. The other 83 define their own routes.
+
+Every create, update and delete of a module's records, through the factory or anywhere else, goes through `services/recordWrites.js`, which runs the module's hooks and rules before the write and audit, workflows and webhooks after it. A feature this install lacks answers 501 through `utils/unavailable.js`, with a `code` naming it; see [Feature status](FEATURE_STATUS.md).
 
 ### Route Extension Pattern
 
@@ -66,8 +69,8 @@ Several modules share a URL prefix by mounting multiple routers:
 
 | Prefix | Routers | Why |
 |--------|---------|-----|
-| `/api/deals` | deals.js + dealExtras.js | CRUD base + contact roles, splits, history |
-| `/api/quotes` | quotes.js + quoteExtras.js | CRUD + templates, line items |
+| `/api/deals` | deals.js + dealExtras.js | CRUD base + contact roles, products, stage history, health, competitors |
+| `/api/quotes` | quotes.js + quoteExtras.js | CRUD and line items + discounts, clone, convert to order, versions |
 
 Express processes them in registration order. Since path patterns don't overlap, both routers serve correctly.
 
@@ -75,7 +78,7 @@ Express processes them in registration order. Since path patterns don't overlap,
 
 ### Prisma ORM
 
-Prisma provides type-safe database access. The schema file (`prisma/schema.prisma`) is the single source of truth for all 173 models. Key design decisions:
+Prisma provides type-safe database access. The schema file (`prisma/schema.prisma`) is the single source of truth for all 286 models. Key design decisions:
 
 **UUID primary keys** -- Every model uses `@default(cuid())` for globally unique, non-sequential IDs.
 
@@ -85,7 +88,7 @@ Prisma provides type-safe database access. The schema file (`prisma/schema.prism
 
 **Soft deletes** -- DELETE routes move records to the RecycleBinItem table with a 30-day retention window rather than destroying data.
 
-### Index Strategy (253 indexes)
+### Index Strategy
 
 Indexes follow three rules:
 
@@ -95,13 +98,9 @@ Indexes follow three rules:
 
 ### Migration Strategy
 
-A single atomic migration (`00000000000000_initial/migration.sql`) creates all 173 tables. This means:
+`prisma/migrations` holds the initial migration and the ones added since, applied in order by `npx prisma migrate deploy` (`npm run db:migrate:prod`). The test suite builds its database the same way, so tests run on the schema production gets.
 
-- Fresh deployments always get a consistent schema
-- No migration ordering issues
-- The migration file is the canonical reference for the physical schema
-
-For incremental changes, generate new migrations with `npx prisma migrate dev`.
+For a schema change, generate a new migration with `npx prisma migrate dev`.
 
 ## Authentication Architecture
 
@@ -136,22 +135,22 @@ Permission levels are cumulative: `full` implies `edit` which implies `read`. Th
 
 ### API Key Authentication
 
-Server-to-server integrations use API keys passed via `X-API-Key` header. Keys are stored as bcrypt hashes and inherit the creator's permissions. Each key tracks last-used timestamp and request count.
+Server-to-server integrations use API keys passed via `X-API-Key` header. Only a SHA-256 of each key is stored, and a key acts with at most the creator's permissions. Each key tracks last-used timestamp and request count.
 
 ## Security Layers
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
 | Transport | TLS (reverse proxy) | Encryption in transit |
-| Headers | Helmet.js | CSP, HSTS, X-Frame-Options, 12 more |
+| Headers | Helmet.js | HSTS, X-Frame-Options and others; CSP in production |
 | Rate limiting | express-rate-limit | DDoS / brute-force mitigation |
-| Input sanitization | xss-clean | XSS prevention on all inputs |
+| Input sanitization | xss (`middleware/sanitize.js`) | XSS filtering of JSON and form bodies and query strings |
 | Password storage | bcrypt (cost 10) | Irreversible password hashing |
 | Token signing | HS256 JWT | Tamper-proof auth tokens |
 | Webhook signing | HMAC-SHA256 | Outbound request verification |
 | Account lockout | Configurable threshold | Brute-force login prevention |
-| Audit trail | AuditLog table | Complete mutation history |
-| Event logging | EventLog table | API call tracking with risk scoring |
+| Audit trail | AuditLog table | Record writes and audited actions, kept 90 days |
+| Event logging | EventLog table | Defined; nothing writes it yet |
 
 ## Operational Architecture
 
@@ -178,7 +177,7 @@ This enables zero-downtime deploys with rolling restarts.
 
 ### Logging
 
-Pino structured JSON logging with configurable levels. Request logs include method, URL, status code, response time, and user ID. Audit logs capture every create/update/delete with before/after values.
+Pino structured JSON logging with configurable levels. Request logs include method, URL, status code, response time, and user ID. Audit entries are written for every record write through the write path, and by the routes that log their own actions; a weekly job deletes entries older than 90 days. Some administrative changes are not audited yet (for example MFA and SSO settings), and a write with no signed-in user, such as a web form or a job, records no entry.
 
 ### Metrics
 
@@ -186,7 +185,7 @@ Pino structured JSON logging with configurable levels. Request logs include meth
 
 ## Frontend Architecture
 
-The React frontend is a single-file SPA (`frontend/App.jsx`, 1,756 lines) with 28 pages.
+The React frontend lives in `frontend/src`: 55 pages, most of them in `App.jsx` (about 6,500 lines), with the landing page, shared controls, related lists and a few others in files of their own. Vite builds it into `frontend/dist`, which the API serves.
 
 ### State Management
 
@@ -212,7 +211,7 @@ Bloomberg Terminal aesthetic with a carefully defined color hierarchy:
 
 ### Component Library
 
-8 shared components used across all pages: Spinner, Badge (8 color variants), Button, Input, Select, TextArea, Modal, Toast, DataTable (with pagination), StatCard, EmptyState.
+Shared components used across the pages: Spinner, Badge (8 color variants), Button, Input, Select, TextArea, Modal, Toast, DataTable (with pagination), StatCard, EmptyState.
 
 ## Docker Architecture
 
@@ -220,33 +219,37 @@ Bloomberg Terminal aesthetic with a carefully defined color hierarchy:
 services:
   postgres:    # PostgreSQL 16, persistent volume, health: pg_isready
   redis:       # Redis 7, persistent volume, health: redis-cli ping
-  api:         # Node.js 20 Alpine, port 4000, health: /api/health
-  migrate:     # One-shot: prisma migrate + seed, then exits
+  api:         # Node.js 20 Alpine, port 7544, health: /api/health
+  migrate:     # One-shot: prisma migrate deploy + first administrator, then exits
 ```
 
-The multi-stage Dockerfile produces a ~150MB Alpine image. The migrate service runs once on deployment to apply schema changes and seed initial data.
+The multi-stage Dockerfile produces a ~150MB Alpine image. The migrate service runs once on deployment to apply schema changes and create the first administrator. Production creates no demo records.
 
 ## Directory Structure
 
 ```
 src/
   index.js           Server entry, port binding, graceful shutdown
-  app.js             Express app, middleware stack, 86 route mounts
+  app.js             Express app, middleware stack, every route mount
   middleware/
     auth.js          JWT verification, requirePermission, API key auth
     audit.js         req.audit() helper, AuditLog writes
     rateLimit.js     Configurable rate limiter
     sanitize.js      XSS input sanitization
     validate.js      Request body validation
-  routes/            86 route modules (one per domain)
+  routes/            100 route files (one or more per domain)
+  services/          recordWrites (the one write path), approvals, mail, webhooks
   utils/
     crud.js          CRUD router factory
+    unavailable.js   The 501 answer for a feature this install lacks
 prisma/
-  schema.prisma      173 models (single source of truth)
+  schema.prisma      286 models (single source of truth)
   migrations/        SQL migrations
   seed.js            Demo data seeder
-frontend/
-  App.jsx            Complete React SPA (1,756 lines, 28 pages)
-tests/               Jest test suites (246 tests)
+frontend/src/
+  App.jsx            Most of the 55 pages
+  Landing.jsx        The public site
+tests/               Jest suites (51 files)
+e2e/                 Playwright browser tests and their test server
 scripts/             Swagger generator, backup utility
 ```

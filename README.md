@@ -1,6 +1,8 @@
 # Sales Nebula CRM
 
-A full-stack enterprise CRM platform with 100% Salesforce feature parity. Built with Node.js, Express, Prisma, and PostgreSQL on the backend, with a React frontend in a Bloomberg Terminal-inspired dark aesthetic.
+A self-hosted CRM for sales and service teams: accounts, contacts, leads, deals, quotes, invoices, cases and the automation around them. Built with Node.js, Express, Prisma, and PostgreSQL on the backend, with a React frontend in a Bloomberg Terminal-inspired dark aesthetic.
+
+It is not a Salesforce replacement feature for feature. Some modules store configuration that nothing acts on yet, and their actions answer **501** instead of pretending; [Feature status](docs/FEATURE_STATUS.md) lists what works, what is limited, and what is unavailable.
 
 
 ## Running it
@@ -72,14 +74,18 @@ API, PostgreSQL and a local SMTP server. GitHub Actions remains disabled. See
 
 ## At a Glance
 
+Counted from the code in October 2026:
+
 | Metric | Count |
 |--------|-------|
-| Database models | 173 |
-| API endpoints | 576+ |
-| Route modules | 86 |
-| Database indexes | 253 |
-| Frontend pages | 28 |
-| Automated tests | 246 |
+| Database models | 286 |
+| Route files | 100 (17 of them built on the CRUD router factory) |
+| Route handlers | about 1,280, counting the CRUD factory's |
+| Frontend pages | 55 |
+| Jest test files | 51 |
+| Browser (Playwright) specs | 5 |
+
+A count says how much code there is, not how much of it works: see [Feature status](docs/FEATURE_STATUS.md).
 
 ## Table of Contents
 
@@ -153,60 +159,60 @@ Client (React SPA)
 Express API Server (Node.js)
     |-- JWT Authentication
     |-- Role-Based Access Control (RBAC)
-    |-- Rate Limiting (configurable per-window)
-    |-- XSS Sanitization (all inputs)
+    |-- Rate Limiting (per IP, in memory)
+    |-- XSS Filtering (JSON and form bodies, query strings)
     |-- Helmet Security Headers
     |-- Gzip Compression
     |-- Pino Structured Logging
-    |-- Audit Logging (every mutation)
+    |-- Audit Logging (record writes, and actions routes log)
     |
     v
 Prisma ORM (type-safe, generated client)
     |
     v
-PostgreSQL 16            Redis 7
-(primary data store)     (cache, sessions, job queues)
+PostgreSQL 16            Redis 7, optional
+(primary data store)     (job queues, sign-out list, API key counters)
 ```
 
 ### Key Design Decisions
 
-**Prisma ORM** handles all database operations with type-safe queries, migrations, and a generated client. The schema (`prisma/schema.prisma`) is the single source of truth for all 173 models and 253 indexes.
+**Prisma ORM** handles all database operations with type-safe queries, migrations, and a generated client. The schema (`prisma/schema.prisma`) is the single source of truth for all 286 models.
 
 **CRUD Router Factory** (`src/utils/crud.js`) generates standardized REST endpoints for any module in a single function call. Each generated router includes paginated listing, full-text search, field selection, sorting, audit logging, soft deletes, and permission checks. Modules requiring custom logic extend the base router via hooks: `beforeCreate`, `afterUpdate`, `validate`, `searchFilter`, and `customRoutes`.
 
-**One Write Path** (`src/services/recordWrites.js`) is how a record of a module is created, changed or deleted, wherever the change comes from: the CRUD routers, import, the bulk API, mass actions, mobile sync, lead and prospect conversion, web-to-lead, web-to-case, email-to-case, the portal, inbound mail, the jobs, and each module's own actions (escalate, activate, renew, merge, clone). It runs the module's hooks (numbering, a case's closedAt and status history, a deal's currency and stage history), then validation, duplicate and assignment rules before the write, and audit, security groups, real-time events, workflows and webhooks after it. Inside a transaction the automation waits until it commits (`runAfter`). A write a rule refuses throws a `RecordWriteError`, which the API answers with the rule's message; a batch reports it against the row and carries on with the rest. `tests/writePaths.test.js` fails when a file writes these records directly, except for the few bookkeeping writes it lists with a reason.
+**One Write Path** (`src/services/recordWrites.js`) is how a record of a module is created, changed or deleted, wherever the change comes from: the CRUD routers, import, the bulk API, mass actions, mobile sync, lead and prospect conversion, web-to-lead, web-to-case, email-to-case, the portal, inbound mail, the jobs, and each module's own actions (escalate, activate, renew, merge, clone). It runs the module's hooks (numbering, a case's closedAt and status history, a deal's currency and stage history), then validation rules (and, on create, duplicate and assignment rules) before the write, and audit, security groups, real-time events, workflows and webhooks after it. Inside a transaction the automation waits until it commits (`runAfter`). A write a rule refuses throws a `RecordWriteError`, which the API answers with the rule's message; a batch reports it against the row and carries on with the rest. `tests/writePaths.test.js` fails when a file writes these records directly, except for the few bookkeeping writes it lists with a reason.
 
-**Middleware Stack** is applied in this order: CORS, Helmet (15 security headers), gzip compression, JSON body parsing, rate limiting, XSS sanitization. After that, route-level middleware handles JWT authentication, permission checks, and audit logging.
+**Middleware Stack** is applied in this order: Helmet (security headers, with a content security policy in production), compression, a request ID, CORS, body parsing, an HTTP parameter pollution guard, XSS filtering of bodies and query strings, logging, metrics, then rate limiting on `/api`. After that, route-level middleware handles JWT authentication, permission checks, and audit logging.
 
-**Soft Deletes** route records through the Recycle Bin with a 30-day retention window before permanent deletion. The recycle bin supports search, restore, and manual purge.
+**Soft Deletes** mark a record deleted and put it in the Recycle Bin, where it can be restored for 30 days. After that the bin entry expires; the row stays in its table until an administrator purges deleted records.
 
 ---
 
 ## Modules
 
-Sales Nebula covers the complete Salesforce ecosystem across all major clouds. Every Salesforce standard object and add-on product has a corresponding implementation.
+The tables below list the API modules, grouped the way Salesforce groups its clouds for familiarity. A module being listed does not mean it matches the Salesforce feature of the same name: several store configuration that nothing acts on yet. [Feature status](docs/FEATURE_STATUS.md) says which.
 
 ### Sales Cloud
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Leads | `/api/leads` | Lead capture, scoring, assignment rules, web-to-lead |
+| Leads | `/api/leads` | Lead capture, web-to-lead, assignment rules; rule-based scoring (automatic for web-to-lead, on request otherwise) |
 | Contacts | `/api/contacts` | Contact management with account relationships |
 | Accounts | `/api/accounts` | B2B account hierarchy, team assignments |
 | Person Accounts | `/api/person-accounts` | B2C individual accounts |
 | Deals (Opportunities) | `/api/deals` | Full pipeline with stages, probability, line items, forecasting, clone, competitors, win/loss analysis, aging, velocity |
 | Deal Extras | `/api/deals` | Contact roles, revenue splits, stage history |
 | Products | `/api/products` | Product catalog with SKUs, bundles, discount schedules |
-| Quotes | `/api/quotes` | Quote generation, line items, PDF export, accept/reject |
-| Quote Extras | `/api/quotes` | Templates (HTML header/body/footer), line item management with auto-calculated totals |
+| Quotes | `/api/quotes` | Quotes with line items and totals, accept, invoice from a quote; prints as HTML (no PDF file) |
+| Quote Extras | `/api/quotes` | Discounts, clone, convert to order, versions, compare |
 | Orders | `/api/orders` | Order processing and fulfillment tracking |
 | Contracts | `/api/contracts` | Contract lifecycle management |
 | Invoices | `/api/invoices` | Invoice generation from quotes with line items |
-| Forecasts | `/api/forecasts` | Revenue forecasting, quota management, forecast items |
-| Territories | `/api/territories` | Territory models (Planning/Active/Archived), hierarchical territories, assignment rules, account mapping |
-| Sales Path | `/api/sales-path` | Guided selling stages with coaching content |
+| Forecasts | `/api/forecasts` | Forecasts built from the owner's open deals, refreshed every 4 hours; quotas entered by hand |
+| Territories | `/api/territories` | Hierarchical territories and manual account mapping (assignment rules are stored only) |
+| Sales Path | `/api/sales-path` | Guided selling stages with coaching content (API only, no screen) |
 | CPQ | `/api/cpq` | Configure-Price-Quote: bundles, pricebooks, price calculation |
-| Advanced CPQ | `/api/cpq/advanced` | Product rules, price rules, guided selling, discount schedules with tier calculation, quote validation |
+| Advanced CPQ | `/api/cpq/advanced` | Guided selling, discount tiers; product rules checked by `validate-quote` only; price rules stored only |
 
 ### Service Cloud
 
@@ -215,100 +221,100 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Cases | `/api/cases` | Case management with comments, escalation, priority routing |
 | Email-to-Case | `/api/public/email-to-case` | Inbound email auto-creates cases (webhook; requires `EMAIL_TO_CASE_SECRET`) |
 | Web-to-Case | `/api/public/web-to-case` | Web form submission creates cases (public, no auth) |
-| Knowledge | `/api/knowledge` | Articles with categories, versioning, attachments, search |
-| Entitlements | `/api/entitlements` | Service entitlements with milestones |
+| Knowledge | `/api/knowledge` | Articles with categories, publishing and search; a new version copies the article |
+| Entitlements | `/api/entitlements` | Service entitlements with case counts (milestones stored only) |
 | SLA Policies | (via configuration) | Service level agreements with response/resolution targets |
-| Omnichannel | `/api/omnichannel` | Work routing, agent presence/capacity, skill-based assignment |
-| Field Service | `/api/field-service` | Work orders, line items, service appointments, scheduling |
-| Macros | `/api/macros` | Automated multi-step action sequences |
+| Omnichannel | `/api/omnichannel` | Agent presence and "Least Active" routing (capacity and skills not checked) |
+| Field Service | `/api/field-service` | Work orders: dispatch, schedule (dates and assignee), complete, cancel |
+| Macros | `/api/macros` | Run on demand: update a field, add a case comment |
 
 ### Marketing Cloud
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
 | Campaigns | `/api/campaigns` | Campaign planning, members, recipients, target lists and ROI tracking; bulk delivery unavailable |
-| Campaign Influence | `/api/campaign-influence` | Multi-touch revenue attribution models |
-| Email Templates | `/api/emails` | Template management, sync, sending |
-| Email Sequences | `/api/sequences` | Multi-step drip campaigns with enrollment tracking |
+| Campaign Influence | `/api/campaign-influence` | Attribution models (linear, first touch, last touch) over touches entered by hand |
+| Emails | `/api/emails` | Templates, drafts, and sending over SMTP or a Microsoft mailbox |
+| Email Sequences | `/api/sequences` | Multi-step sequences, sent every 10 minutes when SMTP is set up |
 
 ### Experience Cloud
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Portal | `/api/portal` | Portal config (Customer/Partner/Employee), themes, self-registration |
+| Portal | `/api/portal` | One portal configuration and its branding (no self-registration: an administrator creates portal logins) |
 | Portal Users | `/api/portal/:id/users` | User provisioning with bcrypt password hashing |
 | Chatter | `/api/chatter` | Posts, comments, likes, mentions (legacy) |
-| Feed | `/api/feed` | Activity feed: text/link/content/poll posts, likes, pins, comments |
+| Feed | `/api/feed` | Record feeds: posts, likes, comments |
 
 ### Platform
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Custom Objects | `/api/custom-objects` | Dynamic schema: create objects with typed fields, store records as JSONB |
-| Custom Fields | (via configuration) | Extend any module with text, number, date, picklist, lookup fields |
+| Custom Objects | `/api/custom-objects` | Objects with typed fields and JSON records, through the API (records are not checked against the fields) |
+| Custom Fields | `/api/studio` | Field definitions only; storing values answers 501 |
 | Validation Rules | (via configuration) | Formula-based data validation on any module |
-| Record Types | (via configuration) | Multiple record type layouts per module |
-| Page Layouts | (via configuration) | Field arrangement and section configuration |
-| Formula Fields | `/api/formulas` | Calculated fields with cross-object references |
-| Flows | `/api/flows` | Visual flow builder: definitions, versions (Draft/Active), execution history |
+| Record Types | `/api/configuration` | Stored only |
+| Page Layouts | `/api/configuration` | Stored only |
+| Formula Fields | `/api/formulas` | Formulas evaluated on request (not on records; no cross-object references) |
+| Flows | `/api/flows` | Flow definitions and versions; running a flow answers 501 |
 | Workflows | `/api/workflows` | Rule-based automation: field updates, email alerts, tasks |
 | Approvals | `/api/approvals` | Multi-step approval processes with configurable approvers |
-| Platform Events | `/api/events` | Pub/sub event bus with subscriptions |
-| Environments | `/api/environments` | Sandbox creation, metadata export/import, change sets |
-| Custom Code | `/api/custom-code` | Server-side scripts (Apex-equivalent) |
-| Custom Components | `/api/custom-components` | UI component registry (Lightning-equivalent) |
+| Platform Events | `/api/events` | Published events stored and sent to webhooks registered for `platform.<channel>` |
+| Environments | `/api/environments` | Metadata export; creating, deploying and importing answer 501 |
+| Custom Code | `/api/custom-code` | Stored scripts with a syntax check; custom code never runs (501) |
+| Custom Components | `/api/custom-components` | Stored only; nothing renders them |
 
 ### Analytics and AI
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Reports | `/api/reports` | Report builder with types, folders, scheduling, export |
-| Analytics | `/api/analytics` | Datasets and interactive dashboards |
+| Reports | `/api/reports` | Saved reports run with real rows and totals, folders, CSV/JSON export; scheduling answers 501 |
+| Analytics | `/api/analytics` | Overview, ad-hoc query, funnel and cohort figures (datasets only count rows; dashboards are stored only) |
 | Dashboard | `/api/dashboard` | Executive KPI dashboard with pipeline, activities, forecasts |
-| AI Agents | `/api/ai-agents` | Configurable agents with Anthropic Claude integration and execution history |
-| Copilot | `/api/copilot` | Conversational AI assistant with message threading |
-| Conversation Intelligence | `/api/conversation-intelligence` | Call recording upload, transcription, sentiment analysis |
-| Lead Scoring | (via configuration) | Rule-based automatic lead scoring |
+| AI Agents | `/api/ai-agents` | Agent configuration; running, activating and training answer 501 |
+| Copilot | `/api/copilot` | Answers with Claude when `ANTHROPIC_API_KEY` is set, from fixed rules otherwise |
+| Conversation Intelligence | `/api/conversation-intelligence` | Keyword analysis of a transcript you supply (no upload or transcription); the dialer answers 501 |
+| Lead Scoring | (via configuration) | Scoring rules, applied to web-to-lead leads and on request |
 
 ### Data and Integration
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Import | `/api/import` | CSV/Excel import wizard with field mapping, validation, error reporting |
-| Export | `/api/export` + `/api/data-export` | Data export in CSV, JSON, XLSX formats |
+| Import | `/api/import` | CSV import with validation and per-row errors (no Excel) |
+| Export | `/api/export` + `/api/data-export` | Data export in CSV or JSON (no Excel) |
 | Bulk API | `/api/bulk` | High-volume batch insert/update/delete/upsert operations |
 | Webhooks | `/api/webhooks` | Outbound webhooks with HMAC-SHA256 signing, exponential retry, delivery logs |
 | Integrations | `/api/integrations` | Configuration and credential storage only; generic sync and connection tests unavailable |
 | Connected Apps | `/api/connected-apps` | OAuth2 client application management |
 | OAuth Sign-In | `/api/oauth` | Provider-specific Google and Microsoft sign-in APIs, when configured |
-| Marketplace | `/api/marketplace` | App listings, installs, reviews (public browsing, auth for install) |
-| CDP | `/api/cdp` | Customer Data Platform: data streams, unified profiles, segments |
+| Marketplace | `/api/marketplace` | App listings and reviews; installing answers 501 |
+| CDP | `/api/cdp` | Live contact profiles and segment evaluation; ingesting data answers 501 |
 
 ### Security and Compliance
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Users | `/api/users` | Full CRUD, role assignment, activate/deactivate, preferences, online status |
+| Users | `/api/users` | Users, role assignment, activate/deactivate, preferences; "online" means active in the last 15 minutes |
 | Roles and Permissions | `/api/users/roles` | Role CRUD with per-module permission levels (read/edit/full) |
 | Sharing Rules | `/api/sharing` | Record sharing rules and org-wide defaults |
-| Field-Level Security | (via configuration) | Per-field read/edit permissions by role |
+| Field-Level Security | `/api/configuration` | Not enforced; saving answers 501 |
 | Org-Wide Defaults | (via configuration) | Default record visibility (Private/Public Read/Public Read-Write) |
 | SSO | `/api/security` | SAML 2.0 and OIDC configuration storage; sign-in unavailable |
 | MFA | `/api/security` | Authenticator-app (TOTP) multi-factor authentication |
-| Encryption (Shield) | `/api/security` | Platform encryption policies and key management |
-| Consent | `/api/consent` | GDPR consent records with opt-in/opt-out, self-service opt-out endpoint |
-| Monitoring | `/api/monitoring` | Login history, event logs, 24h summary |
+| Encryption (Shield) | `/api/security` | Not available; saving a policy answers 501 |
+| Consent | `/api/consent` | Consent records with opt-in and opt-out per contact, for signed-in users (there is no public opt-out link) |
+| Monitoring | `/api/monitoring` | Login history and 24-hour sign-in figures (nothing writes event logs yet) |
 | Admin Dashboard | `/api/admin/dashboard` | System health, record counts, security metrics, revenue pipeline, recent activity |
-| Audit Log | `/api/admin/audit-log` | Complete immutable change history (action, module, record, user, timestamp) |
-| Recycle Bin | `/api/recycle-bin` | 30-day soft delete recovery with search and restore |
-| Duplicate Management | `/api/duplicates` | Configurable duplicate detection rules, match results, merge |
+| Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time), kept 90 days |
+| Recycle Bin | `/api/recycle-bin` | Restore deleted records within 30 days |
+| Duplicate Management | `/api/duplicates` | Duplicate rules checked when a record is created; merge for contacts, leads and accounts |
 
 ### Other Modules
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
 | Activities | `/api/activities` | Tasks, calls, meetings, events with multi-who support |
-| Timeline | `/api/timeline` | Unified activity timeline across all related objects |
+| Timeline | `/api/timeline` | A record's own activities, emails, notes, cases, changes and posts |
 | Notes | `/api/notes` | Rich text notes attachable to any record |
 | Tags | `/api/tags` | Universal tagging with tag assignment tracking |
 | Documents | `/api/documents` | Document management with versioning |
@@ -317,14 +323,14 @@ Sales Nebula covers the complete Salesforce ecosystem across all major clouds. E
 | Search | `/api/search` | Global cross-module search with configurable modules |
 | Mass Actions | `/api/mass-actions` | Bulk update, delete, reassign, field set, transfer |
 | Surveys | `/api/surveys` | CSAT/NPS/CES surveys with response collection and analytics |
-| Scheduler | `/api/scheduler` | Appointment slots, booking, cancellation, availability check |
+| Scheduler | `/api/scheduler` | Booking with an overlap check, cancellation, open slots in a fixed 9-to-5 day |
 | Assets | `/api/assets` | Installed product/asset tracking with lifecycle status |
-| Partners | `/api/partners` | Partner tiers (Registered/Silver/Gold/Platinum), portal access |
+| Partners | `/api/partners` | Partner tiers (Registered/Silver/Gold/Platinum) |
 | Subscriptions | `/api/subscriptions` | Recurring subscription management |
-| Revenue Recognition | `/api/revenue` | Revenue schedules with period-based entries |
+| Revenue Recognition | `/api/revenue` | Schedules split evenly by month; periods recognized by hand |
 | Teams | `/api/teams` | Account and deal team member assignments with roles |
-| Mobile | `/api/mobile` | Device registration, push notification management |
-| Currencies | `/api/admin/currencies` | Multi-currency support with exchange rate management |
+| Mobile | `/api/mobile` | Device registration and sync for a mobile client; push answers 501 |
+| Currencies | `/api/admin/currencies` | One exchange rate per currency; deal totals converted in dashboards and forecasts |
 
 ---
 
@@ -360,9 +366,10 @@ DELETE /api/{module}/:id          # Soft delete (moves to recycle bin)
 |-----------|------|---------|-------------|
 | `page` | integer | `1` | Page number |
 | `limit` | integer | `50` | Records per page (max 200) |
-| `search` | string | -- | Full-text search across configured fields |
-| `sort` | string | `createdAt` | Sort field name |
-| `order` | string | `desc` | Sort direction: `asc` or `desc` |
+| `search` | string | -- | Search across the module's configured fields |
+| `sortBy` | string | the module's default | Sort field name |
+| `sortDir` | string | `desc` | Sort direction: `asc` or `desc` |
+| any column | string | -- | Filter on the record's own column, e.g. `?accountId=...&status=Open`; `<column>From` and `<column>To` give a range |
 
 **List Response Format:**
 
@@ -395,6 +402,7 @@ DELETE /api/{module}/:id          # Soft delete (moves to recycle bin)
 | 409 | Conflict (duplicate email, optimistic locking) |
 | 429 | Rate limit exceeded (retry after window) |
 | 500 | Internal server error |
+| 501 | The feature is not available in this install. The body's `code` names it (for example `FLOWS_UNAVAILABLE`) and nothing was changed; see [Feature status](docs/FEATURE_STATUS.md) |
 
 ### Notable Custom Endpoints
 
@@ -411,24 +419,22 @@ Beyond standard CRUD, many modules expose domain-specific endpoints:
 - `GET /api/deals/:id/timeline` -- Unified activity timeline
 - `GET/PUT /api/deals/:id/competitors` -- Competitor tracking
 - `GET/POST /api/deals/:id/contact-roles` -- Contact roles (Decision Maker, Champion, etc.)
-- `GET/POST /api/deals/:id/splits` -- Revenue split allocation
-- `GET /api/deals/:id/history` -- Stage change history
+- `GET /api/deals/:id/stage-history` -- Stage change history, with days in each stage
 
 **Quotes:**
 - `POST /api/quotes/:id/accept` -- Accept quote
 - `POST /api/quotes/:id/create-invoice` -- Generate invoice from quote
-- `GET /api/quotes/:id/pdf` -- PDF export
-- `GET/POST /api/quotes/templates` -- Quote template management
-- `GET/POST /api/quotes/:id/line-items` -- Line item CRUD with auto-calculated totals
+- `GET /api/quotes/:id/pdf` -- The quote as a printable HTML page (print it to PDF from the browser; no PDF file is generated)
+- Line items come back as `items` on `GET /api/quotes/:id`, and are replaced by sending `items` to `PUT /api/quotes/:id`, which recalculates the totals
 
 **Surveys:**
 - `POST /api/surveys/:id/respond` -- Submit response
-- `GET /api/surveys/:id/analytics` -- Response analytics (total, average score)
+- `GET /api/surveys/:id/results` -- Results: totals, per-question figures, NPS
 
 **Scheduler:**
 - `GET /api/scheduler/availability` -- Available slots for user on date
-- `POST /api/scheduler/slots/:id/book` -- Book appointment
-- `POST /api/scheduler/slots/:id/cancel` -- Cancel booking
+- `POST /api/scheduler` -- Book an appointment (409 if it overlaps the host's others)
+- `POST /api/scheduler/:id/cancel` -- Cancel an appointment
 
 **Consent (GDPR):**
 - `POST /api/consent/opt-out` -- Self-service opt-out (creates or updates record)
@@ -438,10 +444,12 @@ Beyond standard CRUD, many modules expose domain-specific endpoints:
 - `GET /api/admin/dashboard/activity` -- Recent logins, audit entries, flow runs, AI agent runs
 
 **Bulk API:**
-- `POST /api/bulk/:module/insert` -- Batch insert
-- `POST /api/bulk/:module/update` -- Batch update
-- `POST /api/bulk/:module/upsert` -- Batch upsert
-- `POST /api/bulk/:module/delete` -- Batch delete
+- `POST /api/bulk/insert` -- Batch insert (`{ module, records }`)
+- `POST /api/bulk/update` -- Batch update (`{ module, records }`)
+- `POST /api/bulk/upsert` -- Batch upsert (`{ module, records, matchField }`)
+- `POST /api/bulk/delete` -- Batch delete (`{ module, ids }`)
+
+Each record goes through the same rules, workflows and audit as a single save.
 
 ### OpenAPI / Swagger
 
@@ -526,6 +534,8 @@ Campaigns support planning, recipient lists and response tracking. Bulk campaign
 
 Generic integration records under `/api/integrations` store configuration only. Their sync and connection-test actions return **501**; saving a schedule does not start a sync worker. Stored status, dates and log summaries do not establish a live connection. This limitation does not apply to the separate Microsoft mailbox APIs under `/api/inbound-email`, outbound webhooks or Connected Apps.
 
+These are two of several features that answer 501 or store settings nothing acts on; [Feature status](docs/FEATURE_STATUS.md) lists them all.
+
 ### Connected Apps (OAuth 2.0)
 
 Sales Nebula is also an OAuth 2.0 authorization server for third-party apps, using the authorization-code grant with PKCE (S256, required of every app).
@@ -546,12 +556,12 @@ Socket.io runs on the API server. A client connects with a session access token 
 - Account lockout after configurable failed login attempts (default: 5)
 - Bcrypt password hashing (cost factor 10)
 - HMAC-SHA256 signed webhooks
-- Helmet.js security headers (15 policies)
-- Rate limiting per IP (configurable window and max)
-- XSS input sanitization on all request bodies
-- Login history and event log tracking (Shield)
-- Platform encryption policies for sensitive fields
-- GDPR consent management with self-service opt-out
+- Helmet.js security headers
+- Rate limiting per IP (`RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` tune the standard tier)
+- XSS filtering of JSON and form bodies and query strings
+- Login history
+- IMAP/POP3 mailbox passwords encrypted at rest (AES-256-GCM)
+- Consent records per contact
 
 ---
 
@@ -640,7 +650,7 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 
 ### Schema
 
-Prisma is the ORM. The schema file (`prisma/schema.prisma`) defines all 173 models and is the single source of truth. The initial migration (`prisma/migrations/00000000000000_initial/migration.sql`) creates all 173 tables with 253 indexes in a single atomic migration.
+Prisma is the ORM. The schema file (`prisma/schema.prisma`) defines all 286 models and is the single source of truth. `prisma/migrations` holds the migrations that build it, from the initial one onward; production applies them with `npm run db:migrate:prod`.
 
 ### Commands
 
@@ -671,7 +681,7 @@ The data model follows Salesforce conventions with some enhancements:
 
 ### Indexes
 
-253 indexes cover primary keys, foreign keys, unique constraints, and composite indexes for common query patterns. Notable composite indexes:
+Indexes cover primary keys, foreign keys, unique constraints, and composite indexes for common query patterns. Notable composite indexes:
 
 | Index | Table | Purpose |
 |-------|-------|---------|
@@ -771,7 +781,7 @@ server {
 
 ## Frontend
 
-The React frontend (`frontend/App.jsx`) is a 1,756-line single-file SPA with 28 pages.
+The React frontend lives in `frontend/src`. Most of the 55 pages are in `App.jsx` (about 6,500 lines); the landing page, shared controls, related lists and a few others have files of their own. The API serves the built app (`npm run build`) at `/app`.
 
 ### Design System (Bloomberg Terminal Aesthetic)
 
@@ -792,15 +802,24 @@ The React frontend (`frontend/App.jsx`) is a 1,756-line single-file SPA with 28 
 | Warning | `#FBBF24` | Pending, attention needed |
 | Purple | `#A78BFA` | Role badges, tags |
 
-### Pages (28 Total)
+### Pages (55)
 
-**Core:** Login, Dashboard, Contacts, Leads, Deals, Accounts, Cases, Activities, Campaigns, Products, Quotes, Invoices
+The sidebar groups them:
 
-**Extended:** Emails, Reports, Workflows, Knowledge, AI Agents, Forecasts, Custom Objects
+- **CRM:** Dashboard, Contacts, Leads, Deals, Accounts, Activities, Calendar
+- **Communication:** Emails, Campaigns, Chatter, Notes
+- **Revenue:** Products, Quotes, Invoices, Contracts, Orders, Subscriptions, Forecasts
+- **Service:** Cases, Knowledge, Work Orders, Entitlements
+- **Automation & AI:** Workflows, Approvals, AI Agents, AI Copilot, Flow Builder, Sequences
+- **Operations:** Projects, Prospects, SLA Board, Bugs, Territory Map
+- **Platform:** Custom Objects, Marketplace, Partners, Territories
+- **Content:** Documents, Surveys, Templates, Assets
+- **Tools:** Reports, Analytics, Search, Import, Tags, Webhooks, Studio, Security Groups
+- **Administration:** Users, Access requests, Privacy, Settings (Profile, Appearance, Security, Notifications), Admin
 
-**System:** Global Search, Settings (7 tabs: Users, Roles, API Keys, Webhooks, Currencies, Recycle Bin, Audit Log), Admin Dashboard
+The Recycle Bin has no sidebar entry; it opens at `/app/recycleBin`. Each sidebar entry shows only to roles that may open it. Accounts, contacts, deals and quotes have a **Related** tab listing the records linked to them. Flow Builder, AI Agents, Marketplace and Studio's custom fields say on the page what does not run; see [Feature status](docs/FEATURE_STATUS.md).
 
-**User Management (Settings > Users):** Add user modal (name, email, password, role, active toggle), inline edit, activate/deactivate toggle, delete with confirmation dialog, role assignment dropdown.
+**Users:** invite, edit, deactivate and reactivate people, send a password reset, and resend or revoke invites, as described under [Signup and invites](#signup-and-invites-apisignup-14-endpoints). Accounts are deactivated, not deleted.
 
 ### Shared Components
 
@@ -808,15 +827,7 @@ The React frontend (`frontend/App.jsx`) is a 1,756-line single-file SPA with 28 
 
 ### Running the Frontend
 
-The frontend expects a Vite dev server or any static file server. Configure `API_BASE` to point at the backend:
-
-```bash
-# Development with Vite
-cd frontend
-npm create vite@latest . -- --template react
-# Copy App.jsx into src/
-# npm run dev
-```
+The API serves the built app, so `npm run build` and then `npm start` give you the site at `/` and the product at `/app`, on port 7544. Rebuild after changing anything under `frontend/src`.
 
 ---
 
@@ -826,20 +837,20 @@ npm create vite@latest . -- --template react
 sales-nebula-backend/
 |-- src/
 |   |-- index.js                   # Server entry, port binding, graceful shutdown
-|   |-- app.js                     # Express app setup, middleware, all 86 route mounts
+|   |-- app.js                     # Express app setup, middleware, every route mount
 |   |-- middleware/
 |   |   |-- auth.js                # JWT verify, requirePermission(), API key auth
 |   |   |-- audit.js               # req.audit() helper, writes to AuditLog table
 |   |   |-- rateLimit.js           # Configurable rate limiter
 |   |   |-- sanitize.js            # XSS input sanitization
 |   |   |-- validate.js            # Request body validation
-|   |-- routes/                    # 86 route modules
+|   |-- routes/                    # 100 route files
 |   |   |-- auth.js                # Register, login, refresh, logout, password reset
 |   |   |-- users.js               # User CRUD, roles, preferences, online, activity
 |   |   |-- contacts.js            # CRUD router + search
 |   |   |-- deals.js               # CRUD + pipeline stats, velocity, aging, win/loss
 |   |   |-- dealExtras.js          # Contact roles, splits, history
-|   |   |-- quotes.js              # CRUD + PDF, accept, create-invoice
+|   |   |-- quotes.js              # CRUD + printable quote, accept, create-invoice
 |   |   |-- quoteExtras.js         # Templates, line items
 |   |   |-- surveys.js             # CRUD + respond, analytics
 |   |   |-- scheduler.js           # Slots, booking, cancel, availability
@@ -849,25 +860,28 @@ sales-nebula-backend/
 |   |   |-- monitoring.js          # Login history, event logs, summary
 |   |   |-- adminDashboard.js      # System stats, activity feed
 |   |   |-- territories.js         # Models, territories, assignment
-|   |   |-- ... (72 more modules)
+|   |   |-- ... (85 more route files)
+|   |-- services/
+|   |   |-- recordWrites.js        # The one write path: rules, hooks, audit, workflows, webhooks
 |   |-- utils/
 |       |-- crud.js                # CRUD router factory with hooks
+|       |-- unavailable.js         # The 501 answer for features this install lacks
 |-- prisma/
-|   |-- schema.prisma              # 173 models (source of truth)
-|   |-- migrations/
-|   |   |-- 00000000000000_initial/
-|   |       |-- migration.sql      # 173 tables, 253 indexes
+|   |-- schema.prisma              # 286 models (source of truth)
+|   |-- migrations/                # SQL migrations, applied in order
 |   |-- seed.js                    # Demo data: admin, roles, contacts, deals, etc.
-|-- tests/                         # Jest test suites (246 tests)
+|-- tests/                         # Jest suites (51 files)
+|-- e2e/                           # Playwright browser tests, with a test server
 |-- scripts/
 |   |-- generate-swagger.js        # OpenAPI 3.0 spec generator
 |   |-- backup.js                  # Database backup to S3 or local
-|-- frontend/
-|   |-- App.jsx                    # Complete React SPA (1,756 lines, 28 pages)
+|-- frontend/src/
+|   |-- App.jsx                    # Most of the app's 55 pages (about 6,500 lines)
+|   |-- Landing.jsx                # The public site
 |-- Dockerfile                     # Multi-stage Node 20 Alpine build
 |-- docker-compose.yml             # Postgres + Redis + API + Migration
 |-- .env.example                   # All environment variables documented
-|-- package.json                   # Dependencies, 18 npm scripts
+|-- package.json                   # Dependencies and npm scripts
 ```
 
 ---
@@ -878,7 +892,7 @@ sales-nebula-backend/
 |--------|-------------|
 | `npm run dev` | Start with nodemon (auto-reload on changes) |
 | `npm start` | Production start |
-| `npm test` | Run all 246 tests |
+| `npm test` | Run every Jest suite |
 | `npm run test:watch` | Tests in watch mode |
 | `npm run test:coverage` | Tests with coverage report |
 | `npm run test:auth` | Auth test suite only |
@@ -892,6 +906,9 @@ sales-nebula-backend/
 | `npm run setup` | Full dev setup: install, generate, push, seed |
 | `npm run setup:prod` | Production setup: install, generate, migrate |
 | `npm run swagger` | Generate OpenAPI 3.0 spec to `src/openapi.json` |
+| `npm run build` | Build the frontend into `frontend/dist` |
+| `npm run test:e2e` | Playwright browser tests against a real API and database |
+| `npm run verify` | The local release gate: schema, Jest, build and browser tests |
 
 ---
 
@@ -899,10 +916,12 @@ sales-nebula-backend/
 
 | Document | Description |
 |----------|-------------|
-| [API Reference](docs/API_REFERENCE.md) | Complete endpoint reference for all 86 route modules (1,278 lines) |
+| [Feature Status](docs/FEATURE_STATUS.md) | What works, what is limited, and what answers 501 |
+| [API Reference](docs/API_REFERENCE.md) | The main endpoints of each module (not every endpoint) |
+| [Sales Pilot](docs/SALES_PILOT.md) | Setting up and checking a pilot install |
 | [Architecture Guide](docs/ARCHITECTURE.md) | System design, request lifecycle, module system, data layer, security layers |
 | [Product Overview](docs/PRODUCT.md) | Non-technical product capabilities, feature descriptions, deployment options |
-| [Changelog](docs/CHANGELOG.md) | Complete feature list and bug fixes for the v1.0.0 release |
+| [Changelog](docs/CHANGELOG.md) | Releases and notable changes |
 
 ---
 
@@ -1005,9 +1024,11 @@ cases.
 
 ### Studio (`/api/studio`, 23 endpoints)
 
-Runtime field builder across 16 modules with 15 field types. Values are
-stored in typed columns, not stringified, so numeric and date custom
-fields sort and filter correctly.
+Field definitions across 16 modules with 15 field types. **Custom fields
+are definitions only for now:** no record form, list, report or export
+shows them, and storing a value answers 501
+(`CUSTOM_FIELD_VALUES_UNAVAILABLE`). The validation rules defined here do
+apply on every save.
 
 Guards worth knowing about: reserved names are rejected, a field's type
 cannot change once records hold values (409 with the count, rather than
@@ -1015,8 +1036,9 @@ silently stranding data in the wrong column), and a picklist value still
 in use is deactivated rather than deleted so historical records stay
 readable.
 
-Also covers dependent picklists, per-module layouts, and validation
-rules with a dry-run that reports how many existing records would fail.
+Also covers dependent picklists, per-module layouts (stored only: no
+screen uses them), and validation rules with a dry-run that reports how
+many existing records would fail.
 
 ### SLA and Business Hours (`/api/sla`, 18 endpoints)
 
@@ -1049,7 +1071,11 @@ Query syntax: `"exact phrase"`, `-excluded`, `+required`,
 suggestions via bounded edit distance. Click-through is logged so
 ranking quality is measurable rather than assumed.
 
-### Inbound Email (`/api/inbound-email`, 17 endpoints)
+Two limits: the index is filled by explicit indexing calls, not when a
+record is saved, so it falls behind; and the app's search box does not use
+it, but `/api/search`, which matches substrings.
+
+### Inbound Email (`/api/inbound-email`, 21 endpoints)
 
 IMAP and POP3 account configuration with passwords encrypted at rest
 (AES-256-GCM, fresh IV per call). The API never returns a stored
@@ -1173,10 +1199,9 @@ dependency. The API serves the built SPA and falls back to `index.html`
 for any non-API GET, so an emailed verification link resolves instead of
 returning a JSON 404.
 
-The landing page quotes real figures. `frontend/src/moduleManifest.js` is
-generated from the live route table by `scripts/module-manifest.js`, so
-the module grid cannot drift from what actually ships. Re-run it after
-adding routes.
+The landing page quotes no route, model or endpoint counts.
+`scripts/module-manifest.js` writes `frontend/src/moduleManifest.js` as an
+empty stub, so the public site does not list the API's surface.
 
 ### Frontend-only demo access
 
