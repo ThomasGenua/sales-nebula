@@ -4,6 +4,33 @@ const { auditMiddleware } = require('../middleware/audit');
 const { canReach, reachableWhere } = require('../middleware/access');
 const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 const { processDueSteps } = require('../services/sequenceSteps');
+const { mailConfigured } = require('../utils/mail');
+
+async function visiblePeople(req) {
+  const db = req.app.locals.prisma;
+  const contacts = permits(req, 'contacts', 'read') ? await db.contact.findMany({ where: await reachableWhere(req, 'contacts', 'contact'), select: { id: true, firstName: true, lastName: true, email: true } }) : [];
+  const leads = permits(req, 'leads', 'read') ? await db.lead.findMany({ where: await reachableWhere(req, 'leads', 'lead'), select: { id: true, firstName: true, lastName: true, email: true } }) : [];
+  return { where: { OR: [{ contactId: { in: contacts.map(p => p.id) } }, { leadId: { in: leads.map(p => p.id) } }] }, people: new Map([...contacts, ...leads].map(p => [p.id, p])) };
+}
+function stepProblem(steps) {
+  if (!Array.isArray(steps) || steps.length > 50) return 'Use a list of at most 50 email steps';
+  for (const step of steps) {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return 'Every step must be an email definition';
+    if (step.delayDays != null && (!Number.isInteger(Number(step.delayDays)) || Number(step.delayDays) < 0 || Number(step.delayDays) > 365)) return 'Step delays must be whole days between 0 and 365';
+    for (const key of ['subject', 'body', 'templateId']) if (step[key] != null && typeof step[key] !== 'string') return key + ' must be text';
+  }
+  return null;
+}
+async function activationProblem(prisma, steps) {
+  const problem = stepProblem(steps);
+  if (problem) return problem;
+  if (!steps.length) return 'At least one step required';
+  for (const step of steps) {
+    const template = step.templateId ? await prisma.emailTemplate.findUnique({ where: { id: step.templateId } }) : null;
+    if (!(step.subject || template?.subject)?.trim() || !(step.body || template?.body)?.trim()) return 'Every email step needs a subject and body, or an existing template';
+  }
+  return null;
+}
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -70,14 +97,26 @@ router.get('/', requirePermission('emails', 'read'), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/delivery/status', requirePermission('emails', 'read'), (req, res) => res.json({ configured: mailConfigured() }));
+router.get('/:id/enrollments', requirePermission('emails', 'read'), async (req, res, next) => {
+  try {
+    const { where: visible, people } = await visiblePeople(req), db = req.app.locals.prisma;
+    const page = Math.max(1, parseInt(req.query.page) || 1), where = { AND: [visible, { sequenceId: req.params.id }] };
+    const [rows, total] = await Promise.all([db.emailSequenceEnrollment.findMany({ where, orderBy: [{ enrolledAt: 'desc' }, { id: 'asc' }], skip: (page - 1) * 25, take: 25 }), db.emailSequenceEnrollment.count({ where })]);
+    res.json({ data: rows.map(e => ({ ...e, person: people.get(e.contactId || e.leadId) })), total, page });
+  } catch (e) { next(e); }
+});
+
 // GET one
 router.get('/:id', requirePermission('emails', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const { where: visible } = await visiblePeople(req);
     const sequence = await prisma.emailSequence.findUnique({
       where: { id: req.params.id },
       include: {
         enrollments: {
+          where: visible,
           orderBy: { enrolledAt: 'desc' },
           take: 50,
         },
@@ -109,9 +148,10 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
     // A draft may be saved before its steps are written; only an active
     // sequence needs one. Every create required steps, which the Sequences
     // screen has no field for, so it could not create a sequence at all.
-    if (!Array.isArray(steps)) return res.status(400).json({ error: 'steps must be an array' });
+    if (stepProblem(steps)) return res.status(400).json({ error: stepProblem(steps) });
     if (!STATUSES.includes(status)) return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
-    if (status === 'Active' && !steps.length) return res.status(400).json({ error: 'At least one step required' });
+    const activeProblem = status === 'Active' && await activationProblem(prisma, steps);
+    if (activeProblem) return res.status(400).json({ error: activeProblem });
 
     const sequence = await prisma.emailSequence.create({
       data: { name, description, steps, status, createdById: req.userId },
@@ -128,12 +168,18 @@ router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) =
     const current = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ error: 'Not found' });
     const data = columnsFrom('emailSequence', req.body);
+    for (const key of ['createdById', 'id', 'createdAt', 'updatedAt']) delete data[key];
+    if (data.name !== undefined && !String(data.name).trim()) return res.status(400).json({ error: 'name required' });
+    if (data.steps !== undefined && stepProblem(data.steps)) return res.status(400).json({ error: stepProblem(data.steps) });
+    if (data.steps !== undefined && JSON.stringify(data.steps) !== JSON.stringify(stepsOf(current)) && await prisma.emailSequenceEnrollment.count({ where: { sequenceId: current.id, status: 'Active' } })) return res.status(409).json({ error: 'Stop active enrollments before changing the sequence steps.' });
     // As on create: a known status, and steps before it is active.
     if (data.steps !== undefined && !Array.isArray(data.steps)) return res.status(400).json({ error: 'steps must be an array' });
     if (data.status !== undefined && !STATUSES.includes(data.status)) return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
     if ((data.status ?? current.status) === 'Active' && !(data.steps ?? stepsOf(current)).length) {
       return res.status(400).json({ error: 'At least one step required' });
     }
+    const activeProblem = (data.status ?? current.status) === 'Active' && await activationProblem(prisma, data.steps ?? stepsOf(current));
+    if (activeProblem) return res.status(400).json({ error: activeProblem });
     const sequence = await prisma.emailSequence.update({ where: { id: current.id }, data });
     res.json(sequence);
   } catch (err) { next(err); }
@@ -154,7 +200,8 @@ router.post('/:id/activate', requirePermission('emails', 'edit'), async (req, re
     const prisma = req.app.locals.prisma;
     const current = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ error: 'Not found' });
-    if (!stepsOf(current).length) return res.status(400).json({ error: 'At least one step required' });
+    const problem = await activationProblem(prisma, stepsOf(current));
+    if (problem) return res.status(400).json({ error: problem });
     const sequence = await prisma.emailSequence.update({
       where: { id: req.params.id },
       data: { status: 'Active' },
@@ -179,11 +226,14 @@ router.post('/:id/pause', requirePermission('emails', 'edit'), async (req, res, 
 router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { contactIds = [], leadIds = [] } = req.body;
+    const { contactIds: wantedContacts = [], leadIds: wantedLeads = [] } = req.body;
+    const contactIds = Array.isArray(wantedContacts) ? [...new Set(wantedContacts)] : wantedContacts;
+    const leadIds = Array.isArray(wantedLeads) ? [...new Set(wantedLeads)] : wantedLeads;
     if (!Array.isArray(contactIds) || !Array.isArray(leadIds) || (contactIds.length === 0 && leadIds.length === 0)) {
       return res.status(400).json({ error: 'At least one contactId or leadId required' });
     }
 
+    if (contactIds.length + leadIds.length > 200) return res.status(400).json({ error: 'Enroll at most 200 people at a time' });
     const sequence = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
     if (!sequence) return res.status(404).json({ error: 'Not found' });
     if (sequence.status !== 'Active') return res.status(400).json({ error: 'Sequence must be active to enroll' });

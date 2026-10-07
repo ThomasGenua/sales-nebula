@@ -4,6 +4,10 @@ import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls
 import { AuthContext, RouteContext, useAuth, can } from "./contexts";
 import { LeadActions, EmailActions, QuoteActions, QuoteFormExtras, RelatedRecords, LineItems, validateQuoteForm } from "./SalesWorkflows";
 import { RELATED, RelatedLists } from "./RelatedLists";
+import { MyDayPage, PipelinePage, SavedViews } from "./SalesWorkspace";
+import { ReportBuilderPage } from "./ReportBuilder";
+import { SequenceBuilderPage } from "./SequenceBuilder";
+import { MailboxPage, RecordMailbox } from "./Mailbox";
 import { FeatureAvailability } from "./FeatureAvailability";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
@@ -881,8 +885,9 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
 // [{ label, icon, run: async (record, apiFetch) => "message shown on success" }].
 function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [], detailExtras, formExtras, validateForm, wideForm = false, permissionModule = null }) {
   const { apiFetch, user, demoMode } = useAuth();
-  const mayEdit = !permissionModule || (!demoMode && can(user, permissionModule, 'edit'));
-  const mayDelete = !permissionModule || (!demoMode && can(user, permissionModule, 'full'));
+  const guardedModule = permissionModule || (['accounts', 'activities', 'cases', 'contacts', 'deals', 'leads', 'quotes', 'invoices', 'emails', 'contracts', 'orders'].includes(endpoint.slice(1)) ? endpoint.slice(1) : null);
+  const mayEdit = !guardedModule || (!demoMode && can(user, guardedModule, 'edit'));
+  const mayDelete = !guardedModule || (!demoMode && can(user, guardedModule, 'full'));
   const savingRef = useRef(false);
   const [saving, setSaving] = useState(false);
   const [items, setItems] = useState([]);
@@ -892,7 +897,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [loadError, setLoadError] = useState(null);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const { recordId, openRecord, closeRecord } = useContext(RouteContext);
+  const { recordId, openRecord, closeRecord, draft } = useContext(RouteContext);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
@@ -905,6 +910,9 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [sortField, setSortField] = useState(null);
   const [sortDir, setSortDir] = useState("desc");
   const limit = 50;
+  useEffect(() => {
+    if (draft && mayEdit) { setEditing(null); setForm({ ...draft.values }); setModalOpen(true); }
+  }, [draft, mayEdit]);
 
   // Typing "acme" used to fire four requests, whose responses could land out
   // of order and leave the list showing results for "ac".
@@ -1048,10 +1056,12 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
     );
   }
 
+  const savedViews = ['deals', 'leads', 'contacts', 'accounts', 'activities', 'cases'].includes(endpoint.slice(1)) ? <SavedViews module={endpoint.slice(1)} value={{ search, filters: filterValues, sortField, sortDir }} onApply={v => { setSearch(typeof v.search === 'string' ? v.search : ''); setFilterValues(v.filters && typeof v.filters === 'object' ? v.filters : {}); setSortField(typeof v.sortField === 'string' ? v.sortField : null); setSortDir(v.sortDir === 'asc' ? 'asc' : 'desc'); setPage(1); }} /> : null;
   const activeFilterCount = Object.values(filterValues).filter(Boolean).length;
 
   return (
     <div>
+      {savedViews}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2">
@@ -1114,6 +1124,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       {/* Create/Edit Modal */}
       <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
         title={editing ? (editTitle || `Edit ${title.slice(0, -1)}`) : (createTitle || `New ${title.slice(0, -1)}`)}>
+        {!editing && draft?.label && <p className="text-sm text-[#7E8598] mb-3">Linked to {draft.label}</p>}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
           {(formFields || []).map(f => {
             if (f.type === "select") return <Select key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} options={f.options} placeholder={`Select ${f.label}`} />;
@@ -1139,7 +1150,7 @@ function ContactsPage() {
     return <Badge color={c[v] || "primary"}>{v || "Active"}</Badge>;
   };
   return <ModulePage title="Contacts" icon={Users} endpoint="/contacts" permissionModule="contacts" nameField="lastName"
-    detailExtras={(record, onChanged) => <EmailActions record={record} module="contacts" onChanged={onChanged} />}
+    detailExtras={(record, onChanged) => <><EmailActions record={record} module="contacts" onChanged={onChanged} /><RecordMailbox module="contacts" record={record} /></>}
     columns={[
       { key: "firstName", label: "First Name" }, { key: "lastName", label: "Last Name" },
       { key: "email", label: "Email" }, { key: "phone", label: "Phone" },
@@ -1186,13 +1197,14 @@ function LeadsPage() {
 }
 
 function DealsPage() {
+  const { navigate } = useContext(RouteContext);
   const stageBadge = v => { const c = { "Closed Won": "success", "Closed Lost": "danger", Negotiation: "warning", Qualification: "info", Discovery: "purple", Proposal: "cyan" }; return <Badge color={c[v] || "primary"}>{v || "-"}</Badge>; };
   // A deal's value is in its own currency; the picker offers the active ones.
   const { data: currencies } = useApi("/deals/currencies");
   const base = currencies?.base || "USD";
   const currencyOptions = (currencies?.data || []).map(c => ({ value: c.code, label: `${c.code} (${c.name})` }));
-  return <ModulePage title="Deals" icon={Target} endpoint="/deals" permissionModule="deals"
-    detailExtras={(record, onChanged) => <EmailActions record={record} module="deals" onChanged={onChanged} />}
+  return <ModulePage title="Deals" icon={Target} endpoint="/deals" permissionModule="deals" headerActions={<Button variant="secondary" onClick={() => navigate("pipeline")}>Pipeline board</Button>}
+    detailExtras={(record, onChanged) => <><EmailActions record={record} module="deals" onChanged={onChanged} /><RecordMailbox module="deals" record={record} /></>}
     columns={[
       { key: "name", label: "Deal" }, { key: "stage", label: "Stage", render: stageBadge },
       { key: "value", label: "Value", render: (v, row) => <span className="font-mono">{money(v, row?.currency || base)}</span> },
@@ -2604,36 +2616,6 @@ function LoginPage({ go }) {
 // ========================================================================
 
 // ── Reports Page ──
-function ReportsPage() {
-  const { apiFetch } = useAuth();
-  const [reports, setReports] = useState([]); const [loading, setLoading] = useState(true);
-  const [modalOpen, setModalOpen] = useState(false); const [form, setForm] = useState({});
-  const [toast, setToast] = useState(null); const [selectedReport, setSelectedReport] = useState(null); const [reportData, setReportData] = useState(null);
-  const load = useCallback(() => { setLoading(true); apiFetch('/reports').then(d => setReports(d.data || d || [])).catch(() => setReports([])).finally(() => setLoading(false)); }, [apiFetch]);
-  useEffect(() => { load(); }, [load]);
-  const runReport = async (r) => { setSelectedReport(r); try { const d = await apiFetch(`/reports/${r.id}/execute`, { method: 'POST', body: {} }); setReportData(d); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
-  const save = async () => { try { await apiFetch('/reports', { method: 'POST', body: form }); setModalOpen(false); setForm({}); load(); setToast({ message: 'Report created', type: 'success' }); } catch (e) { setToast({ message: e.message, type: 'error' }); } };
-  return (
-    <div>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4"><h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5]">Reports</h1><Button icon={Plus} onClick={() => setModalOpen(true)}>New Report</Button></div>
-      {loading ? <Spinner /> : reports.length === 0 ? <EmptyState icon={BarChart3} title="No reports yet" action="Create Report" onAction={() => setModalOpen(true)} /> : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{reports.map(r => (
-          <div key={r.id} {...clickable(() => runReport(r), `Run report ${r.name}`)} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 hover:border-[#203060] cursor-pointer transition-colors active:scale-[0.98] touch-manipulation">
-            <div className="flex items-start justify-between mb-2"><div className="text-sm font-medium text-[#F0EDE5] truncate">{r.name}</div><Badge color={r.reportType === 'summary' ? 'info' : 'primary'}>{r.reportType || 'tabular'}</Badge></div>
-            <div className="text-xs text-[#4A5168]">{r.module || 'All'}</div></div>))}</div>)}
-      {selectedReport && reportData && (<Modal open={!!selectedReport} onClose={() => { setSelectedReport(null); setReportData(null); }} title={selectedReport.name} wide>
-        <div className="text-xs text-[#4A5168] mb-3">{reportData.totalCount ?? 0} records</div>
-        {(reportData.rows || reportData.chartData)?.length > 0 ? (<div className="overflow-x-auto -mx-4 sm:mx-0"><table className="w-full min-w-[400px] text-xs"><thead><tr className="border-b border-[#182550]">{Object.keys((reportData.rows || reportData.chartData)[0]).slice(0,6).map(k=><th key={k} className="py-2 px-2 text-left text-[#4A5168] uppercase">{k}</th>)}</tr></thead><tbody>{(reportData.rows || reportData.chartData).slice(0,20).map((row,i)=><tr key={i} className="border-b border-[#182550]/40">{Object.values(row).slice(0,6).map((v,j)=><td key={j} className="py-2 px-2 text-[#C8C2B4]">{String(v??'-').substring(0,30)}</td>)}</tr>)}</tbody></table></div>) : <div className="text-sm text-[#4A5168] text-center py-6">No data</div>}
-      </Modal>)}
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="New Report">
-        <div className="space-y-3 mb-4"><Input label="Report Name" value={form.name} onChange={v => setForm(p => ({...p, name: v}))} required /><Select label="Module" value={form.module} onChange={v => setForm(p => ({...p, module: v}))} options={['contacts','leads','deals','accounts','cases','activities','products','quotes','invoices']} placeholder="Select module" /><Select label="Type" value={form.reportType} onChange={v => setForm(p => ({...p, reportType: v}))} options={[{ value: 'tabular', label: 'Tabular' }, { value: 'summary', label: 'Summary' }, { value: 'matrix', label: 'Matrix' }]} /></div>
-        <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]"><Button variant="secondary" onClick={() => setModalOpen(false)}>Cancel</Button><Button onClick={save}>Create</Button></div>
-      </Modal>
-      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
-    </div>
-  );
-}
-
 // ── Surveys ──
 function SurveysPage() {
   return <ModulePage title="Surveys" icon={MessageSquare} endpoint="/surveys"
@@ -2831,26 +2813,6 @@ function NotesPage() {
   />;
 }
 // ── Sequences ──
-function SequencesPage() {
-  return <ModulePage title="Sequences" icon={GitBranch} endpoint="/sequences"
-    columns={[
-      { key: "name", label: "Sequence" },
-      { key: "status", label: "Status", render: v => <Badge color={v==='Active'?'success':v==='Paused'?'warning':'neutral'}>{v||'Draft'}</Badge> },
-      { key: "totalSteps", label: "Steps", render: v => <span className="font-mono">{v||0}</span> },
-      { key: "enrolledCount", label: "Enrolled", render: v => <span className="font-mono">{v||0}</span> },
-    ]}
-    filterDefs={[
-      { key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused","Archived"] },
-    ]}
-    detailFields={[
-      { key: "name", label: "Name" }, { key: "status", label: "Status" },
-      { key: "description", label: "Description" },
-      { key: "totalSteps", label: "Steps" }, { key: "enrolledCount", label: "Enrolled" },
-    ]}
-    formFields={[{ key: "name", label: "Name", required: true },{ key: "status", label: "Status", type: "select", options: ["Draft","Active","Paused"] }]}
-  />;
-}
-
 // ── Approvals ──
 const APPROVAL_BADGE = { Approved: "success", Rejected: "danger", Pending: "warning", Recalled: "neutral" };
 
@@ -5741,6 +5703,9 @@ function MapsPage() {
 }
 
 const NAV_ITEMS = [
+  { id: "myDay", label: "My Day", icon: CheckCircle2 },
+  { id: "pipeline", label: "Pipeline", icon: LayoutGrid, requires: { module: "deals", level: "read" } },
+  { id: "mailbox", label: "Mailbox", icon: Inbox, requires: { module: "emails", level: "read" } },
   { id: "dashboard", label: "Dashboard", icon: Home },
   {
     id: "nav-crm",
@@ -6316,10 +6281,10 @@ function AppShell({ go }) {
   const [route, setRoute] = useState(() => parseAppPath(window.location.pathname));
   const page = route.module;
 
-  const navigate = useCallback((module, recordId = null) => {
+  const navigate = useCallback((module, recordId = null, draft = null) => {
     const next = recordId ? `/app/${module}/${recordId}` : `/app/${module}`;
     if (next !== window.location.pathname) window.history.pushState({}, "", next);
-    setRoute({ module, recordId });
+    setRoute({ module, recordId, draft });
   }, []);
 
   const setPage = useCallback((module) => navigate(module, null), [navigate]);
@@ -6333,6 +6298,7 @@ function AppShell({ go }) {
   const routeValue = useMemo(() => ({
     module: route.module,
     recordId: route.recordId,
+    draft: route.draft,
     openRecord: (id) => navigate(route.module, id),
     closeRecord: () => navigate(route.module, null),
     navigate,
@@ -6363,7 +6329,7 @@ function AppShell({ go }) {
   };
 
   const pageMap = {
-    dashboard: DashboardPage, contacts: ContactsPage, leads: LeadsPage,
+    dashboard: DashboardPage, myDay: MyDayPage, pipeline: PipelinePage, mailbox: MailboxPage, contacts: ContactsPage, leads: LeadsPage,
     deals: DealsPage, accounts: AccountsPage, activities: ActivitiesPage,
     emails: EmailsPage, campaigns: CampaignsPage, products: ProductsPage,
     quotes: QuotesPage, invoices: InvoicesPage, contracts: ContractsPage,
@@ -6374,10 +6340,10 @@ function AppShell({ go }) {
     forecasts: ForecastsPage, cases: CasesPage, knowledge: KnowledgePage,
     workflows: WorkflowsPage, search: GlobalSearchPage,
     settings: SettingsPage, admin: AdminDashboardPage,
-    reports: ReportsPage, surveys: SurveysPage, territories: TerritoriesPage,
+    reports: ReportBuilderPage, surveys: SurveysPage, territories: TerritoriesPage,
     documents: DocumentsPage, tags: TagsPage, webhooks: WebhooksPage,
     partners: PartnersPage, assets: AssetsPage, notes: NotesPage,
-    sequences: SequencesPage, approvals: ApprovalsPage, users: UsersPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
+    sequences: SequenceBuilderPage, approvals: ApprovalsPage, users: UsersPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
     copilot: CopilotPage, chatter: ChatterPage, recycleBin: RecycleBinPage,
     import: ImportPage,
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,

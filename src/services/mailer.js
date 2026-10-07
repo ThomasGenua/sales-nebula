@@ -27,6 +27,9 @@ async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
       err.status = 404;
       throw err;
     }
+    // Generic email records are shared CRM records. Personal mailbox sending
+    // stays in the owner-scoped sales-mail routes and private conversation log.
+    if (account.ownerId) throw Object.assign(new Error('Use the personal mailbox conversation to send from this account.'), { status: 403 });
     if (account.provider !== 'microsoft') {
       const err = new Error('Sending from this mailbox is not implemented; only Microsoft mailboxes can send.');
       err.status = 501;

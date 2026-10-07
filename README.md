@@ -66,6 +66,11 @@ editing and totals, document preview/print, acceptance recording, and invoice
 creation from a quote. Related records can be opened from detail screens.
 Actions respect role permissions and the browser demo remains read-only.
 
+The [sales workspace](docs/SALES_WORKSPACE.md) adds My Day follow-ups, a pipeline
+board and saved views, private Outlook conversations, report building and sales
+performance, sequence editing, and creating records from related lists. See the
+guide for Outlook consent, SMTP delivery, and deployment requirements.
+
 `npm run verify` runs the local release gate, including browser tests with a real
 API, PostgreSQL and a local SMTP server. GitHub Actions remains disabled. See
 [Sales pilot setup and verification](docs/SALES_PILOT.md).

@@ -276,6 +276,8 @@ function createApp(rawPrisma) {
   app.use('/api/chatter', require('./routes/chatter'));
   app.use('/api/formulas', require('./routes/formulas'));
   app.use('/api/reports', require('./routes/reports'));
+  app.use('/api/sales-workspace', require('./routes/salesWorkspace'));
+  app.use('/api/sales-mail', require('./routes/salesMail'));
   app.use('/api/dashboard', require('./routes/dashboard'));
   app.use('/api/search', require('./routes/search'));
   app.use('/api/tags', require('./routes/tags'));
