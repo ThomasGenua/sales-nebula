@@ -16,7 +16,6 @@ test('pages for features that do not run say so', async ({ page }) => {
     ['/app/flowBuilder', 'Running flows'],
     ['/app/aiAgents', 'Running AI agents'],
     ['/app/marketplace', 'Installing apps'],
-    ['/app/studio', 'Custom fields on records'],
   ]) {
     await page.goto(path);
     const notice = page.getByRole('region', { name: title, exact: true });

@@ -57,7 +57,7 @@ function wrapHtml(title, bodyHtml) {
  * Send transactional mail. When SMTP is not configured, logs the message
  * and resolves successfully so local/dev flows still work.
  */
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, headers }) {
   const from = process.env.MAIL_FROM || process.env.SMTP_USER || 'Sales Nebula <noreply@salesnebula.com>';
   const transport = getTransporter();
 
@@ -67,7 +67,7 @@ async function sendMail({ to, subject, text, html }) {
   }
 
   try {
-    const info = await transport.sendMail({ from, to, subject, text, html });
+    const info = await transport.sendMail({ from, to, subject, text, html, headers });
     return { ok: true, mode: 'smtp', messageId: info.messageId };
   } catch (err) {
     console.error('[mail:error]', err.message);

@@ -332,7 +332,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     if (problem) throw new RecordWriteError(400, { error: problem, code: 'LINK_NOT_VISIBLE' });
   }
 
-  const record = await db[modelName].update({ where: { id: oldRecord.id }, data: { ...updateData, ...(ctx.nested || {}) }, include: ctx.include });
+  const record = await db[modelName].update({ where: { id: oldRecord.id, ...(ctx.expectedVersion && { updatedAt: ctx.expectedVersion }) }, data: { ...updateData, ...(ctx.nested || {}) }, include: ctx.include });
   if (hooks.afterUpdate) await hooks.afterUpdate(record, hookContext(db, ctx, oldRecord));
   if (ctx.hydrate) await ctx.hydrate(record);
 
@@ -349,8 +349,8 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
       await audit(prisma, { action: 'update', module: moduleName, recordId: record.id, details: `Updated ${modelName}${via(ctx.source)}: ${formatChanges(changes)}`, userId: ctx.userId || null });
     }
     sendRealtime(emitterFor(ctx), 'recordUpdated', moduleName, record);
-    await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: ctx.userId || null });
-    if (moved) await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: ctx.userId || null });
+    if (!ctx.skipWorkflows) await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: ctx.userId || null });
+    if (moved && !ctx.skipWorkflows) await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: ctx.userId || null });
     await fireWebhook(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
     if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
       await fireWebhook(prisma, `${moduleName}.stage_changed`, { id: record.id, module: moduleName, from: oldRecord.stage, to: record.stage });

@@ -13,7 +13,7 @@ const { sendMail: smtpSend } = require('../utils/mail');
  * mail utility logs to the console, which is useful in development but is not
  * delivery, so it comes back as 'queued' rather than 'sent'.
  */
-async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
+async function sendEmail(prisma, { to, subject, body, html, mailboxId, headers }) {
   if (!to) {
     const err = new Error('A recipient is required');
     err.status = 400;
@@ -43,7 +43,7 @@ async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
     }
   }
 
-  const result = await smtpSend({ to, subject, text: body, html });
+  const result = await smtpSend({ to, subject, text: body, html, headers });
 
   if (result.mode === 'smtp' && result.ok) {
     return { status: 'sent', delivered: true, transport: 'smtp' };

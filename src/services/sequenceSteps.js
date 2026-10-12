@@ -22,6 +22,7 @@ const { sendEmail } = require('./mailer');
 const { logger } = require('./logger');
 const { mailConfigured } = require('../utils/mail');
 const { acquireLease, releaseLease } = require('../utils/lease');
+const policy = require('./sequencePolicy');
 
 const RETRY_AFTER_MS = 60 * 60 * 1000;
 const MAX_FAILURES = 3;
@@ -38,37 +39,42 @@ function stepsOf(sequence) {
 /** The enrollment's contact or lead, if still there, and their address. */
 async function addressOf(prisma, enrollment) {
   const person = enrollment.contactId
-    ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, select: { email: true } })
-    : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null }, select: { email: true } });
-  return person?.email ? String(person.email).trim() : null;
+    ? await prisma.contact.findFirst({ where: { id: enrollment.contactId, deletedAt: null }, include: { account: { select: { name: true } } } })
+    : await prisma.lead.findFirst({ where: { id: enrollment.leadId || '', deletedAt: null } });
+  return person;
 }
 
 /** Move an enrollment past the step just done: to the next, or to Completed. */
 async function advance(prisma, enrollment, steps, tally) {
   const next = enrollment.currentStep + 1;
   if (next >= steps.length) {
-    await prisma.emailSequenceEnrollment.update({
-      where: { id: enrollment.id },
+    const done = await prisma.emailSequenceEnrollment.updateMany({
+      where: { id: enrollment.id, status: 'Active', currentStep: enrollment.currentStep },
       data: { currentStep: next, status: 'Completed', completedAt: new Date(), nextSendAt: null },
     });
-    tally.completed++;
+    if (done.count) tally.completed++;
   } else {
-    await prisma.emailSequenceEnrollment.update({
-      where: { id: enrollment.id },
-      data: { currentStep: next, nextSendAt: new Date(Date.now() + (steps[next].delayDays ?? 1) * 86400000) },
+    await prisma.emailSequenceEnrollment.updateMany({
+      where: { id: enrollment.id, status: 'Active', currentStep: enrollment.currentStep },
+      data: { currentStep: next, nextSendAt: policy.nextAllowed(enrollment.sequence.sendingWindow, new Date(Date.now() + (steps[next].delayDays ?? 1) * 86400000)) },
     });
   }
 }
 
 async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
+  const allowed = policy.nextAllowed(enrollment.sequence.sendingWindow);
+  if (allowed.getTime() > Date.now() + 1000) {
+    await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active', nextSendAt: enrollment.nextSendAt }, data: { nextSendAt: allowed } });
+    return;
+  }
   const steps = stepsOf(enrollment.sequence);
   const step = steps[enrollment.currentStep];
   if (!step) { // it ran past its last step
-    await prisma.emailSequenceEnrollment.update({
-      where: { id: enrollment.id },
+    const done = await prisma.emailSequenceEnrollment.updateMany({
+      where: { id: enrollment.id, status: 'Active', currentStep: enrollment.currentStep },
       data: { status: 'Completed', completedAt: new Date(), nextSendAt: null },
     });
-    tally.completed++;
+    if (done.count) tally.completed++;
     return;
   }
 
@@ -81,16 +87,32 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
 
   // To the live contact's or lead's address, unless it or its domain is
   // suppressed, with the step's template when it carries no text itself. An
-  // address that is missing or suppressed skips the step, as it always did.
-  const to = await addressOf(prisma, enrollment);
-  if (to && !(await isSuppressed(to))) {
+  // address that is missing or suppressed stops this enrollment.
+  const person = await addressOf(prisma, enrollment), to = person?.email?.trim().toLowerCase();
+  if (to && enrollment.recipientEmail && to !== enrollment.recipientEmail.toLowerCase()) {
+    await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Paused', nextSendAt: null, lastError: 'Recipient address changed. Start a new enrollment to use the new address.' } });
+    return;
+  }
+  if (!to || await isSuppressed(to)) {
+    await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: to ? 'Opted Out' : 'Bounced', nextSendAt: null, lastError: to ? 'Address is suppressed.' : 'Recipient has no email address.' } });
+    return;
+  }
+  if (enrollment.sequence.stopOnReply && enrollment.lastSentAt && await prisma.inboundEmailMessage.findFirst({ where: { deletedAt: null, direction: 'inbound', fromEmail: { equals: to, mode: 'insensitive' }, receivedAt: { gte: enrollment.enrolledAt }, account: { is: { deletedAt: null, OR: [{ ownerId: enrollment.enrolledById }, { ownerId: null }] } } }, select: { id: true } })) {
+    await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Replied', nextSendAt: null, lastError: null } });
+    return;
+  }
+  if (to) {
     const template = step.templateId && !(step.subject && step.body)
       ? await prisma.emailTemplate.findUnique({ where: { id: String(step.templateId) } }).catch(() => null)
       : null;
-    const subject = step.subject || template?.subject || `Sequence step ${enrollment.currentStep + 1}`;
-    const body = step.body || template?.body || '';
+    const subject = policy.personalize(step.subject || template?.subject || `Sequence step ${enrollment.currentStep + 1}`, person);
+    const unsubscribe = policy.unsubscribeUrl(enrollment.id);
+    const body = policy.personalize(step.body || template?.body || '', person) + '\n\nUnsubscribe: ' + unsubscribe;
+    const live = await prisma.emailSequenceEnrollment.findFirst({ where: { id: enrollment.id, status: 'Active', sequence: { status: 'Active' } } });
+    if (!live || await isSuppressed(to)) return;
+    await prisma.emailSequenceEnrollment.update({ where: { id: enrollment.id }, data: { recipientEmail: to } });
 
-    const delivery = await sendEmail(prisma, { to, subject, body });
+    const delivery = await sendEmail(prisma, { to, subject, body, headers: { 'List-Unsubscribe': '<' + unsubscribe + '>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } });
     // Email has no lead column, so only a contact's is filed on them.
     await prisma.email.create({
       data: {
@@ -107,7 +129,7 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
         where: { toEmail: to, subject, status: 'failed', createdAt: { gte: enrollment.enrolledAt } },
       });
       if (failures >= MAX_FAILURES) {
-        await prisma.emailSequenceEnrollment.update({ where: { id: enrollment.id }, data: { status: 'Bounced', nextSendAt: null } });
+        await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Bounced', nextSendAt: null } });
         tally.bounced++;
       } else {
         tally.retrying++;
@@ -134,6 +156,7 @@ async function processAll(prisma, isSuppressed) {
     } catch (err) {
       // One enrollment's trouble does not stop the batch; it is claimed, so it comes round again in an hour.
       tally.errors++;
+      await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { lastError: String(err.message).slice(0, 300) } }).catch(() => {});
       logger.warn({ err: err.message, enrollmentId: enrollment.id }, 'Sequence step failed');
     }
   }

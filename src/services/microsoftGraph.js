@@ -56,35 +56,36 @@ async function postForm(url, params) {
 }
 
 /** Swap the authorization code from the consent redirect for tokens. */
-function exchangeCode({ tenantId, clientId, clientSecret, code, redirectUri, codeVerifier }) {
+function exchangeCode({ tenantId, clientId, clientSecret, code, redirectUri, codeVerifier, scope = MAIL_SCOPES }) {
   return postForm(tokenEndpoint(tenantId), {
     client_id: clientId,
     client_secret: clientSecret,
     code,
     redirect_uri: redirectUri,
     grant_type: 'authorization_code',
-    scope: MAIL_SCOPES,
+    scope,
     ...(codeVerifier && { code_verifier: codeVerifier }),
   });
 }
 
-function refreshAccessToken({ tenantId, clientId, clientSecret, refreshToken }) {
+function refreshAccessToken({ tenantId, clientId, clientSecret, refreshToken, scope = MAIL_SCOPES }) {
   return postForm(tokenEndpoint(tenantId), {
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
-    scope: MAIL_SCOPES,
+    scope,
   });
 }
 
-async function graphFetch(path, { accessToken, method = 'GET', body, preferText = false } = {}) {
+async function graphFetch(path, { accessToken, method = 'GET', body, preferText = false, headers = {} } = {}) {
   const res = await fetch(`${GRAPH}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       ...(preferText && { Prefer: 'outlook.body-content-type="text"' }),
       ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -208,6 +209,7 @@ function sendMail({ accessToken, mailboxAddress, to, subject, body, isHtml = fal
 }
 
 module.exports = {
+  graphFetch,
   GraphError,
   MAIL_SCOPES,
   exchangeCode,

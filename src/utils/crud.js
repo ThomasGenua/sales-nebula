@@ -132,6 +132,9 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       // Restrict to what security groups allow. Without this every
       // authenticated user reads every record in the module.
       where = applyAccessFilter(where, req.accessFilter);
+      const customFields = require('../services/customFields');
+      const customFilters = Object.entries(filters).filter(([key]) => key.startsWith('custom.')).map(([field, value]) => ({ field, value }));
+      if (customFilters.length) where = { AND: [where, await customFields.filterWhere(prisma, moduleName, customFilters)] };
 
       const [records, total] = await Promise.all([
         prisma[modelName].findMany({
@@ -143,6 +146,7 @@ function createCrudRouter(modelName, moduleName, options = {}) {
       ]);
 
       await hydrateIncludes(prisma, records, manualIncludes);
+      await customFields.hydrate(prisma, moduleName, records);
       await visibleLinks(req, modelName, records, requestedInclude);
       res.json({
         data: records,

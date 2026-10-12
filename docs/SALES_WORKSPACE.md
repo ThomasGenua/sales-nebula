@@ -20,7 +20,7 @@ Starter definitions cover pipeline by stage/currency, rep performance, and win/l
 
 Create email steps with whole-day delays, template content, and reordering. Save, activate, pause, enroll accessible contacts/leads, and stop individual enrollments. A running enrollment's steps cannot be changed; stop its active enrollments first. Drafts may be incomplete, but activation requires a subject and body (or valid template) for every step.
 
-Sequences use the existing SMTP worker. Configure SMTP before delivery; the screen shows when it is unavailable. Activation/enrollment authorize later scheduled sending. Enrollment rows show status, next send date, last successful send, and delivery failure details. The existing suppression list still applies. Outlook connection does not configure sequence SMTP. Automatic sequence stop-on-reply and a campaign unsubscribe-link flow are not part of this editor.
+Sequences use the existing SMTP worker. Configure SMTP before delivery; the screen shows when it is unavailable. Activation/enrollment authorize later scheduled sending. Enrollment rows show status, next send date, last successful send, and delivery failure details. The existing suppression list still applies. Outlook connection does not configure sequence SMTP. Sequences now support stop-on-synced-reply, merge fields, sending windows and public unsubscribe links; see [the additions](SALES_NEXT_WORKFLOWS.md).
 
 ## Outlook setup
 

@@ -307,6 +307,10 @@ const handlers = {
 
       try {
         const result = await graphMailbox.pollAccount(prisma, account);
+        if (account.ownerId && account.calendarEnabled) {
+          try { await require('../services/outlookCalendar').sync(prisma, account); }
+          catch (calendarError) { logger.warn({ err: calendarError.message, accountId: account.id }, 'Outlook calendar sync failed'); }
+        }
         polled++;
         processed += result.processed;
         casesCreated += result.casesCreated;

@@ -315,6 +315,9 @@ function createApp(rawPrisma) {
   app.use('/api/conversation-intelligence', require('./routes/conversationIntelligence'));
   app.use('/api/omnichannel', require('./routes/omnichannel'));
   app.use('/api/field-service', require('./routes/fieldService'));
+  app.use('/api/public/sequences', require('./routes/publicSequences'));
+  app.use('/api/public/quotes', require('./routes/publicQuotes'));
+  app.use('/api/outlook-calendar', require('./routes/outlookCalendar'));
   app.use('/api/security', require('./routes/security'));
   app.use('/api/environments', require('./routes/environments'));
   app.use('/api/analytics', require('./routes/analytics'));

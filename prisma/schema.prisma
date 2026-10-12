@@ -1335,6 +1335,8 @@ model AssignmentRule {
 // ═══════════════════════════════════════
 
 model EmailSequence {
+  stopOnReply Boolean @default(true)
+  sendingWindow Json?
   id          String   @id @default(uuid())
   name        String
   description String?
@@ -1348,6 +1350,7 @@ model EmailSequence {
 }
 
 model EmailSequenceEnrollment {
+  recipientEmail String?
   lastError   String?
   lastSentAt  DateTime?
   id          String   @id @default(uuid())
@@ -4926,6 +4929,13 @@ model SearchIndexQueue {
 // ═══════════════════════════════════════════════════════════
 
 model InboundEmailAccount {
+  calendarEnabled Boolean @default(false)
+  oauthStateCalendar Boolean @default(false)
+  calendarCursor String?
+  calendarWindowEnd DateTime?
+  calendarLastSyncedAt DateTime?
+  calendarError String?
+  oauthScopes String?
   ownerId           String?   // Personal sales mailbox; null means a shared support mailbox.
   @@index([ownerId])
   oauthStateHash    String?
@@ -5520,6 +5530,7 @@ model PdfRender {
 // ═══════════════════════════════════════════════════════════
 
 model CustomFieldDef {
+  values StudioFieldValue[]
   id            String    @id @default(uuid())
   module        String
   name          String    // storage key, e.g. contract_tier
@@ -5552,6 +5563,51 @@ model CustomFieldDef {
 
   @@unique([module, name])
   @@index([module, active])
+}
+
+// Studio definitions are separate from the legacy CustomField table.
+model StudioFieldValue {
+  id String @id @default(uuid())
+  uniqueKey String? @unique
+  fieldId String
+  field CustomFieldDef @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  module String
+  recordId String
+  value Json
+  updatedAt DateTime @updatedAt
+  @@unique([fieldId, recordId])
+  @@index([module, recordId])
+}
+
+model QuoteShare {
+  id String @id @default(uuid())
+  quoteId String
+  tokenHash String @unique
+  snapshot Json
+  quoteVersion DateTime
+  expiresAt DateTime
+  revokedAt DateTime?
+  acceptedAt DateTime?
+  acceptedName String?
+  acceptedEmail String?
+  createdById String
+  createdAt DateTime @default(now())
+  @@index([quoteId])
+}
+
+model OutlookEventLink {
+  id String @id @default(uuid())
+  accountId String
+  eventId String @unique
+  remoteId String
+  remoteVersion String?
+  localHash String
+  conflict Boolean @default(false)
+  remoteOrganizer Boolean @default(false)
+  remoteRecurring Boolean @default(false)
+  syncedAt DateTime @default(now())
+  @@unique([accountId, remoteId])
+  @@index([accountId])
 }
 
 model Picklist {

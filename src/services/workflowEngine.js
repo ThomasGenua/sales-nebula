@@ -120,6 +120,16 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
   for (const action of actions) {
     const config = action?.config || {};
     switch (action?.type) {
+      case 'assignOwner': {
+        if (!modelHasField(modelName, 'ownerId')) throw new Error('This record has no owner');
+        const owner = await prisma.user.findFirst({ where: { id: config.userId, active: true, isPortalUser: false }, select: { id: true } });
+        if (!owner) throw new Error('Assigned owner is no longer active');
+        const { updateRecord } = require('./recordWrites');
+        await updateRecord(prisma, moduleName, record.id, { ownerId: owner.id }, { userId, source: 'workflow assignment', skipWorkflows: true });
+        record.ownerId = owner.id;
+        actionsRun.push('Assigned owner');
+        break;
+      }
       case 'updateField': {
         if (!config.field) break;
         // Checked here as well as when the rule is saved, for rules saved
@@ -141,7 +151,7 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
         const link = {};
         // Tie the task to the record that triggered it when the shape allows,
         // instead of creating an orphan.
-        for (const [fk, mod] of [['dealId', 'deals'], ['contactId', 'contacts'], ['accountId', 'accounts'], ['caseId', 'cases']]) {
+        for (const [fk, mod] of [['dealId', 'deals'], ['contactId', 'contacts'], ['accountId', 'accounts'], ['caseId', 'cases'], ['leadId', 'leads']]) {
           if (mod === moduleName && modelHasField('activity', fk)) link[fk] = record.id;
         }
         await prisma.activity.create({
@@ -150,6 +160,8 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
             subject: config.subject || `Auto: ${workflow.name}`,
             priority: config.priority || 'Medium',
             status: 'Scheduled',
+            dueDate: new Date(Date.now() + Number(config.delayDays ?? 1) * 86400000),
+            ownerId: config.assignToId || ownerOf(record, userId),
             ...(config.assignToId || ownerOf(record, userId) ? { assignedId: config.assignToId || ownerOf(record, userId) } : {}),
             ...link,
           },
@@ -210,6 +222,7 @@ function workflowProblem({ module, conditions, actions }) {
   if (!modelName) return `Unknown module: ${module}`;
   if (conditions != null) {
     if (!Array.isArray(conditions)) return 'conditions must be a list of { field, operator, value }';
+    if (conditions.length > 30) return 'Use at most 30 conditions';
     for (const condition of conditions) {
       if (!condition || typeof condition.field !== 'string' || !condition.field) return 'Each condition needs a field';
       if (!CONDITION_OPERATORS.includes(condition.operator)) {
@@ -219,7 +232,11 @@ function workflowProblem({ module, conditions, actions }) {
   }
   if (actions != null) {
     if (!Array.isArray(actions)) return 'actions must be a list of { type, config }';
+    if (actions.length > 30) return 'Use at most 30 actions';
     for (const action of actions) {
+      if (!['updateField', 'createActivity', 'createNotification', 'sendEmail', 'assignOwner'].includes(action?.type)) return 'Unsupported workflow action';
+      if (action.type === 'assignOwner' && (!modelHasField(modelName, 'ownerId') || typeof action.config?.userId !== 'string' || !action.config.userId)) return 'Choose an owner for this record module';
+      if (action.type === 'createActivity' && action.config?.delayDays != null && (!Number.isInteger(Number(action.config.delayDays)) || Number(action.config.delayDays) < 0 || Number(action.config.delayDays) > 365)) return 'Follow-up delay must be from 0 to 365 days';
       if (action?.type === 'updateField') {
         const problem = plainFieldProblem(modelName, action.config?.field, action.config?.value);
         if (problem) return `updateField: ${problem}`;
