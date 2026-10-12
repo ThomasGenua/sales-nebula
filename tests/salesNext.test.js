@@ -142,6 +142,22 @@ test('modified, revoked, expired, and deleted quote links cannot be accepted', a
   const deleted = await share(q); await prisma.quote.update({ where: { id: q.id }, data: { deletedAt: new Date() } }); expect((await request(app).get(deleted.path)).status).toBe(410);
 });
 
+test('data-subject export includes custom values and erasure removes values and revokes customer quote links', async () => {
+  const { resolveSubject, exportSubject, eraseSubject } = require('../src/services/dataErasure');
+  await field('private_note', 'textarea');
+  const contact = await createTestContact({ ownerId: rep.user.id });
+  expect((await put(valuesPath(contact.id), { values: { private_note: 'Customer preference' } }, rep)).status).toBe(200);
+  const q = await quote();
+  expect((await put('/api/quotes/' + q.id, { contactId: contact.id })).status).toBe(200);
+  const link = await share(q), subject = await resolveSubject(prisma, { contactId: contact.id });
+  const exported = await exportSubject(prisma, subject);
+  expect(exported.records.StudioFieldValue[0].value).toBe('Customer preference');
+  const erased = await eraseSubject(prisma, subject);
+  expect(await prisma.studioFieldValue.count({ where: { recordId: contact.id } })).toBe(0);
+  expect(erased.residual).toEqual(expect.arrayContaining([expect.objectContaining({ model: 'QuoteShare' })]));
+  expect((await request(app).get(link.path)).status).toBe(410);
+});
+
 test('Outlook delta sync paginates, imports attendees/reminders privately, and checkpoints without duplicates', async () => {
   const account = await mailbox();
   const spy = jest.spyOn(graph, 'graphFetch').mockResolvedValueOnce({ value: [remote('remote-1')], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/calendarView/delta?$skiptoken=one' }).mockResolvedValueOnce({ value: [remote('remote-2')], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=two' });
