@@ -139,7 +139,9 @@ between backend tests instead of recreating every table and index file. It
 requires a PostgreSQL superuser on the disposable test database. Trigger
 handling is restored when that cleanup transaction ends; normal test operations
 still enforce database constraints. Accounts without that capability fall back
-to the usual reset. The test-database name guard still applies.
+to the usual reset. The test-database name guard still applies. For slow local
+disks, `TEST_BULK_IMPORT_TIMEOUT_MS=180000` increases the 450-row duplicate-import
+test deadline without changing its assertions; the default remains 60 seconds.
 
 A live Microsoft tenant/mailbox check still requires configured Microsoft
 credentials and consent. Real SMTP delivery and public link reachability need

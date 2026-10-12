@@ -77,5 +77,5 @@ describe('POST /api/import/execute, duplicates', () => {
 
     expect(again.body).toMatchObject({ created: 0, skipped: 450 });
     expect(await prisma.contact.count()).toBe(450);
-  }, 60000);
+  }, Number(process.env.TEST_BULK_IMPORT_TIMEOUT_MS) || 60000);
 });
