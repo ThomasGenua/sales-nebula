@@ -214,8 +214,7 @@ const CONDITION_OPERATORS = [...COMPARE_OPERATORS, 'changed', 'changedTo'];
 
 /**
  * Why a workflow could not be saved: its module, conditions or field
- * updates. Action types the engine does not run are left alone, as ever;
- * they do nothing.
+ * updates. New and edited workflows must use actions the engine can run.
  */
 function workflowProblem({ module, conditions, actions }) {
   const modelName = resolveModel(module);

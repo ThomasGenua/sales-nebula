@@ -25,21 +25,29 @@ beforeEach(async () => {
 // ─── WORKFLOWS ───
 
 describe('Workflows', () => {
-  it('creates a workflow', async () => {
+  it('creates a runnable workflow and rejects unsupported actions', async () => {
     const res = await request(app)
       .post('/api/workflows')
       .set(authHeader(token))
       .send({
-        name: 'Auto-assign high-value deals',
+        name: 'Qualify high-value deals',
         module: 'deals',
         trigger: 'on_create',
         conditions: [{ field: 'value', operator: 'gt', value: 100000 }],
-        actions: [{ type: 'update_field', field: 'priority', value: 'High' }],
+        actions: [{ type: 'updateField', config: { field: 'stage', value: 'Qualified' } }],
       });
 
     expect(res.status).toBe(201);
-    expect(res.body.name).toBe('Auto-assign high-value deals');
+    expect(res.body.name).toBe('Qualify high-value deals');
     expect(res.body.active).toBe(true);
+
+    const unsupported = await request(app).post('/api/workflows').set(authHeader(token)).send({
+      name: 'Unsupported action', module: 'deals', trigger: 'on_create',
+      actions: [{ type: 'update_field', field: 'priority', value: 'High' }],
+    });
+    expect(unsupported.status).toBe(400);
+    expect(unsupported.body.error).toBe('Unsupported workflow action');
+    expect(await prisma.workflow.count()).toBe(1);
   });
 
   it('toggles workflow active state', async () => {

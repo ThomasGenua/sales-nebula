@@ -69,6 +69,8 @@ member. Other actions retain the existing workflow permissions. Follow-ups link
 to the triggering record, including leads. Preview evaluates a visible current
 record without writing data or sending anything. Changed-value conditions
 need a previous value and normally match only during a real update.
+New and edited workflows reject unsupported action types instead of saving
+actions the engine cannot run.
 An active workflow runs on subsequent matching changes. Saved workflow logs
 show the outcomes. The separate **Flows** feature is still not executable.
 
