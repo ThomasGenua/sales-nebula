@@ -3,7 +3,9 @@ const { authenticate, requirePermission, permits } = require('../middleware/auth
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin } = require('../middleware/rowSecurity');
-const { createRecord, updateRecord, batchClient } = require('../services/recordWrites');
+const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
+const custom = require('../services/customFields');
+const { linkRefusal } = require('../middleware/access');
 
 // Only administrators import records on someone else's behalf; everyone
 // else's imports are theirs.
@@ -43,16 +45,21 @@ const IMPORTABLE_MODULES = {
 };
 
 // GET import metadata (available modules + field mappings)
-router.get('/metadata', async (req, res) => {
+router.get('/metadata', async (req, res, next) => {
+  try {
   const metadata = {};
   for (const [mod, config] of Object.entries(IMPORTABLE_MODULES)) {
+    if (!permits(req, mod, 'edit')) continue;
+    const extra = (await custom.definitions(req.app.locals.prisma, mod)).filter(f => f.supported && !f.readOnly);
     metadata[mod] = {
-      requiredFields: config.required,
-      availableFields: config.fields,
+      requiredFields: [...config.required, ...extra.filter(f => f.required && f.defaultValue == null).map(f => 'custom.' + f.name)],
+      availableFields: [...config.fields.filter(f => isAdmin(req.user) || !OWNERSHIP_FIELDS.includes(f)), ...extra.map(f => 'custom.' + f.name)],
+      labels: Object.fromEntries(extra.map(f => ['custom.' + f.name, f.label])),
       dedupeFields: config.dedupeFields,
     };
   }
-  res.json({ modules: Object.keys(IMPORTABLE_MODULES), metadata });
+  res.json({ modules: Object.keys(metadata), metadata });
+  } catch (e) { next(e); }
 });
 
 // POST /import/validate - Validate data before import (dry run)
@@ -70,11 +77,15 @@ router.post('/validate', async (req, res, next) => {
     }
 
     const config = IMPORTABLE_MODULES[module];
+    if (!permits(req, module, 'edit')) return res.status(403).json({ error: 'Insufficient permissions' });
+    const prisma = req.app.locals.prisma;
+    const extra = (await custom.definitions(prisma, module)).filter(f => f.supported && !f.readOnly);
     const mapping = fieldMapping || {};
     const errors = [];
     const warnings = [];
+    const duplicates = [], preview = [], seen = new Map();
 
-    records.forEach((record, index) => {
+    for (const [index, record] of records.entries()) {
       const mapped = applyMapping(record, mapping);
 
       // Check required fields
@@ -86,7 +97,7 @@ router.post('/validate', async (req, res, next) => {
 
       // Check unknown fields
       for (const key of Object.keys(mapped)) {
-        if (!config.fields.includes(key)) {
+        if (!config.fields.includes(key) && !extra.some(f => 'custom.' + f.name === key)) {
           warnings.push({ row: index + 1, field: key, message: `Unknown field will be ignored` });
         }
       }
@@ -95,15 +106,26 @@ router.post('/validate', async (req, res, next) => {
       if (mapped.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mapped.email)) {
         errors.push({ row: index + 1, field: 'email', message: 'Invalid email format' });
       }
-    });
+      try {
+        const dedupeField = config.dedupeFields[0], key = String(mapped[dedupeField] || '').trim().toLowerCase();
+        const existing = key && await prisma[config.model].findFirst({ where: await reachableWhere(req, module, config.model, { [dedupeField]: { equals: key, mode: 'insensitive' } }, req.body.updateDuplicates ? 'Edit' : 'Read'), select: { id: true } });
+        if (existing || key && seen.has(key)) duplicates.push({ row: index + 1, field: dedupeField, value: mapped[dedupeField], kind: existing ? 'existing' : 'file', ...(seen.has(key) && { firstRow: seen.get(key) }) });
+        if (key && !seen.has(key)) seen.set(key, index + 1);
+        const data = Object.fromEntries(config.fields.filter(f => (isAdmin(req.user) || !OWNERSHIP_FIELDS.includes(f)) && mapped[f] !== undefined && mapped[f] !== '').map(f => [f, coerceField(f, mapped[f])]));
+        const links = await linkRefusal(req, config.model, data); if (links) throw new Error(links);
+        await custom.prepareValues(prisma, module, customInput(mapped), req.body.updateDuplicates ? existing?.id : null, { useDefaults: true });
+        if (preview.length < 20) preview.push({ row: index + 1, values: { ...data, ...Object.fromEntries(Object.entries(mapped).filter(([k]) => k.startsWith('custom.'))) } });
+      } catch (e) { errors.push({ row: index + 1, field: 'record', message: e.message }); }
+    }
 
     res.json({
       valid: errors.length === 0,
       totalRecords: records.length,
-      errors: errors.slice(0, 100), // Cap at 100 errors
+      errors,
       warnings: warnings.slice(0, 50),
       errorCount: errors.length,
       warningCount: warnings.length,
+      duplicates: duplicates.slice(0, 1000), duplicateCount: duplicates.length, preview,
     });
   } catch (err) { next(err); }
 });
@@ -172,7 +194,6 @@ router.post('/execute', async (req, res, next) => {
     // may link only to records the importer can see (a contact's account);
     // each linked record is looked up once for the whole file.
     const write = { req, userId: req.userId, source: 'import', linkCache: new Map() };
-    const db = batchClient(prisma);
 
     // Process in batches of 100
     const batchSize = 100;
@@ -183,6 +204,7 @@ router.post('/execute', async (req, res, next) => {
         const rowNum = i + j + 1;
         try {
           const mapped = applyMapping(batch[j], mapping);
+          if (mapped.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(mapped.email).trim())) throw new Error('Invalid email format');
 
           // Filter to valid fields only
           const data = {};
@@ -207,7 +229,13 @@ router.post('/execute', async (req, res, next) => {
 
           if (existingId) {
             if (updateDuplicates) {
-              await updateRecord(db, module, existingId, data, write);
+              const after = [];
+              await prisma.$transaction(async tx => {
+                const values = await custom.prepareValues(tx, module, customInput(mapped), existingId, { useDefaults: true });
+                await updateRecord(tx, module, existingId, data, { ...write, after, prisma });
+                await custom.saveValues(tx, values, existingId);
+              });
+              await runAfter(after);
               results.updated++;
             } else {
               results.skipped++;
@@ -217,14 +245,21 @@ router.post('/execute', async (req, res, next) => {
 
           // With no owner in the row, the module's assignment rules pick one,
           // and failing them the importer owns it.
-          const { record: created } = await createRecord(db, module, data, write);
+          const after = [];
+          const created = await prisma.$transaction(async tx => {
+            const values = await custom.prepareValues(tx, module, customInput(mapped), null, { useDefaults: true });
+            const { record } = await createRecord(tx, module, data, { ...write, after, prisma });
+            await custom.saveValues(tx, values, record.id);
+            return record;
+          });
+          await runAfter(after);
 
           // Add to dedupe map for intra-batch dedup
           if (dedupeValue) dedupeMap.set(dedupeValue, created.id);
           results.created++;
 
         } catch (err) {
-          results.errors.push({ row: rowNum, error: err.message.slice(0, 200) });
+          results.errors.push({ row: rowNum, error: err.code === 'P2002' ? 'A unique field value is already in use.' : err.message.slice(0, 200) });
           results.skipped++;
         }
       }
@@ -245,7 +280,7 @@ router.post('/execute', async (req, res, next) => {
     res.json({
       success: true,
       ...results,
-      errors: results.errors.slice(0, 100),
+      errors: results.errors,
     });
   } catch (err) { next(err); }
 });
@@ -254,13 +289,13 @@ function applyMapping(record, mapping) {
   if (Object.keys(mapping).length === 0) return record;
   const mapped = {};
   for (const [csvCol, crmField] of Object.entries(mapping)) {
-    if (record[csvCol] !== undefined) {
+    if (crmField && record[csvCol] !== undefined) {
       mapped[crmField] = record[csvCol];
     }
   }
   // Also include any unmapped fields that already match CRM field names
   for (const [key, value] of Object.entries(record)) {
-    if (!mapping[key] && !Object.values(mapping).includes(key)) {
+    if (!Object.hasOwn(mapping, key) && !Object.values(mapping).includes(key)) {
       mapped[key] = value;
     }
   }
@@ -270,12 +305,15 @@ function applyMapping(record, mapping) {
 function coerceField(field, value) {
   if (['price', 'cost', 'revenue', 'employees'].includes(field)) {
     const num = Number(value);
-    return isNaN(num) ? null : num;
+    if (!Number.isFinite(num) || field === 'employees' && !Number.isInteger(num)) throw new Error(field + ' must be a valid number');
+    return num;
   }
   if (field === 'active') {
+    if (![true, false, 'true', 'false', '1', '0', 'yes', 'no'].includes(value)) throw new Error('active must be yes or no');
     return value === true || value === 'true' || value === '1' || value === 'yes';
   }
   return String(value).trim();
 }
+function customInput(mapped) { return Object.fromEntries(Object.entries(mapped).filter(([key]) => key.startsWith('custom.')).map(([key, value]) => [key.slice(7), value])); }
 
 module.exports = router;

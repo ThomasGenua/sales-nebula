@@ -4,6 +4,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
 const { evaluate } = require('../services/recordRules');
+const custom = require('../services/customFields');
 
 const { unavailable } = require('../utils/unavailable');
 const router = Router();
@@ -98,7 +99,7 @@ router.get('/fields/:module', authenticate, async (req, res, next) => {
 router.post('/fields', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { module, label, fieldType, name, description, helpText, required, defaultValue, maxLength, minValue, maxValue, precision, picklistId, relatedModule, regex, regexMessage, searchable, auditable, readOnly, sortOrder } = req.body;
+    const { module, label, fieldType, name, description, helpText, required, defaultValue, maxLength, minValue, maxValue, precision, picklistId, relatedModule, regex, regexMessage, searchable, auditable, readOnly, unique, reportable, sortOrder } = req.body;
 
     if (!module || !STUDIO_MODULES.includes(module)) return res.status(400).json({ error: `module must be one of: ${STUDIO_MODULES.join(', ')}` });
     if (!label) return res.status(400).json({ error: 'label required' });
@@ -133,7 +134,7 @@ router.post('/fields', authenticate, requirePermission('admin', 'edit'), auditMi
         precision: precision != null ? +precision : 2,
         picklistId: picklistId || null, relatedModule: relatedModule || null,
         regex: regex || null, regexMessage: regexMessage || null,
-        searchable: !!searchable, auditable: !!auditable, readOnly: !!readOnly,
+        searchable: !!searchable, auditable: !!auditable, readOnly: !!readOnly, unique: !!unique, reportable: reportable !== false,
         sortOrder: order, createdById: req.user.id,
       },
     });
@@ -151,10 +152,11 @@ router.put('/fields/:id', authenticate, requirePermission('admin', 'edit'), audi
 
     // deletedAt let admin: edit delete a field, which DELETE keeps to admin: full.
     const { module, name, picklist, storage, deletedAt, createdById, ...data } = columnsFrom('customFieldDef', req.body);
+    if (data.unique !== undefined && data.unique !== existing.unique && await prisma.studioFieldValue.count({ where: { fieldId: existing.id } })) return res.status(409).json({ error: 'Create a new field to change uniqueness after values have been saved.' });
 
     // Changing type after data exists would strand values in the wrong column
     if (data.fieldType && data.fieldType !== existing.fieldType) {
-      const valueCount = await prisma.customFieldValue.count({ where: { customFieldId: existing.id } });
+      const valueCount = await prisma.studioFieldValue.count({ where: { fieldId: existing.id } });
       if (valueCount > 0) {
         return res.status(409).json({ error: `Cannot change field type: ${valueCount} records already hold a value. Create a new field instead.` });
       }
@@ -174,11 +176,11 @@ router.delete('/fields/:id', authenticate, requirePermission('admin', 'full'), a
     const field = await prisma.customFieldDef.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!field) return res.status(404).json({ error: 'Field not found' });
 
-    const valueCount = await prisma.customFieldValue.count({ where: { customFieldId: field.id } });
+    const valueCount = await prisma.studioFieldValue.count({ where: { fieldId: field.id } });
     if (valueCount > 0 && req.query.force !== 'true') {
       return res.status(409).json({ error: `${valueCount} records hold a value for this field. Pass force=true to delete the field and its data.`, valueCount });
     }
-    if (req.query.force === 'true') await prisma.customFieldValue.deleteMany({ where: { customFieldId: field.id } });
+    if (req.query.force === 'true') await prisma.studioFieldValue.deleteMany({ where: { fieldId: field.id } });
 
     await prisma.customFieldDef.update({ where: { id: field.id }, data: { deletedAt: new Date(), active: false } });
     await req.audit({ action: 'delete', module: 'studio', recordId: field.id, details: `Custom field deleted: ${field.module}.${field.name}` });
@@ -208,28 +210,38 @@ router.get('/field-types', authenticate, async (req, res) => {
 router.get('/values/:module/:recordId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const fields = await prisma.customFieldDef.findMany({ where: { module: req.params.module, deletedAt: null, active: true }, orderBy: { sortOrder: 'asc' } });
-    const values = await prisma.customFieldValue.findMany({ where: { module: req.params.module, recordId: req.params.recordId } });
+    await custom.accessibleRecord(req, req.params.module, req.params.recordId);
+    const fields = await custom.definitions(prisma, req.params.module);
+    const values = await prisma.studioFieldValue.findMany({ where: { module: req.params.module, recordId: req.params.recordId } });
     const byField = new Map(values.map(v => [v.fieldId, v]));
 
     res.json(fields.map(f => {
       const v = byField.get(f.id);
-      const column = FIELD_TYPES[f.fieldType]?.storage || 'valueText';
       return {
+        ...f,
         fieldId: f.id, name: f.name, label: f.label, fieldType: f.fieldType,
         required: f.required, readOnly: f.readOnly, helpText: f.helpText,
-        value: v ? v[column] : (f.defaultValue ?? null),
+        value: v ? v.value : f.defaultValue != null && f.supported ? custom.normalize(f, f.defaultValue) : null,
+        version: v?.updatedAt?.toISOString() || null,
         hasValue: !!v,
       };
     }));
   } catch (err) { next(err); }
 });
 
-// A value has nowhere to go: the table's columns are not the ones this
-// wrote (it failed every time), and no form, list, report or export shows a
-// custom field. Definitions and validation rules still work.
-router.put('/values/:module/:recordId', authenticate, (req, res) => unavailable(res, 'CUSTOM_FIELD_VALUES_UNAVAILABLE',
-  'Custom field values cannot be stored yet, and no form, list or report shows them. Nothing was saved.'));
+router.put('/values/:module/:recordId', authenticate, auditMiddleware, async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma, { module, recordId } = req.params;
+    await custom.accessibleRecord(req, module, recordId, 'edit');
+    await db.$transaction(async tx => {
+      const current = await tx.studioFieldValue.findMany({ where: { module, recordId } });
+      if (req.body.versions && current.some(v => req.body.versions[v.fieldId] !== v.updatedAt.toISOString())) throw Object.assign(new Error('Custom fields changed. Reload before saving.'), { status: 409 });
+      await custom.saveValues(tx, await custom.prepareValues(tx, module, req.body.values, recordId, { useDefaults: true }), recordId);
+    }, { isolationLevel: 'Serializable' });
+    await req.audit({ action: 'update', module, recordId, details: 'Updated custom fields' });
+    res.json({ saved: true });
+  } catch (e) { if (e.code === 'P2002' || e.code === 'P2034') return next(Object.assign(new Error('A unique value is already in use, or another edit occurred. Reload and try again.'), { status: 409 })); next(e); }
+});
 
 // ── PICKLISTS ─────────────────────────────────────────────────────────
 

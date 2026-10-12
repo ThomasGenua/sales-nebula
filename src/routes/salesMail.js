@@ -14,7 +14,7 @@ const verifierFor = state => crypto.createHmac('sha256', process.env.MICROSOFT_C
 const accountWhere = req => ({ ownerId: req.userId, deletedAt: null });
 const messageWhere = req => ({ deletedAt: null, account: { is: accountWhere(req) } });
 const redirectUri = () => new URL('/app/mailbox', process.env.FRONTEND_URL || 'http://localhost:3000').href;
-const safeAccount = a => ({ id: a.id, name: a.name, mailboxAddress: a.mailboxAddress, status: a.status, connected: !!a.oauthRefreshToken, lastPolledAt: a.lastPolledAt, lastError: a.lastError, active: a.active });
+const safeAccount = a => ({ id: a.id, name: a.name, mailboxAddress: a.mailboxAddress, status: a.status, connected: !!a.oauthRefreshToken, lastPolledAt: a.lastPolledAt, lastError: a.lastError, active: a.active, calendarEnabled: a.calendarEnabled, calendarLastSyncedAt: a.calendarLastSyncedAt, calendarError: a.calendarError });
 
 async function accountFor(req, res) {
   const account = await req.app.locals.prisma.inboundEmailAccount.findFirst({ where: { ...accountWhere(req), id: req.params.id } });
@@ -36,9 +36,11 @@ router.post('/accounts/:id/authorize', requirePermission('emails', 'edit'), asyn
     const account = await accountFor(req, res); if (!account) return;
     if (!process.env.MICROSOFT_CLIENT_ID || !process.env.MICROSOFT_CLIENT_SECRET) return res.status(503).json({ error: 'An administrator must configure MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET first.' });
     const state = crypto.randomBytes(32).toString('hex');
-    await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: account.id }, data: { oauthStateHash: hash(state), oauthStateExpiresAt: new Date(Date.now() + 10 * 60000) } });
+    const calendar = req.body.calendar === true || account.calendarEnabled;
+    if (calendar && !permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Calendar sync requires activity edit permission.' });
+    await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: account.id }, data: { oauthStateHash: hash(state), oauthStateExpiresAt: new Date(Date.now() + 10 * 60000), oauthStateCalendar: calendar } });
     const tenant = process.env.MICROSOFT_TENANT_ID || 'common';
-    const params = new URLSearchParams({ client_id: process.env.MICROSOFT_CLIENT_ID, response_type: 'code', redirect_uri: redirectUri(), response_mode: 'query', scope: MAIL_SCOPES, state, prompt: 'select_account', code_challenge_method: 'S256', code_challenge: crypto.createHash('sha256').update(verifierFor(state)).digest('base64url') });
+    const params = new URLSearchParams({ client_id: process.env.MICROSOFT_CLIENT_ID, response_type: 'code', redirect_uri: redirectUri(), response_mode: 'query', scope: MAIL_SCOPES + (calendar ? ' https://graph.microsoft.com/Calendars.ReadWrite' : ''), state, prompt: 'select_account', code_challenge_method: 'S256', code_challenge: crypto.createHash('sha256').update(verifierFor(state)).digest('base64url') });
     res.json({ url: `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize?${params}` });
   } catch (e) { next(e); }
 });
@@ -51,7 +53,8 @@ router.post('/connect', requirePermission('emails', 'edit'), async (req, res, ne
     if (!account) return res.status(400).json({ error: 'This connection request has expired or belongs to another user. Connect again.' });
     const claimed = await db.inboundEmailAccount.updateMany({ where: { id: account.id, oauthStateHash: hash(state) }, data: { oauthStateHash: null, oauthStateExpiresAt: null } });
     if (!claimed.count) return res.status(409).json({ error: 'This consent response has already been used.' });
-    await graphMailbox.connect(db, account, { code, redirectUri: redirectUri(), codeVerifier: verifierFor(state) });
+    if (account.oauthStateCalendar && !permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Calendar access is no longer allowed.' });
+    await graphMailbox.connect(db, account, { code, redirectUri: redirectUri(), codeVerifier: verifierFor(state), calendar: account.oauthStateCalendar });
     const updated = await db.inboundEmailAccount.update({ where: { id: account.id }, data: { active: true } });
     await req.audit({ action: 'update', module: 'emails', recordId: account.id, details: 'Connected personal Outlook mailbox' });
     res.json(safeAccount(updated));
@@ -59,7 +62,7 @@ router.post('/connect', requirePermission('emails', 'edit'), async (req, res, ne
 });
 router.post('/accounts/:id/disconnect', requirePermission('emails', 'edit'), async (req, res, next) => {
   try { const a = await accountFor(req, res); if (!a) return;
-    await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: a.id }, data: { oauthAccessToken: null, oauthRefreshToken: null, oauthExpiresAt: null, oauthStateHash: null, oauthStateExpiresAt: null, status: 'Disabled', active: false } });
+    await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: a.id }, data: { oauthAccessToken: null, oauthRefreshToken: null, oauthExpiresAt: null, oauthStateHash: null, oauthStateExpiresAt: null, oauthStateCalendar: false, calendarEnabled: false, calendarCursor: null, calendarError: null, oauthScopes: null, status: 'Disabled', active: false } });
     res.json({ disconnected: true });
   } catch (e) { next(e); }
 });

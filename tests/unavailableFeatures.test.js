@@ -218,9 +218,11 @@ describe('quote approval', () => {
 });
 
 describe('custom field values', () => {
-  test('are not stored, and the refusal says why', async () => {
+  test('reject unknown definitions rather than silently storing values', async () => {
     const contact = await createTestContact();
-    refused(await call('put', `/api/studio/values/contacts/${contact.id}`, { values: { tier: 'Gold' } }), 'CUSTOM_FIELD_VALUES_UNAVAILABLE');
+    const response = await call('put', `/api/studio/values/contacts/${contact.id}`, { values: { tier: 'Gold' } });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/Unknown custom field/);
   });
 });
 

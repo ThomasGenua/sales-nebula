@@ -5,6 +5,7 @@ const { canReach, reachableWhere } = require('../middleware/access');
 const { columnsFrom, scalarOrderBy } = require('../utils/modelFields');
 const { processDueSteps } = require('../services/sequenceSteps');
 const { mailConfigured } = require('../utils/mail');
+const policy = require('../services/sequencePolicy');
 
 async function visiblePeople(req) {
   const db = req.app.locals.prisma;
@@ -18,6 +19,7 @@ function stepProblem(steps) {
     if (!step || typeof step !== 'object' || Array.isArray(step)) return 'Every step must be an email definition';
     if (step.delayDays != null && (!Number.isInteger(Number(step.delayDays)) || Number(step.delayDays) < 0 || Number(step.delayDays) > 365)) return 'Step delays must be whole days between 0 and 365';
     for (const key of ['subject', 'body', 'templateId']) if (step[key] != null && typeof step[key] !== 'string') return key + ' must be text';
+    if (policy.templateProblem(step.subject) || policy.templateProblem(step.body)) return policy.templateProblem(step.subject) || policy.templateProblem(step.body);
   }
   return null;
 }
@@ -28,6 +30,7 @@ async function activationProblem(prisma, steps) {
   for (const step of steps) {
     const template = step.templateId ? await prisma.emailTemplate.findUnique({ where: { id: step.templateId } }) : null;
     if (!(step.subject || template?.subject)?.trim() || !(step.body || template?.body)?.trim()) return 'Every email step needs a subject and body, or an existing template';
+    if (policy.templateProblem(step.subject || template?.subject) || policy.templateProblem(step.body || template?.body)) return 'Template contains an unsupported merge field';
   }
   return null;
 }
@@ -143,6 +146,8 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
     const prisma = req.app.locals.prisma;
     const { name, description } = req.body;
     const steps = req.body.steps ?? [];
+    if (policy.windowProblem(req.body.sendingWindow)) return res.status(400).json({ error: policy.windowProblem(req.body.sendingWindow) });
+    if (req.body.stopOnReply != null && typeof req.body.stopOnReply !== 'boolean') return res.status(400).json({ error: 'stopOnReply must be a checkbox value' });
     const status = req.body.status || 'Draft';
     if (!name?.trim()) return res.status(400).json({ error: 'name required' });
     // A draft may be saved before its steps are written; only an active
@@ -154,7 +159,7 @@ router.post('/', requirePermission('emails', 'edit'), async (req, res, next) => 
     if (activeProblem) return res.status(400).json({ error: activeProblem });
 
     const sequence = await prisma.emailSequence.create({
-      data: { name, description, steps, status, createdById: req.userId },
+      data: { name, description, steps, status, stopOnReply: req.body.stopOnReply !== false, ...(req.body.sendingWindow && { sendingWindow: req.body.sendingWindow }), createdById: req.userId },
     });
     await req.audit({ action: 'create', module: 'emails', recordId: sequence.id, details: `Created email sequence: ${name}` });
     res.status(201).json(sequence);
@@ -168,6 +173,8 @@ router.put('/:id', requirePermission('emails', 'edit'), async (req, res, next) =
     const current = await prisma.emailSequence.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ error: 'Not found' });
     const data = columnsFrom('emailSequence', req.body);
+    if (policy.windowProblem(req.body.sendingWindow)) return res.status(400).json({ error: policy.windowProblem(req.body.sendingWindow) });
+    if (req.body.sendingWindow === null) data.sendingWindow = require('@prisma/client').Prisma.DbNull;
     for (const key of ['createdById', 'id', 'createdAt', 'updatedAt']) delete data[key];
     if (data.name !== undefined && !String(data.name).trim()) return res.status(400).json({ error: 'name required' });
     if (data.steps !== undefined && stepProblem(data.steps)) return res.status(400).json({ error: stepProblem(data.steps) });

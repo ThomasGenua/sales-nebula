@@ -22,6 +22,9 @@ const { Prisma } = require('@prisma/client');
 const { permits } = require('../middleware/auth');
 const { buildAccessFilter, applyAccessFilter } = require('../middleware/rowSecurity');
 const { modelHasField, columnsFrom } = require('../utils/modelFields');
+async function customMetadata(db, module) {
+  return Object.fromEntries((await require('../services/customFields').definitions(db, module)).filter(f => f.supported && f.reportable).map(f => ['custom.' + f.name, { label: f.label, type: ['number', 'currency', 'percent'].includes(f.fieldType) ? 'number' : ['date', 'datetime'].includes(f.fieldType) ? 'date' : f.fieldType === 'boolean' ? 'boolean' : 'string' }]));
+}
 
 /**
  * Pick the fields that stand in for a related record's label.
@@ -257,8 +260,7 @@ const plainValue = v => isPlain(v) || (Array.isArray(v) && v.every(isPlain));
  * field: a column called "owner" returned each record's whole owner row,
  * password hash included, and a filter could compare inside related rows.
  */
-function withinModule(report) {
-  const config = MODULE_CONFIG[report.module];
+function withinModule(report, config = MODULE_CONFIG[report.module]) {
   const known = f => typeof f === 'string' && Object.prototype.hasOwnProperty.call(config.fields, f);
   const list = v => (Array.isArray(v) ? v : []);
   return {
@@ -351,12 +353,13 @@ async function executeAggregations(prisma, modelName, where, aggregations, group
 
 // ─── GET /api/reports/metadata ───
 // Returns available modules, fields, operators for the report builder UI
-router.get('/metadata', (req, res) => {
+router.get('/metadata', async (req, res, next) => {
+  try {
   const modules = {};
   for (const [key, config] of Object.entries(MODULE_CONFIG)) {
     modules[key] = {
       label: key.charAt(0).toUpperCase() + key.slice(1),
-      fields: config.fields,
+      fields: { ...config.fields, ...await customMetadata(req.app.locals.prisma, key) },
       relations: Object.keys(config.relations),
     };
   }
@@ -367,6 +370,7 @@ router.get('/metadata', (req, res) => {
     reportTypes: ['tabular', 'summary', 'matrix', 'chart'],
     chartTypes: ['bar', 'line', 'pie', 'donut', 'funnel', 'scatter', 'area'],
   });
+  } catch (e) { next(e); }
 });
 
 // ─── GET /api/reports ───
@@ -508,16 +512,18 @@ router.post('/execute', async (req, res, next) => {
 // Runs as the requesting user: over the live rows their row security lets
 // them see. Reports read every row, deleted ones included, whoever asked.
 async function executeReport(prisma, definition, req) {
-  const config = MODULE_CONFIG[definition.module];
+  const baseConfig = MODULE_CONFIG[definition.module];
+  const config = baseConfig && { ...baseConfig, fields: { ...baseConfig.fields, ...await customMetadata(prisma, definition.module) } };
   if (!config) throw new Error(`Unknown module: ${definition.module}`);
 
   const model = prisma[config.model];
   if (!model) throw new Error(`Prisma model not found: ${config.model}`);
 
-  const report = withinModule(definition);
+  const report = withinModule(definition, config);
   const accessFilter = await buildAccessFilter(prisma, req.user, report.module, { modelName: config.model });
   const live = modelHasField(config.model, 'deletedAt') ? { deletedAt: null } : {};
-  const where = applyAccessFilter({ ...buildWhere(report.filters), ...live }, accessFilter);
+  const where = applyAccessFilter({ ...buildWhere(report.filters.filter(f => !f.field.startsWith('custom.'))), ...live }, accessFilter);
+  if (JSON.stringify(report).includes('custom.')) return require('../services/customFieldReports').execute(prisma, config, report, where);
   const orderBy = buildOrderBy(report.sortBy);
   const startTime = Date.now();
 

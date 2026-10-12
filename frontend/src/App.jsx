@@ -8,6 +8,9 @@ import { MyDayPage, PipelinePage, SavedViews } from "./SalesWorkspace";
 import { ReportBuilderPage } from "./ReportBuilder";
 import { SequenceBuilderPage } from "./SequenceBuilder";
 import { MailboxPage, RecordMailbox } from "./Mailbox";
+import { CustomFields } from "./CustomFields";
+import { WorkflowBuilderPage } from "./WorkflowBuilder";
+import { OutlookCalendar } from "./OutlookCalendar";
 import { FeatureAvailability } from "./FeatureAvailability";
 import { BrandMark, ThemeToggle, useTheme } from "./theme";
 import { DEMO_LOGIN, DEMO_USER, demoApiFetch, isDemoUser } from "./demo";
@@ -906,6 +909,10 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [detailRecord, setDetailRecord] = useState(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterValues, setFilterValues] = useState({});
+  const [customDefs, setCustomDefs] = useState([]);
+  useEffect(() => { let live = true; apiFetch('/studio/fields/' + endpoint.slice(1)).then(rows => live && setCustomDefs(rows.filter(f => !['relate', 'formula'].includes(f.fieldType)))).catch(() => live && setCustomDefs([])); return () => { live = false; }; }, [apiFetch, endpoint]);
+  filterDefs = [...(filterDefs || []), ...customDefs.map(f => ({ key: 'custom.' + f.name, label: f.label, type: 'text' }))];
+  columns = [...columns, ...customDefs.slice(0, 4).map(f => ({ key: 'custom.' + f.name, label: f.label, render: v => { return Array.isArray(v) ? v.join(', ') : String(v ?? '—'); } }))];
   const [viewMode, setViewMode] = useState("list");
   const [sortField, setSortField] = useState(null);
   const [sortDir, setSortDir] = useState("desc");
@@ -1036,6 +1043,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
           {detailExtras?.(detailRecord, () => { apiFetch(`${endpoint}/${detailRecord.id}`).then(setDetailRecord).catch(e => setToast({ message: e.message, type: "error" })); load(); })}
         </React.Fragment>
         <RelatedRecords record={detailRecord} />
+        {customDefs.length > 0 && <CustomFields module={endpoint.slice(1)} recordId={detailRecord.id} />}
         <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
           title={`Edit ${title.slice(0, -1)}`}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
@@ -3619,6 +3627,9 @@ function parseCsv(text) {
   row.push(field);
   if (row.some(v => v !== "")) rows.push(row);
   const [header = [], ...body] = rows;
+  if (quoted) throw new Error("A quoted CSV field was not closed");
+  if (header.some(h => !h.trim()) || new Set(header.map(h => h.trim())).size !== header.length) throw new Error("Every column needs a unique, non-empty heading");
+  if (body.some(r => r.length !== header.length)) throw new Error("Each row must have the same number of columns as the headings");
   return { header: header.map(h => h.trim()), rows: body.map(r => Object.fromEntries(header.map((h, i) => [h.trim(), (r[i] ?? "").trim()]))) };
 }
 
@@ -3640,6 +3651,7 @@ function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const input = useRef(null);
+  const [overrides, setOverrides] = useState({}), [duplicateMode, setDuplicateMode] = useState('skip'), [previewPage, setPreviewPage] = useState(1);
 
   useEffect(() => { apiFetch('/import/metadata').then(setMeta).catch(() => setMeta(null)); }, [apiFetch]);
   const fields = meta?.metadata?.[module]?.availableFields || [];
@@ -3649,16 +3661,18 @@ function ImportPage() {
   const squash = v => String(v).toLowerCase().replace(/[^a-z0-9]/g, "");
   const mapping = useMemo(() => {
     const byName = new Map(fields.map(f => [squash(f), f]));
-    return Object.fromEntries((file?.header || []).map(h => [h, byName.get(squash(h)) || null]));
-  }, [file, fields]);
+    return { ...Object.fromEntries((file?.header || []).map(h => [h, byName.get(squash(h)) || null])), ...overrides };
+  }, [file, fields, overrides]);
   const records = useMemo(() => (file?.rows || []).map(r =>
     Object.fromEntries(Object.entries(r).filter(([h, v]) => mapping[h] && v !== "").map(([h, v]) => [mapping[h], v]))), [file, mapping]);
   const unmatched = Object.entries(mapping).filter(([, f]) => !f).map(([h]) => h);
   const missing = required.filter(f => !Object.values(mapping).includes(f));
+  const mappedTwice = Object.values(mapping).filter(Boolean).some((f, i, all) => all.indexOf(f) !== i);
 
   const choose = async (picked) => {
     if (!picked) return;
     setCheck(null); setResult(null);
+    setOverrides({}); setPreviewPage(1);
     try {
       const parsed = parseCsv(await picked.text());
       if (!parsed.rows.length) throw new Error("The file has a header row but no records");
@@ -3672,36 +3686,49 @@ function ImportPage() {
     for (let i = 0; i < records.length; i += IMPORT_BATCH) {
       const d = await apiFetch(path, { method: "POST", body: { module, records: records.slice(i, i + IMPORT_BATCH), ...body } });
       total = add(total, d, i);
+      if (path === '/import/execute') setResult(total);
     }
     return total;
   };
   const validate = async () => {
-    setBusy(true); setResult(null);
+    setBusy(true); setResult(null); setCheck(null);
     try {
-      setCheck(await inBatches("/import/validate", {}, (t, d, offset) => ({
+      const checked = await inBatches("/import/validate", { updateDuplicates: duplicateMode === 'update' }, (t, d, offset) => ({
         errorCount: (t?.errorCount || 0) + (d.errorCount || 0),
         warningCount: (t?.warningCount || 0) + (d.warningCount || 0),
-        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
-      })));
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))],
+        duplicateCount: (t?.duplicateCount || 0) + (d.duplicateCount || 0),
+        duplicates: [...(t?.duplicates || []), ...(d.duplicates || []).map(e => ({ ...e, row: e.row + offset, firstRow: e.firstRow ? e.firstRow + offset : undefined }))],
+      }));
+      // File duplicates can cross request boundaries; database matches come from the server.
+      const duplicates = new Map(checked.duplicates.filter(d => d.kind === 'existing').map(d => [d.row, d]));
+      const seen = new Map(), field = meta.metadata[module].dedupeFields[0];
+      records.forEach((record, i) => {
+        const key = String(record[field] || '').trim().toLowerCase();
+        if (key && seen.has(key) && !duplicates.has(i + 1)) duplicates.set(i + 1, { row: i + 1, field, value: record[field], kind: 'file', firstRow: seen.get(key) });
+        if (key && !seen.has(key)) seen.set(key, i + 1);
+      });
+      setCheck({ ...checked, duplicateCount: duplicates.size, duplicates: [...duplicates.values()].sort((a, b) => a.row - b.row) });
     } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
   };
   const run = async () => {
     setBusy(true);
+    setResult({ created: 0, updated: 0, skipped: 0, errors: [] });
     try {
-      setResult(await inBatches("/import/execute", { skipDuplicates: true }, (t, d, offset) => ({
+      setResult(await inBatches("/import/execute", { skipDuplicates: true, updateDuplicates: duplicateMode === 'update' }, (t, d, offset) => ({
         created: (t?.created || 0) + (d.created || 0),
         updated: (t?.updated || 0) + (d.updated || 0),
         skipped: (t?.skipped || 0) + (d.skipped || 0),
-        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))].slice(0, 20),
+        errors: [...(t?.errors || []), ...(d.errors || []).map(e => ({ ...e, row: e.row + offset }))],
       })));
-    } catch (e) { setToast({ message: e.message, type: "error" }); } finally { setBusy(false); }
+    } catch (e) { setToast({ message: 'Import stopped: ' + e.message + '. Completed batches are shown below; check existing records before retrying this file.', type: "error" }); } finally { setBusy(false); }
   };
 
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Import Data</h1>
-      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 max-w-lg space-y-4">
-        <Select label="Module" value={module} onChange={v => { setModule(v); setCheck(null); setResult(null); }} options={meta?.modules || ['contacts','leads','accounts','products']} />
+      <div className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 sm:p-6 space-y-4">
+        <Select label="Module" disabled={busy} value={module} onChange={v => { setModule(v); setOverrides({}); setCheck(null); setResult(null); }} options={meta?.modules || ['contacts','leads','accounts','products']} />
         {required.length > 0 && <p className="text-xs text-[#7E8598]">Required columns: {required.join(", ")}. Other columns: {fields.filter(f => !required.includes(f)).join(", ")}.</p>}
         <div {...clickable(() => input.current?.click(), "Choose a CSV file")}
           onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); choose(e.dataTransfer.files?.[0]); }}
@@ -3713,10 +3740,14 @@ function ImportPage() {
         </div>
         {file && unmatched.length > 0 && <p className="text-xs text-[#FBBF24]">Not imported (no matching field): {unmatched.join(", ")}</p>}
         {file && missing.length > 0 && <p className="text-xs text-[#F87171]">Missing required column{missing.length > 1 ? "s" : ""}: {missing.join(", ")}</p>}
+        {file && <><h2 className="font-semibold">1. Map columns</h2><div className="grid sm:grid-cols-3 gap-3">{file.header.map(h => <Select key={h} label={h} disabled={busy} value={mapping[h] || ''} placeholder="Skip column" options={fields.map(value => ({ value, label: meta?.metadata?.[module]?.labels?.[value] || value }))} onChange={value => { setOverrides(v => ({ ...v, [h]: value || null })); setCheck(null); setResult(null); }} />)}</div>{mappedTwice && <p role="alert">Map each destination field only once.</p>}
+        <h2 className="font-semibold">2. Preview and correct rows</h2><p className="text-xs">Row numbers refer to data rows, excluding the heading. Editing a value requires a new check.</p><div className="overflow-auto"><table className="w-full text-xs"><thead><tr><th>Row</th>{file.header.map(h => <th key={h}>{h} → {mapping[h] || 'Skipped'}</th>)}</tr></thead><tbody>{file.rows.slice((previewPage - 1) * 20, previewPage * 20).map((r, i) => { const index = (previewPage - 1) * 20 + i; return <tr key={index}><td>{index + 1}</td>{file.header.map(h => <td key={h}><input aria-label={'Row ' + (index + 1) + ' ' + h} disabled={busy} className="bg-[#0E1630] rounded p-2 min-w-32" value={r[h]} onChange={e => { const value = e.target.value; setFile(f => ({ ...f, rows: f.rows.map((row, j) => j === index ? { ...row, [h]: value } : row) })); setCheck(null); setResult(null); }} /></td>)}</tr>; })}</tbody></table></div><div className="flex gap-2"><Button variant="secondary" disabled={previewPage <= 1} onClick={() => setPreviewPage(p => p - 1)}>Previous rows</Button><span>Page {previewPage} of {Math.ceil(file.rows.length / 20)}</span><Button variant="secondary" disabled={previewPage * 20 >= file.rows.length} onClick={() => setPreviewPage(p => p + 1)}>Next rows</Button></div>
+        <h2 className="font-semibold">3. Review duplicates and import</h2><Select label="When a duplicate is found" value={duplicateMode} disabled={busy} options={[{ value: 'skip', label: 'Keep existing record and skip this row' }, { value: 'update', label: 'Update matching records I can edit' }]} onChange={v => { setDuplicateMode(v); setCheck(null); setResult(null); }} /></>}
         {check && (
           <div className="text-xs space-y-1">
             <div className={check.errorCount ? "text-[#F87171]" : "text-[#34D399]"}>{check.errorCount ? `${check.errorCount} problem${check.errorCount > 1 ? "s" : ""} found` : "No problems found"}{check.warningCount ? `, ${check.warningCount} warning${check.warningCount > 1 ? "s" : ""}` : ""}</div>
             {check.errors.map((e, i) => <div key={i} className="text-[#7E8598]">Row {e.row}: {e.message} ({e.field})</div>)}
+            <div>{check.duplicateCount || 0} duplicates found{duplicateMode === 'update' ? ' for update' : ' to skip'}.</div>{check.duplicates?.slice(0, 50).map((d, i) => <div key={i}>Row {d.row}: {d.value} matches {d.kind === 'file' ? 'file row ' + d.firstRow : 'an existing record'}.</div>)}
           </div>
         )}
         {result && (
@@ -3726,8 +3757,8 @@ function ImportPage() {
           </div>
         )}
         <div className="flex gap-2">
-          <Button variant="secondary" fullWidth onClick={validate} disabled={!file || busy || missing.length > 0}>Check file</Button>
-          <Button fullWidth onClick={run} disabled={!file || busy || missing.length > 0 || !check || check.errorCount > 0}>Start Import</Button>
+          <Button variant="secondary" fullWidth onClick={validate} disabled={!file || busy || missing.length > 0 || mappedTwice}>Check file</Button>
+          <Button fullWidth onClick={run} disabled={!file || busy || !!result || mappedTwice || missing.length > 0 || !check || check.errorCount > 0}>Start Import</Button>
         </div>
       </div>
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
@@ -3826,6 +3857,7 @@ function CalendarPage() {
 
   return (
     <div>
+      <details className="mb-4 rounded-lg border border-[#182550] p-3"><summary className="cursor-pointer">Outlook meetings and calendar sync</summary><OutlookCalendar /></details>
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2">
@@ -6390,7 +6422,7 @@ function AppShell({ go }) {
     customObjects: CustomObjectsPage, aiAgents: AiAgentsPage,
     flowBuilder: FlowBuilderPage, marketplace: MarketplacePage,
     forecasts: ForecastsPage, cases: CasesPage, knowledge: KnowledgePage,
-    workflows: WorkflowsPage, search: GlobalSearchPage,
+    workflows: WorkflowBuilderPage, search: GlobalSearchPage,
     settings: SettingsPage, admin: AdminDashboardPage,
     reports: ReportBuilderPage, surveys: SurveysPage, territories: TerritoriesPage,
     documents: DocumentsPage, tags: TagsPage, webhooks: WebhooksPage,

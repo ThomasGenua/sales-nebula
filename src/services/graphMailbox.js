@@ -43,7 +43,7 @@ async function getAccessToken(prisma, account, { force = false } = {}) {
     throw err;
   }
 
-  const tokens = await graph.refreshAccessToken({ ...credentials(account), refreshToken });
+  const tokens = await graph.refreshAccessToken({ ...credentials(account), refreshToken, ...(account.oauthScopes && { scope: account.oauthScopes }) });
   await prisma.inboundEmailAccount.update({
     where: { id: account.id },
     data: {
@@ -69,8 +69,9 @@ async function withToken(prisma, account, fn) {
 }
 
 /** Store the tokens from a completed consent redirect. */
-async function connect(prisma, account, { code, redirectUri, codeVerifier }) {
-  const tokens = await graph.exchangeCode({ ...credentials(account), code, redirectUri, ...(codeVerifier && { codeVerifier }) });
+async function connect(prisma, account, { code, redirectUri, codeVerifier, calendar = false }) {
+  const scope = graph.MAIL_SCOPES + (calendar ? ' https://graph.microsoft.com/Calendars.ReadWrite' : '');
+  const tokens = await graph.exchangeCode({ ...credentials(account), code, redirectUri, scope, ...(codeVerifier && { codeVerifier }) });
   const profileRequest = graph.getProfile({
     accessToken: tokens.accessToken,
     mailboxAddress: account.ownerId ? null : account.mailboxAddress,
@@ -88,6 +89,8 @@ async function connect(prisma, account, { code, redirectUri, codeVerifier }) {
       oauthAccessToken: encrypt(tokens.accessToken),
       oauthRefreshToken: tokens.refreshToken ? encrypt(tokens.refreshToken) : account.oauthRefreshToken,
       oauthExpiresAt: tokens.expiresAt,
+      oauthScopes: tokens.scope || scope,
+      calendarEnabled: calendar && !!tokens.scope?.includes('Calendars.ReadWrite'),
       mailboxAddress: account.mailboxAddress || profile?.mail || profile?.userPrincipalName || null,
       status: 'Idle',
       lastError: null,

@@ -98,12 +98,14 @@ router.get('/', requirePermission('invoices', 'read'), async (req, res, next) =>
     Object.assign(where, scalarWhere('invoice', filters));
     // Invoices the caller may see, sorted on one of an invoice's own columns.
     where = await reachableWhere(req, 'invoices', 'invoice', where);
+    where = { AND: [where, await require('../services/customFields').filterWhere(prisma, 'invoices', Object.entries(req.query).map(([field, value]) => ({ field, value })))] };
     const [invoices, total] = await Promise.all([
       prisma.invoice.findMany({ where, include, orderBy: scalarOrderBy('invoice', sortBy, sortDir) || { createdAt: 'desc' }, skip, take }),
       prisma.invoice.count({ where }),
     ]);
     // Linked records as far as the caller may see them, as the CRUD lists do.
     await visibleLinks(req, 'invoice', invoices, include);
+    await require('../services/customFields').hydrate(prisma, 'invoices', invoices);
     res.json({ data: invoices, meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) } });
   } catch (err) { next(err); }
 });

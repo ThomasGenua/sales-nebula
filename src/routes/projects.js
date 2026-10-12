@@ -118,7 +118,7 @@ router.get('/', authenticate, async (req, res, next) => {
     if (accountId) where.accountId = accountId;
     if (mine === 'true') and.push({ OR: [{ managerId: req.user.id }, { ownerId: req.user.id }, { resources: { some: { userId: req.user.id } } }] });
     if (and.length) where.AND = and;
-    const visible = await reachableWhere(req, 'projects', 'project', where);
+    const visible = { AND: [await reachableWhere(req, 'projects', 'project', where), await require('../services/customFields').filterWhere(prisma, 'projects', Object.entries(req.query).map(([field, value]) => ({ field, value })))] };
 
     const [data, total] = await Promise.all([
       prisma.project.findMany({
@@ -129,6 +129,7 @@ router.get('/', authenticate, async (req, res, next) => {
       }),
       prisma.project.count({ where: visible }),
     ]);
+    await require('../services/customFields').hydrate(prisma, 'projects', data);
     res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });

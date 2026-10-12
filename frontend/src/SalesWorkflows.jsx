@@ -2,6 +2,7 @@ import React, { useCallback, useContext, useEffect, useRef, useState } from 'rea
 import { Button, Input, Select, TextArea, Modal } from './Controls';
 import { useAuth, can, RouteContext } from './contexts';
 import { money } from './prefs';
+import { QuoteSharing } from './QuoteSharing';
 
 const panel = 'mt-4 p-4 rounded-xl bg-[#0B1228] border border-[#182550]';
 const rowsOf = value => value?.data || (Array.isArray(value) ? value : []);
@@ -195,6 +196,7 @@ export function QuoteActions({ record, onChanged }) {
     </div>
     {invoice && <p role="status" className="text-sm mt-3">Invoice created with {invoice.items?.length || 0} product lines. Total: {money(invoice.total)}.</p>}
     <Problem message={acceptOpen ? null : error} />
+    <QuoteSharing record={record} />
     <Modal open={acceptOpen} onClose={() => { if (!busy) setAcceptOpen(false); }} title="Record quote acceptance">
       <p className="text-sm mb-4">Confirm that the customer has accepted this quote.</p>
       <Problem message={error} />
