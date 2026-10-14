@@ -18,6 +18,11 @@ All notable changes to Sales Nebula CRM.
 - The Recycle Bin has a sidebar entry. Restore shows only to those who may restore.
 - The forecast refresh adds the owner's deals that have come into the period since the forecast was made.
 
+### Rules on edits, and the AI model
+- Duplicate rules also run when an edit changes a field one matches on, so changing a contact's email to a colleague's is refused under a blocking rule. An edit of anything else goes through, even on a record that already is a duplicate. A warning rule queues a pair for review once, however often it is edited.
+- Duplicate rules match text regardless of case, on create too: `Ada@example.com` is a duplicate of `ada@example.com`.
+- AI calls default to Claude Opus 5.5 (`ANTHROPIC_MODEL` still overrides it).
+
 ### Documentation
 - The "132/132 Salesforce feature parity" claim is withdrawn: it was never true. [Feature status](FEATURE_STATUS.md) now says what works, what is limited, what answers 501 and what is not built.
 - The README, product overview, architecture guide and API reference were corrected against the code, including their model, endpoint, page and test counts.

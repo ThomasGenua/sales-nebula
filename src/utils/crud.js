@@ -229,14 +229,17 @@ function createCrudRouter(modelName, moduleName, options = {}) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      const { record } = await updateRecord(prisma, moduleName, oldRecord, data, {
+      const { record, duplicates } = await updateRecord(prisma, moduleName, oldRecord, data, {
         req, userId: req.userId, include, hydrate: updated => hydrateIncludes(prisma, updated, manualIncludes),
       });
 
       // As for create: linked records as the caller may see them, in the response only.
       const body = { ...record };
       await visibleLinks(req, modelName, body, requestedInclude);
-      res.json(body);
+      res.json({
+        ...body,
+        ...(duplicates.length ? { warnings: [`Possible duplicate of ${duplicates.length} existing record(s).`], duplicates } : {}),
+      });
     } catch (err) { next(err); }
   });
 

@@ -89,8 +89,8 @@ activation, pausing, enrollment and delivery status.
 
 **One write path** -- Every save of a module's records, from a screen, an
 import, the bulk API, a job or a conversion, runs the same rules: validation
-on every save, duplicate and assignment rules on create, then audit,
-workflows and webhooks.
+on every save, duplicate rules on create and on an edit of a field they
+match on, assignment rules on create, then audit, workflows and webhooks.
 
 **Workflows** -- Run on create, update, status change or a schedule, and
 update fields, create tasks, notify people or send email.

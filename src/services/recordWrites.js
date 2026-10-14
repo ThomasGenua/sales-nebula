@@ -300,7 +300,8 @@ async function createRecord(db, moduleName, input, ctx = {}) {
 
 /**
  * Change a record: `target` is its id, or the record as it stands when the
- * caller has already read it. Returns { record, oldRecord, changes }.
+ * caller has already read it. Returns { record, oldRecord, changes, duplicates },
+ * duplicates being those a warning rule let through.
  */
 async function updateRecord(db, moduleName, target, input, ctx = {}) {
   const { modelName, hooks } = moduleDefinition(moduleName);
@@ -326,6 +327,22 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   for (const [key, value] of Object.entries(updateData)) {
     if (value === Prisma.DbNull && oldRecord[key] === null) delete updateData[key];
   }
+
+  // Duplicate rules ran on create only, so changing a contact's email to a
+  // colleague's made the copy a blocking rule exists to stop. They run when
+  // an update changes a field a rule matches on (as the audit diff counts a
+  // change: a value sent back unchanged is none).
+  const changes = diffFields(oldRecord, updateData);
+  const changed = new Set(changes.map(c => c.field));
+  const duplicates = changed.size ? await findDuplicates(db, moduleName, { ...oldRecord, ...updateData }, { excludeId: oldRecord.id, changed }) : [];
+  const blocking = duplicates.filter(d => d.action === 'block');
+  if (blocking.length) {
+    throw new RecordWriteError(409, {
+      error: `This looks like a duplicate of an existing ${moduleName.replace(/s$/, '')}.`,
+      code: 'DUPLICATE_RECORD',
+      duplicates: blocking,
+    });
+  }
   if (ctx.req) {
     const { linkRefusal } = require('../middleware/access');
     const problem = await linkRefusal(ctx.req, modelName, updateData, oldRecord, ctx.linkCache);
@@ -336,9 +353,9 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   if (hooks.afterUpdate) await hooks.afterUpdate(record, hookContext(db, ctx, oldRecord));
   if (ctx.hydrate) await ctx.hydrate(record);
 
-  // Field-level audit, of the values written: the form sends the whole
-  // record back as text, so diffing the body logged every number as changed.
-  const changes = diffFields(oldRecord, updateData);
+  // Field-level audit (`changes`, above), of the values written: the form
+  // sends the whole record back as text, so diffing the body logged every
+  // number as changed.
   // A status or stage move is its own trigger, so a rule does not have to
   // re-derive "did this change" from conditions.
   const moved = ['status', 'stage'].some(f => oldRecord[f] !== undefined && oldRecord[f] !== record[f]);
@@ -355,9 +372,10 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
       await fireWebhook(prisma, `${moduleName}.stage_changed`, { id: record.id, module: moduleName, from: oldRecord.stage, to: record.stage });
     }
+    if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
   });
 
-  return { record, oldRecord, changes };
+  return { record, oldRecord, changes, duplicates };
 }
 
 // ─── DELETE ───
