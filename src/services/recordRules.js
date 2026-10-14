@@ -130,7 +130,7 @@ async function applyAssignmentRules(prisma, moduleName, data) {
  * available weight that matched, so a rule with one field at weight 100 and a
  * matching email scores 100.
  */
-async function findDuplicates(prisma, moduleName, data, { excludeId, changed } = {}) {
+async function findDuplicates(prisma, moduleName, data, { exclude = [], changed } = {}) {
   const modelName = resolveModel(moduleName);
   if (!modelName) return [];
 
@@ -153,7 +153,7 @@ async function findDuplicates(prisma, moduleName, data, { excludeId, changed } =
     if (!present.length) continue;
 
     const where = {};
-    if (excludeId) where.id = { not: excludeId };
+    if (exclude.length) where.id = { notIn: exclude };
     if (modelHasField(modelName, 'deletedAt')) where.deletedAt = null;
 
     // Text is looked up regardless of case, as the score below compares it:

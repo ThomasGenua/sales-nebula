@@ -124,7 +124,7 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
     // overrides went to Prisma whole.
     if (fieldOverrides && Object.keys(fieldOverrides).length > 0) {
       const { deletedAt, ...overrides } = columnsFrom(modelName, fieldOverrides);
-      await updateRecord(prisma, module, master, overrides, { req, userId: req.userId, source: 'duplicate merge' });
+      await updateRecord(prisma, module, master, overrides, { req, userId: req.userId, source: 'duplicate merge', mergingWith: mergeIds });
     }
 
     // Reassign child records from merge targets to master. An account's

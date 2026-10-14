@@ -35,6 +35,9 @@
  *           than run, for runAfter once the transaction commits (a workflow
  *           that emails cannot be rolled back, and it would read rows that
  *           are not there yet). `prisma` is then the client it runs on.
+ *   mergingWith  on an update, the ids of records being merged into this
+ *           one: not duplicates of it, though they are still there while
+ *           it takes their values
  */
 
 const { Prisma } = require('@prisma/client');
@@ -336,7 +339,8 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   // change: a value sent back unchanged is none).
   const changes = diffFields(oldRecord, updateData);
   const changed = new Set(changes.map(c => c.field));
-  const duplicates = changed.size ? await findDuplicates(db, moduleName, { ...oldRecord, ...updateData }, { excludeId: oldRecord.id, changed }) : [];
+  const exclude = [oldRecord.id, ...(ctx.mergingWith || [])];
+  const duplicates = changed.size ? await findDuplicates(db, moduleName, { ...oldRecord, ...updateData }, { exclude, changed }) : [];
   const blocking = duplicates.filter(d => d.action === 'block');
   if (blocking.length) {
     throw new RecordWriteError(409, {

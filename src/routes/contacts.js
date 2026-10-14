@@ -74,7 +74,7 @@ const router = createCrudRouter('contact', 'contacts', {
         // An accountId among them was stored as sent, so the merge could file
         // the contact on an account the caller cannot see (the write checks it).
         // The survivor changes as an edit would (services/recordWrites).
-        if (Object.keys(data).length) await updateRecord(prisma, 'contacts', primaryId, data, { req, userId: req.userId, source: `merge of ${mergeId}` });
+        if (Object.keys(data).length) await updateRecord(prisma, 'contacts', primaryId, data, { req, userId: req.userId, source: `merge of ${mergeId}`, mergingWith: [mergeId] });
 
         // Re-link all relations from merged record to primary. Its quotes,
         // invoices, documents, contracts and campaign sends were left, and the
