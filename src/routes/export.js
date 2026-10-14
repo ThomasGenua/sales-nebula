@@ -30,6 +30,9 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { module, format = 'json', filters, fields, limit = 10000, includeDeleted } = req.body;
     if (!module || !EXPORTABLE_MODULES[module]) return res.status(400).json({ error: `Invalid module. Options: ${Object.keys(EXPORTABLE_MODULES).join(', ')}` });
+    // Anything but csv came back as JSON, labelled with the format asked for:
+    // an "xlsx" export was JSON. /api/data-export refuses the same way.
+    if (!['csv', 'json'].includes(format)) return res.status(400).json({ error: 'format must be csv or json; Excel export is not available' });
     if (!permits(req, module, 'read')) return res.status(403).json({ error: `Insufficient permissions for ${module}` });
     const modelName = EXPORTABLE_MODULES[module];
     const filter = {};

@@ -33,7 +33,7 @@ Something can be missing in three ways:
 | Sales workspace | My Day queues, atomic completion and follow-ups, a pipeline board with stage age and next actions, saved list views, and creation from related lists. See [setup and behavior](SALES_WORKSPACE.md). |
 | Webhooks | Outbound, signed with HMAC-SHA256, retried, with delivery logs. |
 | Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. Quotes have generated PDFs, expiring/revocable customer links, and version-checked online acceptance receipts. Invoice previews remain HTML. |
-| Forecasts | Built from the owner's open deals in the period and refreshed every 4 hours; quotas are entered by hand. Deals that move into the period later are not added. |
+| Forecasts | Built from the owner's open deals in the period and refreshed every 4 hours, which also adds the owner's deals that have come into the period since; quotas are entered by hand. |
 | Reports | The report builder supports columns, filters, grouping, measures, charts, shared definitions and drilldown into accessible records. The screen exports displayed rows or groups as CSV; the API exports detail rows as CSV or JSON. Sales performance uses actual deal history. |
 | Calendar, projects, SLA | Recurring events with invitees and an iCal feed; personal Outlook calendar delta sync, attendee/reminder updates, explicit publication and conflict handling; projects with a critical path; SLA timers that count business hours only. |
 | Search | Global search across modules, matching substrings. |
@@ -52,7 +52,7 @@ Something can be missing in three ways:
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
 | Campaigns | Planning, members, recipients, responses, ROI. Attribution models computed from the campaign touches you enter. | Bulk sending (501). Nothing creates touches from campaign members. |
 | Import | CSV mapping, editable row preview, duplicate review/skip/update, per-row errors, and atomic custom values with each row. | Excel files; a whole-file rollback. |
-| Export | CSV and JSON. | Excel. Scheduled exports are saved and never run. |
+| Export | CSV and JSON. | Excel (asking for it is refused). Scheduled exports are saved and never run. |
 | Custom objects | Define objects and fields, and store records, through the API. | Records are not checked against their field definitions. The screen edits object definitions only: no fields or records. |
 | Custom fields (Studio) | Definitions, picklists, typed record forms, list equality filters, report fields/measures/exports, and import mapping. Required custom values are checked on their form and imports. | Formula and related-record types; required custom values on the standard create form. |
 | Formula fields | Evaluated on request (`/api/formulas/evaluate`). | Not computed on records; no cross-object references; no screen. |
@@ -71,14 +71,14 @@ Something can be missing in three ways:
 | Email status | "sent" when a mail server took the message. | Without SMTP an email is logged and shown as **not sent**; nothing sends it later. Opens are not tracked. |
 | Sales path, person accounts | Work through the API. | No screens. |
 | Full-text search index | Ranked search with phrase, exclusion and field syntax (`/api/search-index`). | It is filled by explicit indexing calls, not when a record is saved, so it falls behind; the app's search box does not use it. |
-| Audit log | Every record write through the write path, and the actions routes log themselves. | Entries are deleted after 90 days. Some administrative changes are not audited (deleting a user, MFA and SSO settings, `/api/configuration`, flows, saved views, CDP, platform events), and a write with no signed-in user, such as a web form or a job, records no entry. |
+| Audit log | Every record write through the write path, and the actions routes log themselves. | Entries are deleted after 90 days. Some administrative changes are not audited (`/api/configuration`, flows, saved views, CDP, platform events), and a write with no signed-in user, such as a web form or a job, records no entry. |
 | Monitoring | Login history, and sign-in figures for the last 24 hours. | Nothing writes event logs, so event lists are empty and API-call and error counts read 0. |
 | Recycle bin | Restoring a deleted record within 30 days. | The deleted row stays in its table until an administrator purges deleted records. No search. |
 | Duplicate rules | Checked when a record is created; merge for contacts, leads and accounts. | Not checked on update. `auto_merge` only warns. |
 | Consent | Consent per contact/type for signed-in users, plus public signed unsubscribe links on sequence emails. | A general public consent-preference center. |
 | Customer portal | One configuration with branding; portal logins for contacts, created by an administrator. | Self-registration; portals for partners or employees (the portal type is a label). |
 | Timeline | A record's own activities, emails, notes, cases, changes and posts. | Items from child records (an account's contacts or deals); quotes, invoices and events. |
-| Scheduler | Booking with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; editing skips the overlap check; "availability" only says who is busy now. |
+| Scheduler | Booking and changing appointments, with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; "availability" only says who is busy now. |
 | Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. Pipeline board totals and monetary builder groups keep currencies separate. | Only deals have a currency. Arbitrary API reports can still aggregate unconverted amounts. No rate history. |
 | Revenue recognition | Schedules split evenly by month. | Periods are recognized by hand; the recognition method is ignored. |
 | Flows | Flows can be designed and saved. | Nothing runs them: run, test, activate and publish (501). |

@@ -43,6 +43,35 @@ function ownAppointments(req) {
 
 const mayRead = (req, apt) => isAdmin(req.user) || apt.assignedToId === req.user.id || apt.ownerId === req.user.id;
 
+/**
+ * Why `startTime` to `endTime` is not a bookable span, or null: both must be
+ * dates, the end after the start. An unreadable date failed in the database
+ * (500), and an end before the start was booked and then never clashed.
+ */
+function spanProblem(s, e) {
+  if (isNaN(s) || isNaN(e)) return 'Invalid date format';
+  if (e <= s) return 'endTime must be after startTime';
+  return null;
+}
+
+/** The host's live appointments overlapping s to e, other than `exceptId`. */
+function conflictsWith(prisma, assignedToId, s, e, exceptId) {
+  return prisma.appointment.findMany({
+    where: {
+      assignedToId, status: { not: 'Cancelled' }, deletedAt: null,
+      startTime: { lt: e }, endTime: { gt: s },
+      ...(exceptId && { id: { not: exceptId } }),
+    },
+  });
+}
+
+// Someone else's appointment shows as busy time; booking against a colleague
+// returned their subjects.
+const conflictAnswer = (req, conflicts) => ({
+  error: 'Time conflict with existing appointment',
+  conflicts: conflicts.map(c => ({ id: c.id, subject: mayRead(req, c) ? c.subject : 'Busy', startTime: c.startTime, endTime: c.endTime })),
+});
+
 // List appointments
 router.get('/', authenticate, async (req, res, next) => {
   try {
@@ -70,26 +99,14 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { subject, startTime, endTime, contactId, accountId, type, location, notes } = req.body;
     if (!subject || !startTime || !endTime) return res.status(400).json({ error: 'subject, startTime, endTime required' });
-    // An unreadable date failed in the database (500), and an end before the
-    // start was booked, and then never clashed with anything.
     const s = new Date(startTime), e = new Date(endTime);
-    if (isNaN(s) || isNaN(e)) return res.status(400).json({ error: 'Invalid date format' });
-    if (e <= s) return res.status(400).json({ error: 'endTime must be after startTime' });
+    const bad = spanProblem(s, e);
+    if (bad) return res.status(400).json({ error: bad });
     // Only on a contact and account the caller can see (see linkProblem).
     const refusal = await linkProblem(req, { contactId, accountId });
     if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
-    // Conflict check
-    const conflicts = await prisma.appointment.findMany({
-      where: {
-        assignedToId: req.body.assignedToId || req.user.id, status: { not: 'Cancelled' }, deletedAt: null,
-        OR: [
-          { startTime: { lt: e }, endTime: { gt: s } },
-        ],
-      },
-    });
-    // Someone else's appointment shows as busy time; booking against a
-    // colleague returned their subjects.
-    if (conflicts.length) return res.status(409).json({ error: 'Time conflict with existing appointment', conflicts: conflicts.map(c => ({ id: c.id, subject: mayRead(req, c) ? c.subject : 'Busy', startTime: c.startTime, endTime: c.endTime })) });
+    const conflicts = await conflictsWith(prisma, req.body.assignedToId || req.user.id, s, e);
+    if (conflicts.length) return res.status(409).json(conflictAnswer(req, conflicts));
     // The booker owns it, so booking for a colleague does not lose it.
     const apt = await prisma.appointment.create({
       data: { subject, startTime: s, endTime: e, assignedToId: req.body.assignedToId || req.user.id, ownerId: req.user.id, contactId, accountId, type: type || 'Meeting', location, notes, status: 'Scheduled' },
@@ -103,7 +120,10 @@ router.post('/', authenticate, auditMiddleware, async (req, res, next) => {
 router.put('/:id', authenticate, auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const found = await prisma.appointment.findFirst({ where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) }, select: { id: true, contactId: true, accountId: true } });
+    const found = await prisma.appointment.findFirst({
+      where: { id: req.params.id, deletedAt: null, ...ownAppointments(req) },
+      select: { id: true, contactId: true, accountId: true, assignedToId: true, startTime: true, endTime: true, status: true },
+    });
     if (!found) return res.status(404).json({ error: 'Appointment not found' });
     // Its own columns, not whose it is: the body went to Prisma whole.
     const data = editableFields('appointment', req.body);
@@ -111,7 +131,23 @@ router.put('/:id', authenticate, auditMiddleware, async (req, res, next) => {
     // And a new contact or account only one the caller can see, as on create.
     const refusal = await linkProblem(req, data, found);
     if (refusal) return res.status(400).json({ error: refusal, code: 'LINK_NOT_VISIBLE' });
+    // A new time, or a cancelled appointment brought back, is held to what
+    // booking checks. An edit checked nothing, so moving a meeting could
+    // double-book its host, and a bad date was a 500.
+    if ('startTime' in data || 'endTime' in data || 'status' in data) {
+      const s = new Date(data.startTime ?? found.startTime), e = new Date(data.endTime ?? found.endTime);
+      const bad = spanProblem(s, e);
+      if (bad) return res.status(400).json({ error: bad });
+      if ((data.status ?? found.status) !== 'Cancelled') {
+        const conflicts = await conflictsWith(prisma, found.assignedToId, s, e, found.id);
+        if (conflicts.length) return res.status(409).json(conflictAnswer(req, conflicts));
+      }
+      if ('startTime' in data) data.startTime = s;
+      if ('endTime' in data) data.endTime = e;
+    }
     const apt = await prisma.appointment.update({ where: { id: found.id }, data });
+    // Booking and cancelling were audited; changing one was not.
+    await req.audit({ action: 'update', module: 'scheduler', recordId: apt.id, details: `Appointment: ${apt.subject}` });
     res.json(apt);
   } catch (err) { next(err); }
 });

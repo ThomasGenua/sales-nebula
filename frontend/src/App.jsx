@@ -3583,8 +3583,11 @@ function ChatterPage() {
 }
 
 // ── Recycle Bin ──
+// It had no sidebar entry, so only someone who knew /app/recycleBin found it.
+// Reading the bin takes settings: read, restoring settings: full.
 function RecycleBinPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, user } = useAuth();
+  const canRestore = can(user, "settings", "full");
   const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState(''); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
   useEffect(()=>{apiFetch('/recycle-bin/stats').then(setStats).catch(()=>{});},[apiFetch]);
   useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?module=${module}&limit=50`).then(d=>setItems(d.data||d||[])).catch(()=>setItems([])).finally(()=>setLoading(false));},[module,apiFetch]);
@@ -3594,7 +3597,7 @@ function RecycleBinPage() {
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Recycle Bin</h1>
       {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}</div></button>))}</div>}
       {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title="Empty" subtitle="Deleted items appear here for 30 days" />:(
-        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div><Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button></div>))}</div>)}
+        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div>{canRestore&&<Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button>}</div>))}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );
@@ -5930,6 +5933,7 @@ const NAV_ITEMS = [
         children: [
           { id: "import", label: "Import", icon: Upload },
           { id: "tags", label: "Tags", icon: Tag },
+          { id: "recycleBin", label: "Recycle Bin", icon: Recycle, requires: { module: "settings", level: "read" } },
           { id: "webhooks", label: "Webhooks", icon: Webhook, requires: { module: "settings", level: "read" } },
           { id: "studio", label: "Studio", icon: Wrench },
           { id: "securityGroups", label: "Security Groups", icon: Lock },

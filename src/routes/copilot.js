@@ -61,6 +61,9 @@ router.post('/chat', authenticate, limiters.ai, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const { message, threadId } = req.body;
     if (!message) return res.status(400).json({ error: 'message required' });
+    // With no model nothing can answer, so refuse before anything is saved:
+    // the question used to be kept, in a new thread if need be, unanswered.
+    if (!isConfigured()) throw new AiError(503, 'AI is not configured: ANTHROPIC_API_KEY is not set');
     // Create or continue thread
     let thread;
     if (threadId) {
@@ -75,10 +78,18 @@ router.post('/chat', authenticate, limiters.ai, async (req, res, next) => {
     // This used to answer every message with the same canned sentence,
     // claiming to use CRM data it never read. It now sends the thread to the
     // model, or says plainly that no model is configured.
-    const history = await prisma.copilotMessage.findMany({ where: { threadId: thread.id }, orderBy: { createdAt: 'asc' }, take: 50 });
+    // The newest 50, oldest first. This took the oldest 50, so past 50
+    // messages the question just asked was not sent and the model answered an
+    // old one. The API takes a user message first, so a reply cut off from its
+    // question at the window's start is left out, as is an empty reply.
+    const recent = await prisma.copilotMessage.findMany({ where: { threadId: thread.id }, orderBy: { createdAt: 'desc' }, take: 50 });
+    const history = recent.reverse()
+      .filter(m => m.content)
+      .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+    while (history[0]?.role === 'assistant') history.shift();
     const { text } = await complete({
       system: 'You are a CRM copilot assistant. Be concise and actionable.',
-      messages: history.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+      messages: history,
     });
     await prisma.copilotMessage.create({ data: { threadId: thread.id, role: 'assistant', content: text } });
     res.json({ threadId: thread.id, response: text });

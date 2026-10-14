@@ -204,7 +204,7 @@ router.delete('/:id', requirePermission('users', 'full'), async (req, res, next)
   try {
     const prisma = req.app.locals.prisma;
     if (req.params.id === req.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
-    const { status, error } = await manageableUser(req, req.params.id);
+    const { status, error, target } = await manageableUser(req, req.params.id);
     if (error) return res.status(status).json({ error });
     // Anyone who has signed in is referenced by their history (the audit log
     // at least), which the database will not orphan: that was a 500.
@@ -214,6 +214,8 @@ router.delete('/:id', requirePermission('users', 'full'), async (req, res, next)
       if (err.code !== 'P2003') throw err;
       return res.status(409).json({ error: 'This user has history in the system and cannot be deleted. Deactivate the account instead.', code: 'USER_HAS_HISTORY' });
     }
+    // Creating a user was audited and deleting one was not.
+    await req.audit({ action: 'delete', module: 'users', recordId: target.id, details: `Deleted user ${target.email}` });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
