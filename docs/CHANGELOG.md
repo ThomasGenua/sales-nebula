@@ -10,6 +10,14 @@ All notable changes to Sales Nebula CRM.
 - Flow Builder, AI Agents, Marketplace and Studio's custom fields say on the page what does not run. An email no mail server took shows as "not sent".
 - Chatter's like and comment buttons work. A webhook test goes only to the webhook being tested.
 
+### Fixes found while checking the docs
+- AI Copilot chat sends a conversation's newest 50 messages. It sent the oldest 50, so past 50 the question just asked was left out and the model answered an old one. With no model set up it refuses before saving anything.
+- Changing an appointment is checked as booking one is: no clash with the host's other appointments, real dates, the end after the start. It is also audited.
+- Deleting a user, changing an SSO configuration, and verifying or removing a two-factor device are audited.
+- `POST /api/export` refuses formats other than CSV and JSON; an "xlsx" export came back as JSON.
+- The Recycle Bin has a sidebar entry. Restore shows only to those who may restore.
+- The forecast refresh adds the owner's deals that have come into the period since the forecast was made.
+
 ### Documentation
 - The "132/132 Salesforce feature parity" claim is withdrawn: it was never true. [Feature status](FEATURE_STATUS.md) now says what works, what is limited, what answers 501 and what is not built.
 - The README, product overview, architecture guide and API reference were corrected against the code, including their model, endpoint, page and test counts.
