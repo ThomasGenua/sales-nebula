@@ -310,7 +310,7 @@ The tables below list the API modules, grouped the way Salesforce groups its clo
 | Consent | `/api/consent` | Consent records with opt-in and opt-out per contact, for signed-in users (there is no public opt-out link) |
 | Monitoring | `/api/monitoring` | Login history and 24-hour sign-in figures (nothing writes event logs yet) |
 | Admin Dashboard | `/api/admin/dashboard` | System health, record counts, security metrics, revenue pipeline, recent activity |
-| Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time), kept 90 days |
+| Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time; no user for a web form, inbound mail or a job), kept 90 days |
 | Recycle Bin | `/api/recycle-bin` | Restore deleted records within 30 days |
 | Duplicate Management | `/api/duplicates` | Duplicate rules checked when a record is created or an edit changes a field they match on; merge for contacts, leads and accounts |
 

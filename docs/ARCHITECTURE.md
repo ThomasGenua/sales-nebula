@@ -177,7 +177,7 @@ This enables zero-downtime deploys with rolling restarts.
 
 ### Logging
 
-Pino structured JSON logging with configurable levels. Request logs include method, URL, status code, response time, and user ID. Audit entries are written for every record write through the write path, and by the routes that log their own actions; a weekly job deletes entries older than 90 days. Some administrative changes are not audited yet (for example MFA and SSO settings), and a write with no signed-in user, such as a web form or a job, records no entry.
+Pino structured JSON logging with configurable levels. Request logs include method, URL, status code, response time, and user ID. Audit entries are written for every record write through the write path, and by the routes that log their own actions; a weekly job deletes entries older than 90 days. Some administrative changes are not audited yet (for example `/api/configuration`, flows and saved views). A write with no signed-in user, such as a web form or a job, is recorded with no user and its source in the details.
 
 ### Metrics
 

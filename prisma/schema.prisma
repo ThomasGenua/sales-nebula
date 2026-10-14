@@ -743,8 +743,12 @@ model AuditLog {
   module   String
   recordId String?
   details  String?
-  userId   String
-  user     User     @relation(fields: [userId], references: [id])
+  // Null for a change no signed-in person made: the web forms, inbound mail,
+  // the jobs. Those changes went unrecorded while this was required. Restrict
+  // keeps a person with entries from being deleted, so an entry never loses
+  // who made it.
+  userId   String?
+  user     User?    @relation(fields: [userId], references: [id], onDelete: Restrict)
   createdAt DateTime @default(now())
   @@index([userId])
 }
