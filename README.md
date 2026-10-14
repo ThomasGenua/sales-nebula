@@ -625,7 +625,7 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 |----------|-------------|
 | `REDIS_URL` | Redis connection string for caching and job queues |
 | `ANTHROPIC_API_KEY` | Anthropic API key (enables the AI endpoints and the Copilot) |
-| `ANTHROPIC_MODEL` | Claude model for every AI call (default `claude-opus-5`) |
+| `ANTHROPIC_MODEL` | Claude model for every AI call (default `claude-opus-5-5`) |
 
 **File Storage** (S3 or local fallback):
 
