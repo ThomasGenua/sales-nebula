@@ -3,6 +3,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { generateSecret, verifyTotp, otpAuthUrl } = require('../utils/totp');
 const bcrypt = require('bcryptjs');
 const { limiters } = require('../middleware/rateLimit');
+const { auditMiddleware } = require('../middleware/audit');
 const { queryWithIncludes, pickModelFields } = require('../utils/modelFields');
 const { statusRoutes } = require('../utils/moduleStatus');
 const { unavailable } = require('../utils/unavailable');
@@ -22,11 +23,22 @@ const ssoFields = body => {
 router.get('/sso', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
   try { res.json({ data: (await req.app.locals.prisma.ssoConfig.findMany()).map(presentSso) }); } catch (err) { next(err); }
 });
-router.post('/sso', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.status(201).json(presentSso(await req.app.locals.prisma.ssoConfig.create({ data: ssoFields(req.body) }))); } catch (err) { next(err); }
+// Changes to sign-in settings and to anyone's second factor are audited; none
+// of these routes wrote an entry. The entries name what changed, never a
+// secret or a code.
+router.post('/sso', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const config = await req.app.locals.prisma.ssoConfig.create({ data: ssoFields(req.body) });
+    await req.audit({ action: 'create', module: 'security', recordId: config.id, details: `SSO configuration created: ${config.name} (${config.provider})` });
+    res.status(201).json(presentSso(config));
+  } catch (err) { next(err); }
 });
-router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), async (req, res, next) => {
-  try { res.json(presentSso(await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: ssoFields(req.body) }))); } catch (err) { next(err); }
+router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const config = await req.app.locals.prisma.ssoConfig.update({ where: { id: req.params.id }, data: ssoFields(req.body) });
+    await req.audit({ action: 'update', module: 'security', recordId: config.id, details: `SSO configuration updated: ${config.name} (${config.provider})` });
+    res.json(presentSso(config));
+  } catch (err) { next(err); }
 });
 // SSO login endpoint
 /**
@@ -99,7 +111,7 @@ router.post('/mfa/enroll', authenticate, limiters.account, async (req, res, next
   } catch (err) { next(err); }
 });
 // Rate limited: a six-digit code can be guessed, given enough tries.
-router.post('/mfa/verify', authenticate, limiters.account, async (req, res, next) => {
+router.post('/mfa/verify', authenticate, limiters.account, auditMiddleware, async (req, res, next) => {
   try {
     const { deviceId, code } = req.body;
     const device = await req.app.locals.prisma.mfaDevice.findUnique({ where: { id: deviceId } });
@@ -114,6 +126,7 @@ router.post('/mfa/verify', authenticate, limiters.account, async (req, res, next
       }
     }
     await req.app.locals.prisma.mfaDevice.update({ where: { id: deviceId }, data: { verified: true, lastUsedAt: new Date() } });
+    await req.audit({ action: 'update', module: 'security', recordId: deviceId, details: 'Two-factor authentication device verified' });
     res.json({ verified: true });
   } catch (err) { next(err); }
 });
@@ -129,11 +142,12 @@ router.post('/mfa/challenge', limiters.auth, (req, res) => unavailable(res, 'MFA
   'Sending a sign-in code by SMS or email is not available. Use the code from your authenticator app. No code was sent.'));
 // Only the caller's own device. This deleted any account's device by id, so
 // anyone signed in could strip an administrator's second factor.
-router.delete('/mfa/devices/:id', authenticate, limiters.account, async (req, res, next) => {
+router.delete('/mfa/devices/:id', authenticate, limiters.account, auditMiddleware, async (req, res, next) => {
   try {
     if (!(await passwordConfirmed(req))) return passwordRequired(res);
     const { count } = await req.app.locals.prisma.mfaDevice.deleteMany({ where: { id: req.params.id, userId: req.userId } });
     if (!count) return res.status(404).json({ error: 'Device not found' });
+    await req.audit({ action: 'delete', module: 'security', recordId: req.params.id, details: 'Two-factor authentication device removed' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
