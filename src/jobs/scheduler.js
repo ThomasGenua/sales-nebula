@@ -358,7 +358,25 @@ const handlers = {
       include: { items: { where: { deal: { is: { deletedAt: null } } }, include: { deal: true } } },
     });
 
+    const { categoryFor } = require('../utils/forecastCategory');
     for (const forecast of forecasts) {
+      // The owner's open deals that have come into the period since the
+      // forecast was made. Only the deals it began with were refreshed, so a
+      // deal moved into the period, or opened in it, never counted.
+      const listed = forecast.items.map(i => i.dealId);
+      const arrived = await prisma.deal.findMany({
+        where: {
+          ownerId: forecast.userId, stage: { notIn: ['Closed Won', 'Closed Lost'] },
+          closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd }, deletedAt: null,
+          ...(listed.length && { id: { notIn: listed } }),
+        },
+      });
+      for (const deal of arrived) {
+        await prisma.forecastItem.create({
+          data: { forecastId: forecast.id, dealId: deal.id, amount: ctx.toBase(deal.value, deal.currency), probability: deal.probability, closeDate: deal.closeDate, category: categoryFor(deal.probability) },
+        });
+      }
+
       for (const item of forecast.items) {
         if (item.deal && item.overrideAmount == null) {
           await prisma.forecastItem.update({

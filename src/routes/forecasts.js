@@ -104,7 +104,7 @@ const EDITABLE_FIELDS = ['name', 'period', 'periodStart', 'periodEnd', 'quotaAmo
 const CATEGORIES = ['Closed', 'Commit', 'Best Case', 'Pipeline', 'Omitted'];
 
 /** The category a deal's item starts in, from its probability. */
-const categoryFor = probability => (probability >= 90 ? 'Commit' : probability >= 70 ? 'Best Case' : 'Pipeline');
+const { categoryFor } = require('../utils/forecastCategory');
 
 /** Today's calendar quarter: its first and last instant, and its label (Q3-2026). */
 function currentQuarter(now = new Date()) {
