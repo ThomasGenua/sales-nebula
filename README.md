@@ -201,7 +201,7 @@ The tables below list the API modules, grouped the way Salesforce groups its clo
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Leads | `/api/leads` | Lead capture, web-to-lead, assignment rules; rule-based scoring (automatic for web-to-lead, on request otherwise) |
+| Leads | `/api/leads` | Lead capture, web-to-lead, assignment rules; rule-based scoring on every save |
 | Contacts | `/api/contacts` | Contact management with account relationships |
 | Accounts | `/api/accounts` | B2B account hierarchy, team assignments |
 | Person Accounts | `/api/person-accounts` | B2C individual accounts |

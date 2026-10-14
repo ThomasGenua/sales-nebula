@@ -18,9 +18,11 @@ All notable changes to Sales Nebula CRM.
 - The Recycle Bin has a sidebar entry. Restore shows only to those who may restore.
 - The forecast refresh adds the owner's deals that have come into the period since the forecast was made.
 
-### Rules on edits, and the AI model
+### Rules on edits, lead scoring, and the AI model
 - Duplicate rules also run when an edit changes a field one matches on, so changing a contact's email to a colleague's is refused under a blocking rule. An edit of anything else goes through, even on a record that already is a duplicate. A warning rule queues a pair for review once, however often it is edited.
 - Duplicate rules match text regardless of case, on create too: `Ada@example.com` is a duplicate of `ada@example.com`.
+- Lead scoring has one evaluator, and it runs on every save of a lead: typed in, imported, edited or from the web form. The form, `POST /api/leads/:id/score` and the admin rescore each had their own copy with different operators, so one lead could score three ways, and only leads from the form were scored without asking. With active rules, a save replaces a score sent with it; with none, the score is left as it is.
+- A scoring rule whose operator or field the scoring doesn't know is refused when saved, as is a rule on the score itself. The seed's `is_not_empty` rules count now. The admin rescore skips leads in the recycle bin.
 - AI calls default to Claude Opus 5.5 (`ANTHROPIC_MODEL` still overrides it).
 
 ### Documentation

@@ -6,6 +6,7 @@ const { hashApiKey } = require('../utils/apiKeys');
 const { permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { scoreLead, activeScoringRules, scoringRuleProblem } = require('../services/leadScoring');
 const { LEASE_PREFIX } = require('../utils/lease');
 
 const router = Router();
@@ -219,6 +220,10 @@ router.get('/scoring-rules', requirePermission('settings', 'read'), async (req, 
 router.post('/scoring-rules', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    // A rule on an operator or field the scoring does not know matched no
+    // lead, without a word.
+    const problem = scoringRuleProblem(req.body);
+    if (problem) return res.status(400).json({ error: problem });
     const rule = await prisma.leadScoringRule.create({ data: columnsFrom('leadScoringRule', req.body) });
     res.status(201).json(rule);
   } catch (err) { next(err); }
@@ -227,6 +232,8 @@ router.post('/scoring-rules', requirePermission('settings', 'full'), async (req,
 router.put('/scoring-rules/:id', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
+    const problem = scoringRuleProblem(req.body);
+    if (problem) return res.status(400).json({ error: problem });
     const rule = await prisma.leadScoringRule.update({ where: { id: req.params.id }, data: columnsFrom('leadScoringRule', req.body) });
     res.json(rule);
   } catch (err) { next(err); }
@@ -240,28 +247,17 @@ router.delete('/scoring-rules/:id', requirePermission('settings', 'full'), async
   } catch (err) { next(err); }
 });
 
-// Batch rescore all leads
+// Rescore the open leads, after the rules change: a save scores one lead
+// (services/leadScoring), and this the rest. Leads in the recycle bin are
+// left as they are.
 router.post('/score-all-leads', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const rules = await prisma.leadScoringRule.findMany({ where: { active: true } });
-    const leads = await prisma.lead.findMany({ where: { status: { notIn: ['Converted', 'Unqualified'] } } });
+    const rules = await activeScoringRules(prisma);
+    const leads = await prisma.lead.findMany({ where: { deletedAt: null, status: { notIn: ['Converted', 'Unqualified'] } } });
     let updated = 0;
     for (const lead of leads) {
-      let score = 50;
-      for (const rule of rules) {
-        const val = String(lead[rule.field] || '').toLowerCase();
-        const target = rule.value.toLowerCase();
-        let match = false;
-        switch (rule.operator) {
-          case 'equals': match = val === target; break;
-          case 'contains': match = val.includes(target); break;
-          case 'startsWith': match = val.startsWith(target); break;
-          case 'endsWith': match = val.endsWith(target); break;
-        }
-        if (match) score += rule.points;
-      }
-      score = Math.max(0, Math.min(100, score));
+      const score = scoreLead(rules, lead);
       if (score !== lead.score) {
         await prisma.lead.update({ where: { id: lead.id }, data: { score } });
         updated++;

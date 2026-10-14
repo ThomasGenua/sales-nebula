@@ -193,38 +193,19 @@ function createApp(rawPrisma) {
         return res.status(409).json({ error: 'A lead with this email already exists' });
       }
 
-      // Scored before it is saved, from the same rules as before, so the lead
-      // is written once.
-      let score = 50;
-      try {
-        const scoringRules = await prisma.leadScoringRule.findMany({ where: { active: true } });
-        const submitted = { firstName, lastName, email, phone, company, source: source || 'Web Form', description };
-        for (const r of scoringRules) {
-          const val = String(submitted[r.field] || '').toLowerCase();
-          const target = r.value.toLowerCase();
-          let match = false;
-          switch (r.operator) {
-            case 'equals': match = val === target; break;
-            case 'contains': match = val.includes(target); break;
-            case 'startsWith': match = val.startsWith(target); break;
-          }
-          if (match) score += r.points;
-        }
-        score = Math.max(0, Math.min(100, score));
-      } catch (e) { /* Scoring optional */ }
-
-      // As a lead made in the app is (services/recordWrites): validation and
-      // duplicate rules, an owner from the assignment rules, then the
-      // workflows and webhooks for new leads, none of which ran for the form
-      // that brings most of them in. It had its own round-robin, which read
-      // only the first such rule, ignored rule-based ones and could hand two
-      // leads to the same person at once.
+      // As a lead made in the app is (services/recordWrites): scored by the
+      // lead scoring rules, validation and duplicate rules, an owner from
+      // the assignment rules, then the workflows and webhooks for new leads,
+      // none of which ran for the form that brings most of them in. It had
+      // its own round-robin, which read only the first such rule, ignored
+      // rule-based ones and could hand two leads to the same person at once;
+      // and its own scoring, which knew three of the rules' operators.
       let lead;
       try {
         ({ record: lead } = await createRecord(prisma, 'leads', {
           firstName, lastName, email, phone,
           company, source: source || 'Web Form',
-          description, status: 'New', score,
+          description, status: 'New',
         }, { source: 'web-to-lead', emit: app.locals.emit }));
       } catch (err) {
         // The rule's message only: a duplicate's id, or a rule's name, is no

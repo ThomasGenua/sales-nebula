@@ -118,9 +118,11 @@ function emitterFor(ctx) {
 // ─── BATCHES ───
 
 // The configuration the rules read on every write: validation, duplicate and
-// assignment rules, workflows, webhooks and security group rules.
+// assignment rules, workflows, webhooks, security group rules, and a lead's
+// scoring rules.
 const RULE_TABLES = new Set([
   'validationRule', 'duplicateRule', 'assignmentRule', 'workflow', 'webhook', 'securityGroupRule', 'securityGroupUser',
+  'leadScoringRule',
 ]);
 
 /**
