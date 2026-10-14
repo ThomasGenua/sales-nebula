@@ -5,6 +5,9 @@ const { recordAccess, reachableWhere, canReach, linkRefusal, visibleLinks } = re
 const { auditMiddleware } = require('../middleware/audit');
 const { generateDocumentHtml } = require('../utils/documentTemplate');
 const { currencyContext } = require('../utils/currency');
+const customerQuotes = require('../services/customerQuotes');
+const { appUrl } = require('../utils/mail');
+const crypto = require('crypto');
 const { QUOTE_NUMBER } = require('../utils/numbering');
 const { fireWebhookEvent } = require('../services/webhooks');
 const { acquireLease, releaseLease } = require('../utils/lease');
@@ -98,12 +101,14 @@ router.get('/', requirePermission('quotes', 'read'), async (req, res, next) => {
     Object.assign(where, scalarWhere('quote', filters));
     // Quotes the caller may see, sorted on one of a quote's own columns.
     where = await reachableWhere(req, 'quotes', 'quote', where);
+    where = { AND: [where, await require('../services/customFields').filterWhere(prisma, 'quotes', Object.entries(req.query).map(([field, value]) => ({ field, value })))] };
     const [quotes, total] = await Promise.all([
       prisma.quote.findMany({ where, include, orderBy: scalarOrderBy('quote', sortBy, sortDir) || { createdAt: 'desc' }, skip, take }),
       prisma.quote.count({ where }),
     ]);
     // Linked records as far as the caller may see them, as the CRUD lists do.
     await visibleLinks(req, 'quote', quotes, include);
+    await require('../services/customFields').hydrate(prisma, 'quotes', quotes);
     res.json({ data: quotes, meta: { total, page: parseInt(page), limit: take, pages: Math.ceil(total / take) } });
   } catch (err) { next(err); }
 });
@@ -257,6 +262,28 @@ router.delete('/:id', requirePermission('quotes', 'full'), async (req, res, next
 });
 
 // Generate quote as HTML (for PDF rendering client-side or print)
+router.get('/:id/shares', requirePermission('quotes', 'read'), async (req, res, next) => {
+  try { res.json(await req.app.locals.prisma.quoteShare.findMany({ where: { quoteId: req.params.id }, select: { id: true, createdAt: true, expiresAt: true, revokedAt: true, acceptedAt: true, acceptedName: true, acceptedEmail: true }, orderBy: { createdAt: 'desc' } })); } catch (e) { next(e); }
+});
+router.post('/:id/shares', requirePermission('quotes', 'edit'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma, quote = await customerQuotes.loadQuote(db, req.params.id);
+    if (!quote || ['Accepted', 'Rejected'].includes(quote.status)) return res.status(409).json({ error: 'Only open quotes can be shared for acceptance.' });
+    const days = req.body.days ?? 14;
+    if (!Number.isInteger(days) || days < 1 || days > 90) return res.status(400).json({ error: 'Link lifetime must be 1–90 days.' });
+    const validUntil = quote.validUntil ? new Date(quote.validUntil) : null;
+    if (validUntil && validUntil.toISOString().endsWith('T00:00:00.000Z')) validUntil.setUTCHours(23, 59, 59, 999);
+    const expiresAt = new Date(Math.min(Date.now() + days * 86400000, validUntil?.getTime() || Infinity));
+    if (expiresAt <= new Date()) return res.status(409).json({ error: 'Update this expired quote before sharing it.' });
+    const token = crypto.randomBytes(32).toString('hex');
+    const share = await db.quoteShare.create({ data: { quoteId: quote.id, tokenHash: customerQuotes.hash(token), snapshot: customerQuotes.snapshot(quote, (await currencyContext(db)).base), quoteVersion: quote.updatedAt, expiresAt, createdById: req.userId } });
+    await req.audit({ action: 'create', module: 'quotes', recordId: quote.id, details: 'Created expiring customer quote link' });
+    res.status(201).json({ id: share.id, expiresAt, url: appUrl('/api/public/quotes/' + token) });
+  } catch (e) { next(e); }
+});
+router.delete('/:id/shares/:shareId', requirePermission('quotes', 'edit'), async (req, res, next) => {
+  try { const result = await req.app.locals.prisma.quoteShare.updateMany({ where: { id: req.params.shareId, quoteId: req.params.id }, data: { revokedAt: new Date() } }); if (!result.count) return res.sendStatus(404); await req.audit({ action: 'update', module: 'quotes', recordId: req.params.id, details: 'Revoked customer quote link' }); res.json({ revoked: true }); } catch (e) { next(e); }
+});
 router.get('/:id/pdf', requirePermission('quotes', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -300,8 +327,10 @@ router.get('/:id/pdf', requirePermission('quotes', 'read'), async (req, res, nex
     if (req.query.format === 'json') {
       return res.json({ quote, html });
     }
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
+    const buffer = await customerQuotes.pdf(customerQuotes.snapshot(quote, (await currencyContext(prisma)).base));
+    if (req.query.format === 'download') return res.json({ data: buffer.toString('base64'), filename: 'quote-' + quote.number.replace(/[^a-zA-Z0-9_-]/g, '') + '.pdf' });
+    res.setHeader('Content-Disposition', 'attachment; filename="quote.pdf"');
+    res.type('pdf').send(buffer);
   } catch (err) { next(err); }
 });
 

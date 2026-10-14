@@ -53,11 +53,11 @@ export function Input({ label, value, onChange, type = "text", placeholder, requ
   );
 }
 
-export function Select({ label, value, onChange, options = [], placeholder, className = "" }) {
+export function Select({ label, value, onChange, options = [], placeholder, className = "", disabled = false }) {
   return (
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
-      <select value={value || ""} onChange={e => onChange(e.target.value)}
+      <select value={value || ""} onChange={e => onChange(e.target.value)} disabled={disabled}
         aria-label={label ? undefined : (placeholder || "Select an option")}
         className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] focus:outline-none focus:border-[#F5A623] transition-colors appearance-none min-h-[44px]">
         {placeholder && <option value="">{placeholder}</option>}
@@ -67,11 +67,11 @@ export function Select({ label, value, onChange, options = [], placeholder, clas
   );
 }
 
-export function TextArea({ label, value, onChange, rows = 3, placeholder, className = "" }) {
+export function TextArea({ label, value, onChange, rows = 3, placeholder, className = "", disabled = false }) {
   return (
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
-      <textarea value={value || ""} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder}
+      <textarea value={value || ""} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder} disabled={disabled}
         aria-label={label ? undefined : placeholder}
         className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] transition-colors resize-none" />
     </label>

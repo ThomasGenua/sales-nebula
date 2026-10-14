@@ -23,7 +23,8 @@ const FEATURES = {
   },
   customFields: {
     title: "Custom fields on records",
-    description: "Custom fields can be defined here, but no record form, list, report or export shows them yet, and their values cannot be stored. The validation rules defined here do apply on every save.",
+    status: "Available",
+    description: "Save custom values from a record's Custom fields form, filter lists, build reports, and map import columns. Required values are checked when saving that form or importing. Formula and related-record custom fields are not supported yet.",
   },
   marketplace: {
     title: "Installing apps",
@@ -40,7 +41,7 @@ export function FeatureAvailability({ features = ["campaigns", "integrations", "
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <h2 className="text-sm font-semibold" style={{ color: "var(--sn-body)" }}>{feature.title}</h2>
           <span className="rounded-md border px-2 py-0.5 text-xs"
-            style={{ borderColor: "var(--sn-rule)", color: "var(--sn-slate)" }}>Unavailable</span>
+            style={{ borderColor: "var(--sn-rule)", color: "var(--sn-slate)" }}>{feature.status || 'Unavailable'}</span>
         </div>
         <p className="text-xs leading-relaxed" style={{ color: "var(--sn-slate)" }}>{feature.description}</p>
       </section>;

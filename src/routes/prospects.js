@@ -157,7 +157,7 @@ router.get('/', authenticate, requirePermission('leads', 'read'), async (req, re
     if (minScore) where.score = { gte: +minScore };
     if (converted === 'true') where.convertedAt = { not: null };
     if (converted === 'false') where.convertedAt = null;
-    const visible = await visibleProspects(req, where);
+    const visible = { AND: [await visibleProspects(req, where), await require('../services/customFields').filterWhere(prisma, 'prospects', Object.entries(req.query).map(([field, value]) => ({ field, value })))] };
     // Pages step by the capped size: past 200 they skipped rows never shown.
     const take = Math.min(parseInt(limit) || 50, 200);
     const current = Math.max(parseInt(page) || 1, 1);
@@ -168,6 +168,7 @@ router.get('/', authenticate, requirePermission('leads', 'read'), async (req, re
       prisma.prospect.findMany({ where: visible, skip: (current - 1) * take, take, orderBy: scalarOrderBy('prospect', sortBy, sortDir) || { createdAt: 'desc' } }),
       prisma.prospect.count({ where: visible }),
     ]);
+    await require('../services/customFields').hydrate(prisma, 'prospects', data);
     res.json({ data, total, page: current, limit: take });
   } catch (err) { next(err); }
 });

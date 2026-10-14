@@ -251,7 +251,7 @@ async function exportSubject(prisma, subject) {
   }
 
   // Notes and attachments hang off a polymorphic parent rather than a key.
-  for (const [model, moduleField, idField] of [['Note', 'module', 'recordId'], ['Attachment', 'parentModule', 'parentId']]) {
+  for (const [model, moduleField, idField] of [['Note', 'module', 'recordId'], ['Attachment', 'parentModule', 'parentId'], ['StudioFieldValue', 'module', 'recordId']]) {
     const rows = await polymorphicRows(prisma, model, moduleField, idField, subject);
     if (rows.length) { records[model] = rows; total += rows.length; }
   }
@@ -378,6 +378,18 @@ async function eraseSubject(prisma, subject, { strategy = 'anonymize', actorId =
   }
 
   // Consent cannot survive the person it belonged to.
+  for (const [module, recordId] of [['contacts', subject.contactId], ['leads', subject.leadId], ['personAccounts', subject.personAccountId]]) {
+    if (!recordId) continue;
+    const result = await prisma.studioFieldValue.deleteMany({ where: { module, recordId } });
+    count('StudioFieldValue', result.count);
+  }
+  if (subject.contactId) {
+    const quotes = await prisma.quote.findMany({ where: { contactId: subject.contactId }, select: { id: true } });
+    if (quotes.length) {
+      await prisma.quoteShare.updateMany({ where: { quoteId: { in: quotes.map(q => q.id) } }, data: { revokedAt: new Date() } });
+      residual.push({ model: 'QuoteShare', fields: ['snapshot', 'acceptedName', 'acceptedEmail'] });
+    }
+  }
   if (subject.contactId || subject.leadId || subject.personAccountId) {
     const consentWhere = subjectWhere({ keys: SUBJECT_KEYS, identifiers: [] }, subject);
     if (consentWhere) {

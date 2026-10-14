@@ -31,9 +31,27 @@ beforeEach(async () => {
 });
 
 describe('running a job', () => {
-  it('runs it once when several ask at the same moment, and tells the others it is already running', async () => {
-    const results = await Promise.all(Array.from({ length: 4 }, () => runJob('probeSlow')));
-
+  it('runs it once while concurrent callers are told it is already running', async () => {
+    let started, release;
+    const entered = new Promise(resolve => { started = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    // Keep the first job active until every competing request has checked the
+    // lease. A fixed 300 ms sleep could finish before a slow connection arrived.
+    handlers.probeSlow = async () => {
+      runs++;
+      if (runs === 1) { started(); await held; }
+      return { ran: true };
+    };
+    const first = runJob('probeSlow');
+    let competing;
+    try {
+      await entered;
+      competing = await Promise.all(Array.from({ length: 3 }, () => runJob('probeSlow')));
+    } finally {
+      release();
+      await first;
+    }
+    const results = [await first, ...competing];
     expect(runs).toBe(1);
     expect(results.filter(r => r.ran)).toHaveLength(1);
     expect(results.filter(r => r.skipped === 'already running')).toHaveLength(3);

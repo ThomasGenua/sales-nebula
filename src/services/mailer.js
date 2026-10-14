@@ -13,7 +13,7 @@ const { sendMail: smtpSend } = require('../utils/mail');
  * mail utility logs to the console, which is useful in development but is not
  * delivery, so it comes back as 'queued' rather than 'sent'.
  */
-async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
+async function sendEmail(prisma, { to, subject, body, html, mailboxId, headers }) {
   if (!to) {
     const err = new Error('A recipient is required');
     err.status = 400;
@@ -27,6 +27,9 @@ async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
       err.status = 404;
       throw err;
     }
+    // Generic email records are shared CRM records. Personal mailbox sending
+    // stays in the owner-scoped sales-mail routes and private conversation log.
+    if (account.ownerId) throw Object.assign(new Error('Use the personal mailbox conversation to send from this account.'), { status: 403 });
     if (account.provider !== 'microsoft') {
       const err = new Error('Sending from this mailbox is not implemented; only Microsoft mailboxes can send.');
       err.status = 501;
@@ -40,7 +43,7 @@ async function sendEmail(prisma, { to, subject, body, html, mailboxId }) {
     }
   }
 
-  const result = await smtpSend({ to, subject, text: body, html });
+  const result = await smtpSend({ to, subject, text: body, html, headers });
 
   if (result.mode === 'smtp' && result.ok) {
     return { status: 'sent', delivered: true, transport: 'smtp' };

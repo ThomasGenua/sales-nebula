@@ -28,13 +28,14 @@ Something can be missing in three ways:
 | Users | The **Users** screen: invite, edit, deactivate, reactivate, send a password reset, resend or revoke an invite. Public sign-up requests are reviewed under **Access requests**. |
 | Sign-in | Password, with account lockout; authenticator-app (TOTP) two-factor; API keys; Sales Nebula as an OAuth 2.0 provider for connected apps (authorization code with PKCE); Google and Microsoft sign-in APIs for existing accounts, which the sign-in page does not offer yet. |
 | Approvals | Multi-step processes. A step's approvers are a user, a role, the submitter's manager or a queue, and the first to decide settles the step. Entry conditions, and final approve and reject actions. Processes are set up through the API; the **Approvals** screen lists pending requests to approve or reject. |
-| Workflows | Run on create, update, status change and on a schedule. Actions: update a field, create a task, notify, send an email; other action types are ignored. They are set up through the API: the screen has no condition or action editor. |
-| Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. Sequences send their due steps every 10 minutes when SMTP is set up, as written (no merge fields). Mail arriving in a connected Microsoft mailbox opens cases or leads, and replies thread onto their case. |
+| Workflows | Record and scheduled triggers. The visual builder edits conditions and ordered actions for core records: assign owner, create a follow-up, notify, update a field, and send email. Preview makes no changes; logs show outcomes. |
+| Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. The sequence editor supports steps, delays, templates, enrollment and delivery status; sequences send every 10 minutes with SMTP, supported merge fields, time-zone sending windows, stop-on-synced-reply, and unsubscribe links. Shared support mailboxes route incoming mail to cases or leads. Personal Outlook mailboxes sync Inbox and Sent Items, associate visible contacts/deals, and support private threaded replies. |
+| Sales workspace | My Day queues, atomic completion and follow-ups, a pipeline board with stage age and next actions, saved list views, and creation from related lists. See [setup and behavior](SALES_WORKSPACE.md). |
 | Webhooks | Outbound, signed with HMAC-SHA256, retried, with delivery logs. |
-| Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. They print from the browser as HTML: no PDF file is generated. |
+| Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. Quotes have generated PDFs, expiring/revocable customer links, and version-checked online acceptance receipts. Invoice previews remain HTML. |
 | Forecasts | Built from the owner's open deals in the period and refreshed every 4 hours; quotas are entered by hand. Deals that move into the period later are not added. |
-| Reports | Running a report returns real rows and totals, limited to what the viewer may see. The API exports CSV or JSON. |
-| Calendar, projects, SLA | Recurring events with invitees and an iCal feed; projects with a critical path; SLA timers that count business hours only. |
+| Reports | The report builder supports columns, filters, grouping, measures, charts, shared definitions and drilldown into accessible records. The screen exports displayed rows or groups as CSV; the API exports detail rows as CSV or JSON. Sales performance uses actual deal history. |
+| Calendar, projects, SLA | Recurring events with invitees and an iCal feed; personal Outlook calendar delta sync, attendee/reminder updates, explicit publication and conflict handling; projects with a critical path; SLA timers that count business hours only. |
 | Search | Global search across modules, matching substrings. |
 | Collaboration | Chatter posts with likes and comments; notes; tags; favorites. |
 | Data | CSV import with per-row errors; the bulk API; mass actions; the recycle bin. |
@@ -47,13 +48,13 @@ Something can be missing in three ways:
 | AI Copilot without a key | Answers from fixed rules using your open deals, cases and activities; the screen says so under each answer. | `/api/copilot/chat` answers 503. Conversation threads exist in the API only. |
 | Lead scoring | Scores leads by your rules. Not AI. | Runs by itself only for leads from the web-to-lead form; other leads are scored on request (`POST /api/leads/:id/score`). |
 | Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
-| Reports | Tabular, summary and chart reports, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. Export gives the raw rows, not the totals. There is no report builder screen. |
+| Reports | Tabular, summary and chart reports, a report builder, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. The API export gives raw rows; the builder exports the displayed detail or summary. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
 | Campaigns | Planning, members, recipients, responses, ROI. Attribution models computed from the campaign touches you enter. | Bulk sending (501). Nothing creates touches from campaign members. |
-| Import | CSV files, with columns matched by name. | Excel. A column-mapping screen (the API takes a mapping). |
+| Import | CSV mapping, editable row preview, duplicate review/skip/update, per-row errors, and atomic custom values with each row. | Excel files; a whole-file rollback. |
 | Export | CSV and JSON. | Excel. Scheduled exports are saved and never run. |
 | Custom objects | Define objects and fields, and store records, through the API. | Records are not checked against their field definitions. The screen edits object definitions only: no fields or records. |
-| Custom fields (Studio) | Field definitions, picklists, and validation rules, which apply on every save. | Values cannot be stored (501), and no form, list, report or export shows custom fields. |
+| Custom fields (Studio) | Definitions, picklists, typed record forms, list equality filters, report fields/measures/exports, and import mapping. Required custom values are checked on their form and imports. | Formula and related-record types; required custom values on the standard create form. |
 | Formula fields | Evaluated on request (`/api/formulas/evaluate`). | Not computed on records; no cross-object references; no screen. |
 | Sharing | Org-wide defaults, the role hierarchy, owner- and criteria-based rules, record shares. | `externalAccess`, `manual` rules and the `criteria` grant mode are saved and do nothing. |
 | Platform events | Published events are stored and sent to webhooks registered for `platform.<channel>`. | A subscription's own endpoint and secret are unused, and nothing in the app publishes events. |
@@ -74,11 +75,11 @@ Something can be missing in three ways:
 | Monitoring | Login history, and sign-in figures for the last 24 hours. | Nothing writes event logs, so event lists are empty and API-call and error counts read 0. |
 | Recycle bin | Restoring a deleted record within 30 days. | The deleted row stays in its table until an administrator purges deleted records. No search. |
 | Duplicate rules | Checked when a record is created; merge for contacts, leads and accounts. | Not checked on update. `auto_merge` only warns. |
-| Consent | Consent per contact and type, for signed-in users. | No public opt-out or unsubscribe link. |
+| Consent | Consent per contact/type for signed-in users, plus public signed unsubscribe links on sequence emails. | A general public consent-preference center. |
 | Customer portal | One configuration with branding; portal logins for contacts, created by an administrator. | Self-registration; portals for partners or employees (the portal type is a label). |
 | Timeline | A record's own activities, emails, notes, cases, changes and posts. | Items from child records (an account's contacts or deals); quotes, invoices and events. |
 | Scheduler | Booking with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; editing skips the overlap check; "availability" only says who is busy now. |
-| Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. | Only deals have a currency, and reports add up unconverted amounts. No rate history. |
+| Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. Pipeline board totals and monetary builder groups keep currencies separate. | Only deals have a currency. Arbitrary API reports can still aggregate unconverted amounts. No rate history. |
 | Revenue recognition | Schedules split evenly by month. | Periods are recognized by hand; the recognition method is ignored. |
 | Flows | Flows can be designed and saved. | Nothing runs them: run, test, activate and publish (501). |
 | AI agents | Agents can be configured and saved. | No model is called with an agent's settings: run, activate and training (501). |
@@ -120,23 +121,21 @@ Saving these changes nothing:
 | Scheduled reports | `POST /api/reports/:id/schedule`; `POST /api/analytics/scheduled-reports` | `REPORT_DELIVERY_UNAVAILABLE` |
 | Integration sync schedules | `PUT /api/integrations/:id/schedule` | `INTEGRATION_SYNC_UNAVAILABLE` |
 | Quote approval shortcut | `POST /api/quotes/:id/submit-approval` (use an approval process) | `QUOTE_APPROVAL_UNAVAILABLE` |
-| Custom field values | `PUT /api/studio/values/:module/:recordId` | `CUSTOM_FIELD_VALUES_UNAVAILABLE` |
 | Campaign sending | `POST /api/campaigns/:id/send` | `CAMPAIGN_DELIVERY_UNAVAILABLE` |
 | SSO sign-in | `POST /api/security/sso/login` | none; the error says so |
 | Integration sync and tests | `POST /api/integrations/:id/sync`, `/test` | none; the error says so |
 | Mail from other mailboxes | `POST /api/inbound-email/messages/:id/reply` and `POST /api/emails/send` naming a mailbox that is not Microsoft | none; the error says so |
 
-`tests/unavailableFeatures.test.js` checks each refusal from `FLOWS_UNAVAILABLE` to `CUSTOM_FIELD_VALUES_UNAVAILABLE`, and that nothing changed; `tests/securityHardening.test.js` checks campaign sending.
+`tests/unavailableFeatures.test.js` checks unavailable features and that their refused actions change nothing; `tests/securityHardening.test.js` checks campaign sending.
 
 ## Not built
 
-- Mail and calendar sync with Gmail or Outlook. Only the Microsoft mailbox connection exists.
+- Gmail mail sync and Google/Outlook calendar sync. Personal Outlook email sync exists; attachments, remote deletions and moves are not synchronized.
 - E-signature.
 - Slack or Teams.
 - PDF files of quotes and invoices; they print from the browser.
-- A Kanban board for deals.
-- A screen for saved list views (the API, `/api/views`, exists).
-- A report builder screen.
 - A mobile app (the `/api/mobile` endpoints exist).
 - Multi-tenancy: one install serves one company.
 - A visual flow designer, and anything that runs flows.
+
+See [sales workflow setup and limitations](SALES_NEXT_WORKFLOWS.md) for these additions.

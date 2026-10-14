@@ -31,7 +31,7 @@ function tokenEndpoint(tenantId) {
 }
 
 /** The scopes a mailbox integration needs. offline_access buys the refresh token. */
-const MAIL_SCOPES = 'offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send';
+const MAIL_SCOPES = 'offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send';
 
 async function postForm(url, params) {
   const res = await fetch(url, {
@@ -56,33 +56,36 @@ async function postForm(url, params) {
 }
 
 /** Swap the authorization code from the consent redirect for tokens. */
-function exchangeCode({ tenantId, clientId, clientSecret, code, redirectUri }) {
+function exchangeCode({ tenantId, clientId, clientSecret, code, redirectUri, codeVerifier, scope = MAIL_SCOPES }) {
   return postForm(tokenEndpoint(tenantId), {
     client_id: clientId,
     client_secret: clientSecret,
     code,
     redirect_uri: redirectUri,
     grant_type: 'authorization_code',
-    scope: MAIL_SCOPES,
+    scope,
+    ...(codeVerifier && { code_verifier: codeVerifier }),
   });
 }
 
-function refreshAccessToken({ tenantId, clientId, clientSecret, refreshToken }) {
+function refreshAccessToken({ tenantId, clientId, clientSecret, refreshToken, scope = MAIL_SCOPES }) {
   return postForm(tokenEndpoint(tenantId), {
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
-    scope: MAIL_SCOPES,
+    scope,
   });
 }
 
-async function graphFetch(path, { accessToken, method = 'GET', body } = {}) {
+async function graphFetch(path, { accessToken, method = 'GET', body, preferText = false, headers = {} } = {}) {
   const res = await fetch(`${GRAPH}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${accessToken}`,
+      ...(preferText && { Prefer: 'outlook.body-content-type="text"' }),
       ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -111,7 +114,7 @@ function getProfile({ accessToken, mailboxAddress }) {
 
 const MESSAGE_FIELDS = [
   'id', 'internetMessageId', 'conversationId', 'subject', 'bodyPreview',
-  'from', 'toRecipients', 'ccRecipients', 'receivedDateTime', 'hasAttachments', 'body',
+  'from', 'toRecipients', 'ccRecipients', 'receivedDateTime', 'sentDateTime', 'hasAttachments', 'body',
 ].join(',');
 
 /**
@@ -119,19 +122,23 @@ const MESSAGE_FIELDS = [
  * forward progress. internetMessageHeaders carries In-Reply-To and References,
  * which the ingestion pipeline threads on.
  */
-async function listMessages({ accessToken, mailboxAddress, folder = 'Inbox', since, top = 50 }) {
+async function listMessagePage({ accessToken, mailboxAddress, folder = 'Inbox', since, top = 50, cursor }) {
+  const dateField = folder.toLowerCase() === 'sentitems' ? 'sentDateTime' : 'receivedDateTime';
   const params = [
     `$select=${MESSAGE_FIELDS},internetMessageHeaders`,
-    '$orderby=receivedDateTime asc',
+    `$orderby=${dateField} asc`,
     `$top=${Math.min(Number(top) || 50, 100)}`,
   ];
   if (since) {
-    params.push(`$filter=receivedDateTime gt ${new Date(since).toISOString()}`);
+    params.push(`$filter=${dateField} gt ${new Date(since).toISOString()}`);
   }
-  const path = `${mailboxRoot(mailboxAddress)}/mailFolders/${encodeURIComponent(folder)}/messages?${params.join('&')}`;
-  const page = await graphFetch(path, { accessToken });
-  return page?.value || [];
+  if (cursor && (typeof cursor !== 'string' || !cursor.startsWith(`${GRAPH}/`))) throw new GraphError('Invalid mailbox pagination cursor', { status: 400 });
+  const path = cursor ? cursor.slice(GRAPH.length) : `${mailboxRoot(mailboxAddress)}/mailFolders/${encodeURIComponent(folder)}/messages?${params.join('&')}`;
+  const page = await graphFetch(path, { accessToken, preferText: true });
+  return { messages: page?.value || [], nextLink: page?.['@odata.nextLink'] || null };
 }
+
+async function listMessages(options) { return (await listMessagePage(options)).messages; }
 
 function headerValue(message, name) {
   const headers = message.internetMessageHeaders || [];
@@ -202,12 +209,14 @@ function sendMail({ accessToken, mailboxAddress, to, subject, body, isHtml = fal
 }
 
 module.exports = {
+  graphFetch,
   GraphError,
   MAIL_SCOPES,
   exchangeCode,
   refreshAccessToken,
   getProfile,
   listMessages,
+  listMessagePage,
   normalizeMessage,
   replyToMessage,
   sendMail,

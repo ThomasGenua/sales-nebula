@@ -142,6 +142,23 @@ const ORDERED_TABLES = [
   ];
 
 async function cleanDatabase() {
+  // Optional local PostgreSQL cleanup for slow disks: TRUNCATE recreates hundreds
+  // of table/index files per test. DELETE keeps the same empty-data isolation.
+  // This mode needs a superuser on a disposable database and changes trigger
+  // handling only inside this transaction; ordinary test accounts use TRUNCATE.
+  if (process.env.TEST_DELETE_CLEANUP === 'true') {
+    assertTestDatabase();
+    try {
+      await prisma.$transaction(async tx => {
+        await tx.$executeRawUnsafe("SET LOCAL session_replication_role = 'replica'");
+        await tx.$executeRawUnsafe(`DO $$ DECLARE t record; BEGIN
+          FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '\\_prisma%'
+          LOOP EXECUTE format('DELETE FROM public.%I', t.tablename); END LOOP;
+        END $$`);
+      }, { timeout: 60000 });
+      return;
+    } catch { /* no elevated test role, or cleanup failed: use the normal reset */ }
+  }
   assertTestDatabase();
   // One TRUNCATE across every table beats a hand-maintained list: the list had
   // drifted, so Lead, CalendarEvent and others were never cleared and rows

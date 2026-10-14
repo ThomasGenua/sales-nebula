@@ -43,6 +43,41 @@ async function enroll({ steps = STEPS, sequence = {}, contact = {}, enrollment =
 }
 const reload = id => prisma.emailSequenceEnrollment.findUnique({ where: { id } });
 
+describe('sequence controls', () => {
+  it('personalizes mail and stops when a reply is synced to the enrolling user mailbox', async () => {
+    const { row, person } = await enroll({ steps: [{ delayDays: 0, subject: 'Hi {{firstName}}', body: 'Hello {{fullName}}' }, { delayDays: 0, subject: 'Next', body: 'Follow-up' }] });
+    await run();
+    expect(sendEmail.mock.calls[0][1].subject).toBe('Hi Sam');
+    expect(sendEmail.mock.calls[0][1].body).toContain('Hello Sam Prospect');
+    const mailbox = await prisma.inboundEmailAccount.create({ data: { name: 'Personal', username: user.user.email, ownerId: user.user.id } });
+    await prisma.inboundEmailMessage.create({ data: { accountId: mailbox.id, fromEmail: person.email, receivedAt: new Date(), direction: 'inbound' } });
+    await prisma.emailSequenceEnrollment.update({ where: { id: row.id }, data: { nextSendAt: new Date(Date.now() - 1000) } });
+    await run();
+    expect(sendEmail).toHaveBeenCalledTimes(1); expect(await reload(row.id)).toMatchObject({ status: 'Replied', currentStep: 1, nextSendAt: null });
+  });
+  it('does not use another user private mailbox to stop an enrollment', async () => {
+    const { row, person } = await enroll({ enrollment: { lastSentAt: new Date(Date.now() - 1000) } });
+    const mailbox = await prisma.inboundEmailAccount.create({ data: { name: 'Other personal', username: 'other@test.com', ownerId: 'other-user' } });
+    await prisma.inboundEmailMessage.create({ data: { accountId: mailbox.id, fromEmail: person.email, receivedAt: new Date() } });
+    await run(); expect(sendEmail).toHaveBeenCalledTimes(1); expect((await reload(row.id)).status).toBe('Active');
+  });
+  it('holds a step outside its allowed hours and keeps its current position', async () => {
+    const now = new Date(), tomorrow = (now.getUTCDay() + 1) % 7;
+    const { row } = await enroll({ sequence: { sendingWindow: { timezone: 'UTC', days: [tomorrow], start: 540, end: 1020 } } });
+    await run(); expect(sendEmail).not.toHaveBeenCalled(); const after = await reload(row.id);
+    expect(after.currentStep).toBe(0); expect(after.nextSendAt > now).toBe(true);
+  });
+  it('keeps an unsubscribe during delivery stopped, including on the last step', async () => {
+    const { row } = await enroll({ steps: [STEPS[0]] });
+    sendEmail.mockImplementation(async () => { await prisma.emailSequenceEnrollment.update({ where: { id: row.id }, data: { status: 'Opted Out', nextSendAt: null } }); return delivered; });
+    await run(); expect(await reload(row.id)).toMatchObject({ status: 'Opted Out', currentStep: 0, nextSendAt: null });
+  });
+  it('pauses a changed address so an old unsubscribe link cannot target a different person', async () => {
+    const { row } = await enroll({ enrollment: { recipientEmail: 'old@example.test' } });
+    await run(); expect(sendEmail).not.toHaveBeenCalled(); expect(await reload(row.id)).toMatchObject({ status: 'Paused', recipientEmail: 'old@example.test' });
+  });
+});
+
 const originalSmtp = process.env.SMTP_HOST;
 
 beforeAll(async () => { ({ prisma, app } = await setup()); });
@@ -92,12 +127,15 @@ describe('a step that goes out', () => {
 
     expect(result).toMatchObject({ processed: 1, sent: 1, completed: 0, retrying: 0, bounced: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    expect(sendEmail).toHaveBeenCalledWith(prisma, { to: 'prospect@example.test', subject: 'Hello', body: 'one' });
+    expect(sendEmail).toHaveBeenCalledWith(prisma, expect.objectContaining({ to: 'prospect@example.test', subject: 'Hello', body: expect.stringContaining('one\n\nUnsubscribe: ') }));
+    expect(sendEmail.mock.calls[0][1].headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
     const email = await prisma.email.findFirst();
     expect(email).toMatchObject({ subject: 'Hello', toEmail: 'prospect@example.test', status: 'sent', contactId: person.id });
     expect(email.sentAt).toBeInstanceOf(Date);
     const after = await reload(row.id);
     expect(after.currentStep).toBe(1);
+    expect(after.lastSentAt).toBeInstanceOf(Date);
+    expect(after.lastError).toBeNull();
     expect(after.nextSendAt.getTime()).toBeGreaterThan(Date.now() + 2 * DAY - 60000);
     expect(after.nextSendAt.getTime()).toBeLessThan(Date.now() + 2 * DAY + 60000);
   });
@@ -130,7 +168,7 @@ describe('a step that goes out', () => {
 
     await run();
 
-    expect(sendEmail).toHaveBeenCalledWith(prisma, { to: 'prospect@example.test', subject: 'From the template', body: 'template body' });
+    expect(sendEmail).toHaveBeenCalledWith(prisma, expect.objectContaining({ to: 'prospect@example.test', subject: 'From the template', body: expect.stringContaining('template body\n\nUnsubscribe: ') }));
   });
 });
 
@@ -145,6 +183,7 @@ describe('a send that fails', () => {
     expect(result).toMatchObject({ sent: 0, retrying: 1, bounced: 0 });
     const after = await reload(row.id);
     expect(after).toMatchObject({ currentStep: 0, status: 'Active' });
+    expect(after.lastError).toBe('mailbox unavailable');
     expect(after.nextSendAt.getTime()).toBeGreaterThan(Date.now() + HOUR - 60000);
     expect(after.nextSendAt.getTime()).toBeLessThan(Date.now() + HOUR + 60000);
     expect(await prisma.email.findFirst()).toMatchObject({ status: 'failed', sentAt: null });
@@ -204,23 +243,23 @@ describe('two runs at the same moment', () => {
 });
 
 describe('what is left alone', () => {
-  it('skips a suppressed address, sends nothing, and moves on', async () => {
+  it('stops a suppressed address without advancing or sending', async () => {
     const { row } = await enroll();
 
     const result = await run(async address => address === 'prospect@example.test');
 
     expect(result).toMatchObject({ processed: 1, sent: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
-    expect((await reload(row.id)).currentStep).toBe(1);
+    expect(await reload(row.id)).toMatchObject({ currentStep: 0, status: 'Opted Out', nextSendAt: null });
   });
 
-  it('skips a deleted contact, sends nothing, and moves on', async () => {
+  it('stops a deleted contact without advancing or sending', async () => {
     const { row } = await enroll({ contact: { deletedAt: new Date() } });
 
     expect(await run()).toMatchObject({ processed: 1, sent: 0 });
 
     expect(sendEmail).not.toHaveBeenCalled();
-    expect((await reload(row.id)).currentStep).toBe(1);
+    expect(await reload(row.id)).toMatchObject({ currentStep: 0, status: 'Bounced', nextSendAt: null });
   });
 
   it('does not touch the enrollments of a paused sequence, or ones not yet due', async () => {

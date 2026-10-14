@@ -4,7 +4,9 @@ const path = require('path');
 const sourcePath = path.join(__dirname, '..', 'prisma', 'schema.prisma');
 const outputPath = path.join(__dirname, '..', 'prisma', 'schema.sqlite.prisma');
 
-let schema = fs.readFileSync(sourcePath, 'utf8');
+// Normalize Windows checkouts before matching schema blocks. Otherwise the
+// SQLite generation can retain PostgreSQL's default client output and overwrite it.
+let schema = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n');
 
 schema = schema.replace(
   'generator client {\n  provider = "prisma-client-js"\n}',
@@ -25,5 +27,8 @@ schema = schema.replace(
   },
 );
 
+if (!schema.includes('output   = "../src/generated/sqlite-client"') || !schema.includes('provider = "sqlite"')) {
+  throw new Error('SQLite schema generation did not replace the client output and datasource blocks');
+}
 fs.writeFileSync(outputPath, schema);
 console.log(`Generated ${path.relative(process.cwd(), outputPath)}`);

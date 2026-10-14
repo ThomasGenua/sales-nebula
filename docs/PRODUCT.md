@@ -26,8 +26,8 @@ licence.
 modules share one list, filter and write pattern, and webhooks and an OAuth
 2.0 provider connect other systems.
 
-**Not yet for teams that need:** mail and calendar sync with Gmail or
-Outlook, e-signature, Slack, PDF documents, a mobile app, running visual
+**Not yet for teams that need:** Gmail mail sync, Google/Outlook calendar
+sync, e-signature, Slack, PDF documents, a mobile app, running visual
 flows or AI agents, or several companies in one install. See
 [Feature status](FEATURE_STATUS.md#not-built).
 
@@ -43,6 +43,13 @@ from the web form automatically, and other leads on request.
 
 **Deals** -- A pipeline with stages and probabilities, contact roles,
 competitors, stage history, and velocity, aging and win/loss figures.
+The board supports drag-and-drop stage changes, stage age, next actions and
+saved filters. My Day collects overdue work, today's activities, new owned
+leads and deals needing attention. Related lists support creating linked records.
+
+**Personal Outlook mail** -- Connect with Microsoft consent, sync Inbox and
+Sent Items, associate visible contacts and deals, reply in a private conversation,
+and schedule follow-ups. See [Sales workspace](SALES_WORKSPACE.md) for setup.
 
 **Quotes and invoices** -- Quotes with line items, discounts and totals;
 accepting a quote, turning it into an invoice or an order, and versions.
@@ -75,7 +82,8 @@ campaign to its recipients is not available yet: the send action answers 501
 and changes nothing. Individual sales emails go out when SMTP is set up.
 
 **Email sequences** -- Multi-step sequences whose steps are sent every 10
-minutes when SMTP is set up.
+minutes when SMTP is set up. The editor supports templates, delays, reordering,
+activation, pausing, enrollment and delivery status.
 
 ### 4. Automation
 
@@ -98,9 +106,11 @@ the submitter's manager or a queue, with entry conditions and final actions.
 using Claude when an Anthropic API key is set. Without one it answers from
 fixed rules, and says so.
 
-**Reports** -- Saved tabular, summary and chart reports that return real
-figures, limited to what each viewer may see, with CSV and JSON export
-through the API. Scheduled delivery is not available.
+**Reports** -- A builder for saved tabular, summary and chart reports, with
+filters, columns, measures, shared definitions, drilldown and CSV export of the
+displayed results. Results respect each viewer's record access. Sales performance
+includes win/loss, recorded sales cycle and observed stage progression. CSV and
+JSON detail export also exist through the API; scheduled delivery is unavailable.
 
 **Analytics** -- A pipeline and activity overview, an ad-hoc query, and
 funnel and cohort figures.

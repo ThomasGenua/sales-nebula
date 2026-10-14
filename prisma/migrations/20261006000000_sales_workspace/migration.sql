@@ -1,0 +1,15 @@
+ALTER TABLE "Activity" ADD COLUMN "leadId" TEXT;
+CREATE INDEX "Activity_leadId_idx" ON "Activity"("leadId");
+ALTER TABLE "InboundEmailAccount" ADD COLUMN "ownerId" TEXT;
+ALTER TABLE "InboundEmailAccount" ADD COLUMN "oauthStateHash" TEXT;
+ALTER TABLE "InboundEmailAccount" ADD COLUMN "oauthStateExpiresAt" TIMESTAMP(3);
+ALTER TABLE "InboundEmailAccount" ADD COLUMN "syncCursor" TEXT;
+CREATE INDEX "InboundEmailAccount_ownerId_idx" ON "InboundEmailAccount"("ownerId");
+ALTER TABLE "InboundEmailMessage" ADD COLUMN "contactId" TEXT;
+ALTER TABLE "InboundEmailMessage" ADD COLUMN "dealId" TEXT;
+ALTER TABLE "InboundEmailMessage" ADD COLUMN "replyBody" TEXT;
+CREATE INDEX "InboundEmailMessage_contactId_idx" ON "InboundEmailMessage"("contactId");
+CREATE INDEX "InboundEmailMessage_dealId_idx" ON "InboundEmailMessage"("dealId");
+ALTER TABLE "InboundEmailMessage" ADD COLUMN "direction" TEXT NOT NULL DEFAULT 'inbound';
+ALTER TABLE "EmailSequenceEnrollment" ADD COLUMN "lastError" TEXT;
+ALTER TABLE "EmailSequenceEnrollment" ADD COLUMN "lastSentAt" TIMESTAMP(3);

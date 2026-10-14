@@ -3,7 +3,7 @@ const { requirePermission } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { isAdmin, subordinateUserIds } = require('../middleware/rowSecurity');
 const { fireWebhookEvent } = require('../services/webhooks');
-const { createRecord, updateRecord } = require('../services/recordWrites');
+const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
 
 /**
  * Whose activities a list shows: the caller's own, or another user's for an
@@ -140,39 +140,46 @@ module.exports = createCrudRouter('activity', 'activities', {
         // As an edit (services/recordWrites): the activity's rules, audit
         // trail, and the workflows on its status, which completing one never
         // reached; the follow-up is made as a new activity is.
-        const write = { req, userId: req.userId, source: 'completed' };
-        const { record: activity } = await updateRecord(prisma, 'activities', req.params.id, {
-          // When it was done: completedAt was never set.
-          status: 'Completed',
-          completedAt: new Date(),
-          result: req.body.result || 'Completed',
-        }, {
-          ...write,
-          include: {
-            contact: { select: { id: true, firstName: true, lastName: true } },
-            deal: { select: { id: true, name: true } },
-          },
+        if (req.body.followUp?.date !== undefined && (!req.body.followUp.date || Number.isNaN(new Date(req.body.followUp.date).getTime()))) return res.status(400).json({ error: 'A valid follow-up date is required' });
+        const after = [];
+        const activity = await prisma.$transaction(async tx => {
+          const write = { req, userId: req.userId, source: 'completed', after, prisma };
+          const { record: activity } = await updateRecord(tx, 'activities', req.params.id, {
+            // When it was done: completedAt was never set.
+            status: 'Completed',
+            completedAt: new Date(),
+            result: req.body.result || 'Completed',
+          }, {
+            ...write,
+            include: {
+              contact: { select: { id: true, firstName: true, lastName: true } },
+              deal: { select: { id: true, name: true } },
+            },
+          });
+
+          // Auto-create follow-up if requested. It is the completer's, as an
+          // activity they create is, and Scheduled, the status activities start
+          // in; with no owner or assignee, a Private default hid it from them.
+          if (req.body.followUp) {
+            const due = new Date(req.body.followUp.date || Date.now() + 7 * 86400000);
+            await createRecord(tx, 'activities', {
+              type: req.body.followUp.type || 'Task',
+              subject: req.body.followUp.subject || `Follow-up: ${activity.subject}`,
+              date: due,
+              dueDate: due,
+              ownerId: req.userId,
+              assignedId: activity.assignedId || req.userId,
+              leadId: activity.leadId,
+              contactId: activity.contactId,
+              dealId: activity.dealId,
+              accountId: activity.accountId,
+              status: 'Scheduled',
+            }, { req, userId: req.userId, source: 'follow-up', emit: req.app.locals.emit, after, prisma });
+          }
+
+          return activity;
         });
-
-        // Auto-create follow-up if requested. It is the completer's, as an
-        // activity they create is, and Scheduled, the status activities start
-        // in; with no owner or assignee, a Private default hid it from them.
-        if (req.body.followUp) {
-          const due = new Date(req.body.followUp.date || Date.now() + 7 * 86400000);
-          await createRecord(prisma, 'activities', {
-            type: req.body.followUp.type || 'Task',
-            subject: req.body.followUp.subject || `Follow-up: ${activity.subject}`,
-            date: due,
-            dueDate: due,
-            ownerId: req.userId,
-            assignedId: activity.assignedId || req.userId,
-            contactId: activity.contactId,
-            dealId: activity.dealId,
-            accountId: activity.accountId,
-            status: 'Scheduled',
-          }, { userId: req.userId, source: 'follow-up', emit: req.app.locals.emit });
-        }
-
+        await runAfter(after);
         await fireWebhookEvent(prisma, 'activity.completed', { id: activity.id, type: activity.type });
         res.json(activity);
       } catch (err) { next(err); }
@@ -227,7 +234,7 @@ module.exports = createCrudRouter('activity', 'activities', {
     router.post('/log-call', async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;
-        const { contactId, dealId, accountId, subject, description, duration, result } = req.body;
+        const { contactId, leadId, dealId, accountId, subject, description, duration, result } = req.body;
         // Only on records the caller can see (the write's link check). The
         // keys were stored as sent, so a call could be filed on anyone's deal
         // and its name read back. Made as an activity is on its own page
@@ -245,7 +252,7 @@ module.exports = createCrudRouter('activity', 'activities', {
           // every call logged here.
           ownerId: req.userId,
           assignedId: req.userId,
-          contactId, dealId, accountId,
+          contactId, leadId, dealId, accountId,
         }, {
           req, userId: req.userId, source: 'logged call',
           include: {
