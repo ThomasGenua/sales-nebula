@@ -150,7 +150,7 @@ Server-to-server integrations use API keys passed via `X-API-Key` header. Only a
 | Webhook signing | HMAC-SHA256 | Outbound request verification |
 | Account lockout | Configurable threshold | Brute-force login prevention |
 | Audit trail | AuditLog table | Record writes and audited actions, kept 90 days |
-| Event logging | EventLog table | Defined; nothing writes it yet |
+| Event logging | EventLog table | One row an API request: route, status, time taken, user; written in batches, kept 30 days |
 
 ## Operational Architecture
 

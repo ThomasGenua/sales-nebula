@@ -1074,7 +1074,7 @@ Login history, event logs, summary
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/monitoring/login-history` | Get login history log |
-| GET | `/api/monitoring/event-logs` | Get platform event logs |
+| GET | `/api/monitoring/event-logs` | API request events (route pattern, method, status, time taken, user), filtered by `eventType`, `module`, `userId`, `from`, `to` |
 | GET | `/api/monitoring/metrics` | Summary: active users, sign-ins and failed sign-ins in the last 24 hours, API calls and 5xx errors in the last hour, uptime and memory |
 
 ### `/api/duplicates`

@@ -534,6 +534,13 @@ const handlers = {
     return { deleted: deleted.count };
   },
 
+  // API events are one row a request (services/eventLog): a month of them.
+  async cleanupEventLogs() {
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
+    const deleted = await prisma.eventLog.deleteMany({ where: { timestamp: { lt: cutoff } } });
+    return { deleted: deleted.count };
+  },
+
   async cleanupNotifications() {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
     const deleted = await prisma.notification.deleteMany({ where: { read: true, createdAt: { lt: cutoff } } });
@@ -698,6 +705,7 @@ function initJobQueue(databaseClient) {
     queues.maintenance.process('overdue-invoices', async () => withRetry('checkOverdueInvoices', handlers.checkOverdueInvoices));
     queues.maintenance.process('recalc-forecasts', async () => withRetry('recalcForecasts', handlers.recalcForecasts));
     queues.maintenance.process('cleanup-audit', async () => withRetry('cleanupAuditLogs', handlers.cleanupAuditLogs));
+    queues.maintenance.process('cleanup-event-logs', async () => withRetry('cleanupEventLogs', handlers.cleanupEventLogs));
     queues.maintenance.process('cleanup-notifications', async () => withRetry('cleanupNotifications', handlers.cleanupNotifications));
     queues.maintenance.process('stale-deals', async () => withRetry('checkStaleDeals', handlers.checkStaleDeals));
     queues.workflows.process('scheduled', async () => withRetry('runScheduledWorkflows', handlers.runScheduledWorkflows));
@@ -714,6 +722,7 @@ function initJobQueue(databaseClient) {
     queues.maintenance.add('overdue-invoices', {}, { repeat: { cron: '0 6 * * *' } });
     queues.maintenance.add('recalc-forecasts', {}, { repeat: { cron: '0 */4 * * *' } });
     queues.maintenance.add('cleanup-audit', {}, { repeat: { cron: '0 2 * * 0' } });
+    queues.maintenance.add('cleanup-event-logs', {}, { repeat: { cron: '30 2 * * *' } });
     queues.maintenance.add('cleanup-notifications', {}, { repeat: { cron: '0 3 * * 0' } });
     queues.maintenance.add('stale-deals', {}, { repeat: { cron: '0 8 * * 1' } });
     queues.workflows.add('scheduled', {}, { repeat: { cron: '*/15 * * * *' } });
@@ -736,6 +745,7 @@ function initJobQueue(databaseClient) {
     cron.schedule('0 6 * * *', () => withRetry('checkOverdueInvoices', handlers.checkOverdueInvoices).catch(() => {}));
     cron.schedule('0 */4 * * *', () => withRetry('recalcForecasts', handlers.recalcForecasts).catch(() => {}));
     cron.schedule('0 2 * * 0', () => withRetry('cleanupAuditLogs', handlers.cleanupAuditLogs).catch(() => {}));
+    cron.schedule('30 2 * * *', () => withRetry('cleanupEventLogs', handlers.cleanupEventLogs).catch(() => {}));
     cron.schedule('0 3 * * 0', () => withRetry('cleanupNotifications', handlers.cleanupNotifications).catch(() => {}));
     cron.schedule('0 8 * * 1', () => withRetry('checkStaleDeals', handlers.checkStaleDeals).catch(() => {}));
     cron.schedule('*/15 * * * *', () => withRetry('runScheduledWorkflows', handlers.runScheduledWorkflows).catch(() => {}));

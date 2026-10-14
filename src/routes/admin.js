@@ -349,6 +349,7 @@ router.get('/jobs', requirePermission('settings', 'read'), async (req, res, next
           checkOverdueInvoices: 'Mark overdue invoices and notify',
           recalcForecasts: 'Recalculate forecast totals from deals',
           cleanupAuditLogs: 'Delete audit log entries older than 90 days',
+          cleanupEventLogs: 'Delete API event log entries older than 30 days',
           cleanupNotifications: 'Remove read notifications older than 30 days',
           checkStaleDeals: 'Flag deals with no activity in 14+ days',
           runScheduledWorkflows: 'Execute scheduled workflow automations',

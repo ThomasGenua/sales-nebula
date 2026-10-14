@@ -16,6 +16,7 @@ const { limiters } = require('./middleware/rateLimit');
 const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
+const { createEventLog } = require('./services/eventLog');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
 const { RecordWriteError, createRecord } = require('./services/recordWrites');
 
@@ -48,7 +49,7 @@ function inlineScriptHashes(spaDir) {
   }
 }
 
-function createApp(rawPrisma) {
+function createApp(rawPrisma, options = {}) {
   // Every query the app makes goes through the guard: no write reaches users,
   // roles or access settings by way of another table (utils/nestedWriteGuard).
   const prisma = guardNestedWrites(rawPrisma);
@@ -146,6 +147,13 @@ function createApp(rawPrisma) {
   const { middleware: metricsMiddleware, route: metricsRoute } = initMetrics();
   if (!isTest) app.use(metricsMiddleware);
   app.get('/metrics', metricsRoute);
+
+  // ─── EVENT LOG ───
+  // Each API request, for /api/monitoring's counts and event search
+  // (services/eventLog). Off in tests, as the request log and metrics are,
+  // unless a test asks for it.
+  app.locals.eventLog = (options.eventLog ?? !isTest) ? createEventLog(prisma) : null;
+  if (app.locals.eventLog) app.use('/api', app.locals.eventLog.middleware);
 
   // ─── STATIC FILES ───
   // Uploaded files are never served statically. This mount used to publish the

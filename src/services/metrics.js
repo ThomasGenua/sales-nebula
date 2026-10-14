@@ -8,8 +8,17 @@ let promClient;
 try { promClient = require('prom-client'); } catch (e) { promClient = null; }
 
 let metrics = null;
+let initialized = null;
 
+// Prometheus keeps one registry a process, so the metrics are registered
+// once: a second app in the same process (a test that makes its own)
+// registering them again threw.
 function initMetrics() {
+  if (!initialized) initialized = registerMetrics();
+  return initialized;
+}
+
+function registerMetrics() {
   if (!promClient) {
     return {
       middleware: (req, res, next) => next(),

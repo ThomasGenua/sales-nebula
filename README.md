@@ -308,7 +308,7 @@ The tables below list the API modules, grouped the way Salesforce groups its clo
 | MFA | `/api/security` | Authenticator-app (TOTP) multi-factor authentication |
 | Encryption (Shield) | `/api/security` | Not available; saving a policy answers 501 |
 | Consent | `/api/consent` | Consent records with opt-in and opt-out per contact, for signed-in users (there is no public opt-out link) |
-| Monitoring | `/api/monitoring` | Login history and 24-hour sign-in figures (nothing writes event logs yet) |
+| Monitoring | `/api/monitoring` | Login history, 24-hour sign-in figures, and an event log of API requests (kept 30 days) with call and error counts |
 | Admin Dashboard | `/api/admin/dashboard` | System health, record counts, security metrics, revenue pipeline, recent activity |
 | Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time; no user for a web form, inbound mail or a job), kept 90 days |
 | Recycle Bin | `/api/recycle-bin` | Restore deleted records within 30 days |
