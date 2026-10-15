@@ -242,6 +242,17 @@ describe('Duplicate rules', () => {
     expect(pairs[0].confidence).toBe(100);
   });
 
+  it('catches a copy that differs only in case', async () => {
+    await emailRule('block');
+    await createTestContact({ email: 'dupe@example.com' });
+
+    const res = await request(app).post('/api/contacts').set(authHeader(user.token))
+      .send({ firstName: 'Copy', lastName: 'Cat', email: 'Dupe@Example.com' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.duplicates[0].matchedFields).toEqual(['email']);
+  });
+
   it('leaves a genuinely different record alone', async () => {
     await emailRule('block');
     await createTestContact({ email: 'someone@example.com' });

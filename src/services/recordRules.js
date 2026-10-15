@@ -130,7 +130,7 @@ async function applyAssignmentRules(prisma, moduleName, data) {
  * available weight that matched, so a rule with one field at weight 100 and a
  * matching email scores 100.
  */
-async function findDuplicates(prisma, moduleName, data, { excludeId } = {}) {
+async function findDuplicates(prisma, moduleName, data, { exclude = [], changed } = {}) {
   const modelName = resolveModel(moduleName);
   if (!modelName) return [];
 
@@ -143,18 +143,30 @@ async function findDuplicates(prisma, moduleName, data, { excludeId } = {}) {
     const matchFields = (Array.isArray(rule.matchFields) ? rule.matchFields : [])
       .filter(f => f?.field && modelHasField(modelName, f.field));
     if (!matchFields.length) continue;
+    // On an update, only a rule matching on a field the update changes: an
+    // edit of something else makes no new duplicate, and a record that is
+    // already one must stay editable.
+    if (changed && !matchFields.some(f => changed.has(f.field))) continue;
 
     // Only look at records that share at least one field, rather than scanning.
-    const or = matchFields
-      .filter(f => data[f.field])
-      .map(f => ({ [f.field]: data[f.field] }));
-    if (!or.length) continue;
+    const present = matchFields.filter(f => data[f.field]);
+    if (!present.length) continue;
 
-    const where = { OR: or };
-    if (excludeId) where.id = { not: excludeId };
+    const where = {};
+    if (exclude.length) where.id = { notIn: exclude };
     if (modelHasField(modelName, 'deletedAt')) where.deletedAt = null;
 
-    const candidates = await prisma[modelName].findMany({ where, take: 25 }).catch(() => []);
+    // Text is looked up regardless of case, as the score below compares it:
+    // the exact lookup let ADA@example.com past a rule on ada@example.com.
+    // SQLite, the development fallback, has no case-insensitive mode; there
+    // only the exact match is tried.
+    const lookup = insensitive => ({
+      where: { ...where, OR: present.map(f => ({ [f.field]: insensitive && typeof data[f.field] === 'string' ? { equals: data[f.field], mode: 'insensitive' } : data[f.field] })) },
+      take: 25,
+    });
+    const candidates = await prisma[modelName].findMany(lookup(true))
+      .catch(() => prisma[modelName].findMany(lookup(false)))
+      .catch(() => []);
     const totalWeight = matchFields.reduce((sum, f) => sum + (Number(f.weight) || 0), 0) || 1;
 
     for (const candidate of candidates) {
@@ -183,9 +195,20 @@ async function findDuplicates(prisma, moduleName, data, { excludeId } = {}) {
   return findings.sort((a, b) => b.score - a.score);
 }
 
-/** Keep a trace of a duplicate we allowed through, for the review queue. */
+/**
+ * Keep a trace of a duplicate we allowed through, for the review queue: once
+ * per rule and pair, so editing a record again does not queue it again.
+ */
 async function recordDuplicates(prisma, moduleName, newId, findings) {
   for (const finding of findings) {
+    const known = await prisma.duplicateRecord.findFirst({
+      where: {
+        ruleId: finding.ruleId, module: moduleName,
+        OR: [{ recordIdA: newId, recordIdB: finding.recordId }, { recordIdA: finding.recordId, recordIdB: newId }],
+      },
+      select: { id: true },
+    }).catch(() => null);
+    if (known) continue;
     await prisma.duplicateRecord.create({
       data: {
         ruleId: finding.ruleId,

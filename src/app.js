@@ -16,6 +16,7 @@ const { limiters } = require('./middleware/rateLimit');
 const { sanitize } = require('./middleware/sanitize');
 const { requestLogger } = require('./services/logger');
 const { initMetrics } = require('./services/metrics');
+const { createEventLog } = require('./services/eventLog');
 const { guardNestedWrites } = require('./utils/nestedWriteGuard');
 const { RecordWriteError, createRecord } = require('./services/recordWrites');
 
@@ -48,7 +49,7 @@ function inlineScriptHashes(spaDir) {
   }
 }
 
-function createApp(rawPrisma) {
+function createApp(rawPrisma, options = {}) {
   // Every query the app makes goes through the guard: no write reaches users,
   // roles or access settings by way of another table (utils/nestedWriteGuard).
   const prisma = guardNestedWrites(rawPrisma);
@@ -147,6 +148,13 @@ function createApp(rawPrisma) {
   if (!isTest) app.use(metricsMiddleware);
   app.get('/metrics', metricsRoute);
 
+  // ─── EVENT LOG ───
+  // Each API request, for /api/monitoring's counts and event search
+  // (services/eventLog). Off in tests, as the request log and metrics are,
+  // unless a test asks for it.
+  app.locals.eventLog = (options.eventLog ?? !isTest) ? createEventLog(prisma) : null;
+  if (app.locals.eventLog) app.use('/api', app.locals.eventLog.middleware);
+
   // ─── STATIC FILES ───
   // Uploaded files are never served statically. This mount used to publish the
   // whole directory without authentication and with the browser's own content
@@ -193,38 +201,19 @@ function createApp(rawPrisma) {
         return res.status(409).json({ error: 'A lead with this email already exists' });
       }
 
-      // Scored before it is saved, from the same rules as before, so the lead
-      // is written once.
-      let score = 50;
-      try {
-        const scoringRules = await prisma.leadScoringRule.findMany({ where: { active: true } });
-        const submitted = { firstName, lastName, email, phone, company, source: source || 'Web Form', description };
-        for (const r of scoringRules) {
-          const val = String(submitted[r.field] || '').toLowerCase();
-          const target = r.value.toLowerCase();
-          let match = false;
-          switch (r.operator) {
-            case 'equals': match = val === target; break;
-            case 'contains': match = val.includes(target); break;
-            case 'startsWith': match = val.startsWith(target); break;
-          }
-          if (match) score += r.points;
-        }
-        score = Math.max(0, Math.min(100, score));
-      } catch (e) { /* Scoring optional */ }
-
-      // As a lead made in the app is (services/recordWrites): validation and
-      // duplicate rules, an owner from the assignment rules, then the
-      // workflows and webhooks for new leads, none of which ran for the form
-      // that brings most of them in. It had its own round-robin, which read
-      // only the first such rule, ignored rule-based ones and could hand two
-      // leads to the same person at once.
+      // As a lead made in the app is (services/recordWrites): scored by the
+      // lead scoring rules, validation and duplicate rules, an owner from
+      // the assignment rules, then the workflows and webhooks for new leads,
+      // none of which ran for the form that brings most of them in. It had
+      // its own round-robin, which read only the first such rule, ignored
+      // rule-based ones and could hand two leads to the same person at once;
+      // and its own scoring, which knew three of the rules' operators.
       let lead;
       try {
         ({ record: lead } = await createRecord(prisma, 'leads', {
           firstName, lastName, email, phone,
           company, source: source || 'Web Form',
-          description, status: 'New', score,
+          description, status: 'New',
         }, { source: 'web-to-lead', emit: app.locals.emit }));
       } catch (err) {
         // The rule's message only: a duplicate's id, or a rule's name, is no

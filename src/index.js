@@ -14,6 +14,7 @@ const { createDatabaseClient } = require('./database');
 
 let prisma;
 let server;
+let eventLog;
 
 // ─── STARTUP ───
 async function start() {
@@ -33,6 +34,7 @@ async function start() {
   prisma = database.prisma;
 
   const app = createApp(prisma);
+  eventLog = app.locals.eventLog;
   server = http.createServer(app);
 
   // Override stubs with real services
@@ -87,6 +89,8 @@ start().catch(err => {
 async function shutdown(signal) {
   logger.info({ signal }, 'Shutting down...');
   if (server) server.close();
+  // The API events still held in memory (services/eventLog).
+  if (eventLog) await eventLog.flush();
   if (prisma) await prisma.$disconnect();
   process.exit(0);
 }

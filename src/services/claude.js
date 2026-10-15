@@ -12,13 +12,16 @@
  */
 const Anthropic = require('@anthropic-ai/sdk');
 
-const DEFAULT_MODEL = 'claude-opus-5';
+// The current Opus. Calls here send no thinking, effort or tool_choice
+// settings, so its changes from Claude Opus 5 (thinking always on, effort
+// defaulting to medium, no forced tool use) need nothing here.
+const DEFAULT_MODEL = 'claude-opus-5-5';
 
 // When a model's safety classifiers decline a request, the server-side
 // fallback re-runs it on the model Anthropic recommends for that refusal
 // category, in the same call. Only these models take the parameter; any
 // other ANTHROPIC_MODEL is called without it.
-const FALLBACK_MODELS = new Set(['claude-opus-5', 'claude-fable-5', 'claude-fable-5-1']);
+const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1']);
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 // Thinking counts against max_tokens, so leave room for it. This is a

@@ -185,7 +185,7 @@ PostgreSQL 16            Redis 7, optional
 
 **CRUD Router Factory** (`src/utils/crud.js`) generates standardized REST endpoints for any module in a single function call. Each generated router includes paginated listing, full-text search, field selection, sorting, audit logging, soft deletes, and permission checks. Modules requiring custom logic extend the base router via hooks: `beforeCreate`, `afterUpdate`, `validate`, `searchFilter`, and `customRoutes`.
 
-**One Write Path** (`src/services/recordWrites.js`) is how a record of a module is created, changed or deleted, wherever the change comes from: the CRUD routers, import, the bulk API, mass actions, mobile sync, lead and prospect conversion, web-to-lead, web-to-case, email-to-case, the portal, inbound mail, the jobs, and each module's own actions (escalate, activate, renew, merge, clone). It runs the module's hooks (numbering, a case's closedAt and status history, a deal's currency and stage history), then validation rules (and, on create, duplicate and assignment rules) before the write, and audit, security groups, real-time events, workflows and webhooks after it. Inside a transaction the automation waits until it commits (`runAfter`). A write a rule refuses throws a `RecordWriteError`, which the API answers with the rule's message; a batch reports it against the row and carries on with the rest. `tests/writePaths.test.js` fails when a file writes these records directly, except for the few bookkeeping writes it lists with a reason.
+**One Write Path** (`src/services/recordWrites.js`) is how a record of a module is created, changed or deleted, wherever the change comes from: the CRUD routers, import, the bulk API, mass actions, mobile sync, lead and prospect conversion, web-to-lead, web-to-case, email-to-case, the portal, inbound mail, the jobs, and each module's own actions (escalate, activate, renew, merge, clone). It runs the module's hooks (numbering, a case's closedAt and status history, a deal's currency and stage history), then validation rules, duplicate rules (on create, and on an update that changes a field one matches on) and, on create, assignment rules before the write, and audit, security groups, real-time events, workflows and webhooks after it. Inside a transaction the automation waits until it commits (`runAfter`). A write a rule refuses throws a `RecordWriteError`, which the API answers with the rule's message; a batch reports it against the row and carries on with the rest. `tests/writePaths.test.js` fails when a file writes these records directly, except for the few bookkeeping writes it lists with a reason.
 
 **Middleware Stack** is applied in this order: Helmet (security headers, with a content security policy in production), compression, a request ID, CORS, body parsing, an HTTP parameter pollution guard, XSS filtering of bodies and query strings, logging, metrics, then rate limiting on `/api`. After that, route-level middleware handles JWT authentication, permission checks, and audit logging.
 
@@ -201,7 +201,7 @@ The tables below list the API modules, grouped the way Salesforce groups its clo
 
 | Module | Endpoint | Description |
 |--------|----------|-------------|
-| Leads | `/api/leads` | Lead capture, web-to-lead, assignment rules; rule-based scoring (automatic for web-to-lead, on request otherwise) |
+| Leads | `/api/leads` | Lead capture, web-to-lead, assignment rules; rule-based scoring on every save |
 | Contacts | `/api/contacts` | Contact management with account relationships |
 | Accounts | `/api/accounts` | B2B account hierarchy, team assignments |
 | Person Accounts | `/api/person-accounts` | B2C individual accounts |
@@ -308,11 +308,11 @@ The tables below list the API modules, grouped the way Salesforce groups its clo
 | MFA | `/api/security` | Authenticator-app (TOTP) multi-factor authentication |
 | Encryption (Shield) | `/api/security` | Not available; saving a policy answers 501 |
 | Consent | `/api/consent` | Consent records with opt-in and opt-out per contact, for signed-in users (there is no public opt-out link) |
-| Monitoring | `/api/monitoring` | Login history and 24-hour sign-in figures (nothing writes event logs yet) |
+| Monitoring | `/api/monitoring` | Login history, 24-hour sign-in figures, and an event log of API requests (kept 30 days) with call and error counts |
 | Admin Dashboard | `/api/admin/dashboard` | System health, record counts, security metrics, revenue pipeline, recent activity |
-| Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time), kept 90 days |
+| Audit Log | `/api/admin/audit-log` | Record writes and audited actions (action, module, record, user, time; no user for a web form, inbound mail or a job), kept 90 days |
 | Recycle Bin | `/api/recycle-bin` | Restore deleted records within 30 days |
-| Duplicate Management | `/api/duplicates` | Duplicate rules checked when a record is created; merge for contacts, leads and accounts |
+| Duplicate Management | `/api/duplicates` | Duplicate rules checked when a record is created or an edit changes a field they match on; merge for contacts, leads and accounts |
 
 ### Other Modules
 
@@ -625,7 +625,7 @@ Copy `.env.example` to `.env` and configure. All variables with defaults are opt
 |----------|-------------|
 | `REDIS_URL` | Redis connection string for caching and job queues |
 | `ANTHROPIC_API_KEY` | Anthropic API key (enables the AI endpoints and the Copilot) |
-| `ANTHROPIC_MODEL` | Claude model for every AI call (default `claude-opus-5`) |
+| `ANTHROPIC_MODEL` | Claude model for every AI call (default `claude-opus-5-5`) |
 
 **File Storage** (S3 or local fallback):
 

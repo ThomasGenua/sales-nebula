@@ -135,7 +135,7 @@ router.get('/predictions/history', authenticate, async (req, res, next) => {
 // sets, and wrote the scores past every rule and workflow. Lead scores come
 // from those rules.
 router.post('/leads/batch-score', authenticate, requirePermission('leads', 'edit'), (req, res) => unavailable(res, 'AI_LEAD_SCORING_UNAVAILABLE',
-  'There is no AI lead scoring. Scores come from your lead scoring rules: POST /api/admin/score-all-leads rescores every lead, POST /api/leads/:id/score one lead. No lead was changed.'));
+  'There is no AI lead scoring. Scores come from your lead scoring rules, which score a lead whenever it is saved: POST /api/admin/score-all-leads rescores every open lead, POST /api/leads/:id/score one lead. No lead was changed.'));
 
 // What is a model and what is a rule. This listed versioned "models" for lead
 // scoring, deal prediction and a case classification that does not exist, and

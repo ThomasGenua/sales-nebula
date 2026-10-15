@@ -1074,7 +1074,7 @@ Login history, event logs, summary
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/monitoring/login-history` | Get login history log |
-| GET | `/api/monitoring/event-logs` | Get platform event logs |
+| GET | `/api/monitoring/event-logs` | API request events (route pattern, method, status, time taken, user), filtered by `eventType`, `module`, `userId`, `from`, `to` |
 | GET | `/api/monitoring/metrics` | Summary: active users, sign-ins and failed sign-ins in the last 24 hours, API calls and 5xx errors in the last hour, uptime and memory |
 
 ### `/api/duplicates`
@@ -1221,7 +1221,7 @@ System config, custom fields, audit, scoring, SLA, API keys, currencies
 | POST | `/api/admin/scoring-rules` | Create lead scoring rule |
 | PUT | `/api/admin/scoring-rules/:id` | Update lead scoring rule |
 | DELETE | `/api/admin/scoring-rules/:id` | Delete lead scoring rule |
-| POST | `/api/admin/score-all-leads` | Trigger lead scoring for all leads |
+| POST | `/api/admin/score-all-leads` | Rescore the open leads, e.g. after a rule changes (a save scores one lead) |
 | GET | `/api/admin/assignment-rules` | List assignment rules |
 | POST | `/api/admin/assignment-rules` | Create assignment rule |
 | PUT | `/api/admin/assignment-rules/:id` | Update assignment rule |

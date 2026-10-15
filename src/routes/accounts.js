@@ -223,7 +223,7 @@ router.post('/:id/merge', authenticate, requirePermission('accounts', 'full'), a
     // and a recycle bin entry. It was only marked deleted, with nothing in the
     // bin and no delete webhook.
     const write = { req, userId: req.userId, source: `merge of ${mergeFromId}` };
-    if (Object.keys(updates).length) await updateRecord(prisma, 'accounts', primary, updates, write);
+    if (Object.keys(updates).length) await updateRecord(prisma, 'accounts', primary, updates, { ...write, mergingWith: [secondary.id] });
     await deleteRecord(prisma, 'accounts', secondary, { ...write, source: `merged into ${primary.id}` });
     await req.audit({ action: 'merge', module: 'accounts', recordId: primary.id, details: `Merged ${mergeFromId} into ${primary.id}` });
     res.json({ merged: true, primaryId: primary.id, mergedFromId: mergeFromId });

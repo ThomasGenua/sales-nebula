@@ -6,6 +6,7 @@ const { editableFields } = require('../utils/modelFields');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { fireWebhookEvent } = require('../services/webhooks');
 const { createRecord, updateRecord, runAfter } = require('../services/recordWrites');
+const { scoreLead, activeScoringRules, withRuleScore } = require('../services/leadScoring');
 
 const router = createCrudRouter('lead', 'leads', {
   include: { assignedTo: { select: { id: true, firstName: true, lastName: true } }, customValues: { include: { customField: true } } },
@@ -23,6 +24,11 @@ const router = createCrudRouter('lead', 'leads', {
     if (!data.company?.trim()) errors.company = 'Required';
     return { valid: Object.keys(errors).length === 0, errors };
   },
+  // Scored by the rules on every save, from wherever it comes: only leads
+  // from the web form were, so a lead typed in, imported or edited kept the
+  // score it was made with until someone asked for a new one.
+  beforeCreate: (data, { prisma }) => withRuleScore(prisma, data),
+  beforeUpdate: (data, { prisma, oldRecord }) => withRuleScore(prisma, data, oldRecord),
   customRoutes: (router) => {
     // POST /api/leads/:id/convert - Convert lead to contact (+ optional account/deal)
     // It creates a contact, and an account and a deal when asked, so it takes
@@ -187,29 +193,9 @@ const router = createCrudRouter('lead', 'leads', {
         const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
         if (!lead) return res.status(404).json({ error: 'Not found' });
 
-        const rules = await prisma.leadScoringRule.findMany({ where: { active: true } });
-        let score = 50; // Base score
-        for (const rule of rules) {
-          const fieldVal = String(lead[rule.field] || '').toLowerCase();
-          const ruleVal = rule.value.toLowerCase();
-          let match = false;
-          switch (rule.operator) {
-            case 'equals': match = fieldVal === ruleVal; break;
-            case 'contains': match = fieldVal.includes(ruleVal); break;
-            case 'startsWith': match = fieldVal.startsWith(ruleVal); break;
-            case 'endsWith': match = fieldVal.endsWith(ruleVal); break;
-            case 'notEquals': match = fieldVal !== ruleVal; break;
-            // Rules can be written with these (a lead's value or score), and
-            // matched nothing.
-            case 'greaterThan': match = Number(lead[rule.field]) > Number(rule.value); break;
-            case 'lessThan': match = Number(lead[rule.field]) < Number(rule.value); break;
-          }
-          if (match) score += rule.points;
-        }
-        score = Math.max(0, Math.min(100, score));
-
+        const rules = await activeScoringRules(prisma);
         // Through the lead's rules, so a workflow on its score sees the change.
-        const { record: updated } = await updateRecord(prisma, 'leads', lead, { score }, { req, userId: req.userId, source: 'scoring' });
+        const { record: updated } = await updateRecord(prisma, 'leads', lead, { score: scoreLead(rules, lead) }, { req, userId: req.userId, source: 'scoring' });
         await fireWebhookEvent(prisma, 'lead.scored', { id: updated.id, score: updated.score });
         res.json({ ...updated, rulesApplied: rules.length });
       } catch (err) { next(err); }
