@@ -25,10 +25,10 @@ const refused = (res, code) => {
 };
 
 describe('flows', () => {
-  test('are not run, tested, activated or published', async () => {
+  test('refuse unsupported legacy node definitions without claiming execution', async () => {
     const flow = await prisma.flowDefinition.create({ data: { name: 'Welcome', canvas: { nodes: [{ id: 'a', type: 'RecordCreate' }] }, createdById: admin.user.id } });
 
-    for (const action of ['run', 'test', 'activate', 'publish']) refused(await call('post', `/api/flows/${flow.id}/${action}`), 'FLOWS_UNAVAILABLE');
+    for (const action of ['run', 'test', 'activate', 'publish']) expect((await call('post', `/api/flows/${flow.id}/${action}`)).status).toBe(400);
 
     const after = await prisma.flowDefinition.findUnique({ where: { id: flow.id } });
     expect(after.status).toBe(flow.status);

@@ -4,6 +4,8 @@ const { auditMiddleware } = require('../middleware/audit');
 
 const { pickModelFields, columnsFrom } = require('../utils/modelFields');
 
+const { saveValues, validateValues } = require('../services/customObjectValues');
+
 const router = Router();
 
 /**
@@ -159,11 +161,10 @@ router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), au
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
     if (!values) return res.status(400).json({ error: 'data must be an object' });
-    if (!(await liveObject(prisma, req.params.id))) return res.status(404).json({ error: 'Not found' });
-    const record = await prisma.customRecord.create({
-      data: { customObjectId: req.params.id, data: values, createdById: req.user.id },
-    });
-    res.status(201).json(record);
+    const result = await saveValues(prisma, req.params.id, values, req.user.id);
+    if (!result.record) return res.status(result.status).json(result);
+    await req.audit({ action: 'create', module: 'customObjects', recordId: result.record.id, details: 'Created custom record' });
+    res.status(201).json(result.record);
   } catch (err) { next(err); }
 });
 
@@ -172,12 +173,10 @@ router.put('/:id/records/:recordId', authenticate, requirePermission('admin', 'e
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
     if (!values) return res.status(400).json({ error: 'data must be an object' });
-    // Only a live record of the object in the path. The record id alone
-    // reached any object's records, whatever object the URL named.
-    const found = await prisma.customRecord.findFirst({ where: { id: req.params.recordId, customObjectId: req.params.id, deletedAt: null }, select: { id: true } });
-    if (!found) return res.status(404).json({ error: 'Not found' });
-    const record = await prisma.customRecord.update({ where: { id: found.id }, data: { data: values } });
-    res.json(record);
+    const result = await saveValues(prisma, req.params.id, values, req.user.id, req.params.recordId);
+    if (!result.record) return res.status(result.status).json(result);
+    await req.audit({ action: 'update', module: 'customObjects', recordId: result.record.id, details: 'Updated custom record' });
+    res.json(result.record);
   } catch (err) { next(err); }
 });
 
@@ -245,17 +244,8 @@ router.post('/:id/records/validate', authenticate, async (req, res, next) => {
     const prisma = req.app.locals.prisma;
     const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: true } });
     if (!obj) return res.status(404).json({ error: 'Not found' });
-    // No data was a 500, and the type check looked for "number" where fields
-    // are stored as "Number", so no value was ever checked.
-    const data = recordValues(req.body) || {};
-    const errors = [];
-    for (const field of obj.fields || []) {
-      const value = data[field.apiName];
-      const empty = value === undefined || value === null || value === '';
-      if (field.required && empty) errors.push({ field: field.apiName, error: `${field.label || field.apiName} is required` });
-      if (['number', 'currency'].includes(String(field.type).toLowerCase()) && !empty && isNaN(value)) errors.push({ field: field.apiName, error: `${field.label} must be a number` });
-    }
-    res.json({ valid: errors.length === 0, errors });
+    const result = await validateValues(prisma, obj, recordValues(req.body) || {}, { defaults: true });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
@@ -274,7 +264,8 @@ router.post('/:id/records/import', authenticate, requirePermission('admin', 'edi
       try {
         const values = recordValues(rec);
         if (!values) { errors++; continue; }
-        await prisma.customRecord.create({ data: { customObjectId: req.params.id, data: values, createdById: req.user.id } });
+        const result = await saveValues(prisma, req.params.id, values, req.user.id);
+        if (!result.record) { errors++; continue; }
         created++;
       } catch (e) { errors++; }
     }

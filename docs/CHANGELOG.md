@@ -4,6 +4,11 @@ All notable changes to Sales Nebula CRM.
 
 ## Unreleased
 
+### Salesforce parity foundations
+- Added validated custom-object record forms, forecast reconciliation and snapshots, an executable flow designer and approval-process editor.
+- Applied quote price/product rules on saves, added discount approval checks, executed territory rules, checked duplicates on edits, and queued automatic search indexing.
+- This is an incremental implementation; [scope and remaining work](SALESFORCE_PARITY.md) explicitly track the unfinished roadmap.
+
 ### Features that do not exist now say so
 - Thirty-four endpoints that reported success without doing anything now answer **501** with a `code` naming the feature, and change nothing: running flows and AI agents, sandboxes, custom code, app installs, the dialer, mobile push, CDP ingest, IP rules, field-level security, encryption policies, SMS and email sign-in codes, scheduled reports, integration sync schedules, custom field values, quote approval without a process, and AI batch lead scoring.
 - Answers that claimed more than they do say what they are: rule-based Copilot answers, stage-weight deal prediction, keyword call analysis, the route "optimizer", integration health, the retention policy.

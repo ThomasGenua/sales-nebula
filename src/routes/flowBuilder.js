@@ -1,12 +1,14 @@
 const { Router } = require('express');
 const { Prisma } = require('@prisma/client');
-const { authenticate, requirePermission } = require('../middleware/auth');
+const { authenticate, requirePermission, permits } = require('../middleware/auth');
 const { columnsFrom } = require('../utils/modelFields');
-const { unavailable } = require('../utils/unavailable');
+const { flowProblem, startFlow, resumeFlow } = require('../services/flowEngine');
+const { resolveModel, evaluateConditions } = require('../services/workflowEngine');
+const { reachableWhere } = require('../middleware/access');
 
-const FLOWS = "Flows don't run yet: nothing executes a flow's steps. Use workflow rules, which do run.";
+const publicRun = run => run && ({ id: run.id, flowId: run.flowId, status: run.status, triggerRecordId: run.triggerRecordId, triggerModule: run.triggerModule, log: run.log, startedAt: run.startedAt, completedAt: run.completedAt, error: run.error });
 const router = Router();
-router.use(authenticate);
+router.use(authenticate, requirePermission('admin', 'read'));
 
 // Paged and searched, with a total, as the Flow Builder page asks; its search
 // box did nothing and every flow came back on every page.
@@ -33,14 +35,14 @@ router.get('/:id', async (req, res, next) => {
   try {
     const flow = await req.app.locals.prisma.flowDefinition.findUnique({ where: { id: req.params.id }, include: { versions: { orderBy: { version: 'desc' }, take: 5 }, runs: { orderBy: { startedAt: 'desc' }, take: 10 } } });
     if (!flow) return res.status(404).json({ error: 'Not found' });
-    res.json(flow);
+    res.json({ ...flow, ...(flow.runs && { runs: flow.runs.map(publicRun) }) });
   } catch (err) { next(err); }
 });
 
 router.post('/', requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const flow = await req.app.locals.prisma.flowDefinition.create({
-      data: { ...columnsFrom('flowDefinition', req.body), createdById: req.userId, canvas: req.body.canvas || { nodes: [], edges: [] } },
+      data: { ...columnsFrom('flowDefinition', req.body), status: 'Draft', createdById: req.userId, canvas: req.body.canvas || { nodes: [], edges: [] } },
     });
     await req.app.locals.prisma.flowVersion.create({ data: { flowId: flow.id, version: 1, canvas: flow.canvas } });
     res.status(201).json(flow);
@@ -56,6 +58,7 @@ router.put('/:id', requirePermission('admin', 'edit'), async (req, res, next) =>
     // are the server's to move (a stale form rolled the version back), and a
     // null in its Json column is DbNull: a plain null failed every save.
     const data = columnsFrom('flowDefinition', req.body);
+    data.status = 'Draft';
     for (const key of ['createdById', 'version', 'publishedAt', 'publishedById']) delete data[key];
     if (data.triggerConditions === null) data.triggerConditions = Prisma.DbNull;
     // Only a changed canvas is a new version; each save made one, since the
@@ -77,9 +80,32 @@ router.put('/:id', requirePermission('admin', 'edit'), async (req, res, next) =>
 // answered as if one ran: a run was "Completed" with each step "executed",
 // a test "simulated" each element, and an active flow did nothing. They now
 // say so, and change nothing.
-router.post('/:id/activate', requirePermission('admin', 'edit'), (req, res) => unavailable(res, 'FLOWS_UNAVAILABLE', `${FLOWS} Nothing was activated.`));
+router.post('/:id/activate', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const flow = await db.flowDefinition.findUnique({ where: { id: req.params.id } });
+    if (!flow) return res.status(404).json({ error: 'Not found' });
+    const problem = flowProblem(flow);
+    if (problem) return res.status(400).json({ error: problem });
+    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', publishedAt: new Date(), publishedById: req.userId } }));
+  } catch (err) { next(err); }
+});
 
-router.post('/:id/run', requirePermission('admin', 'edit'), (req, res) => unavailable(res, 'FLOWS_UNAVAILABLE', `${FLOWS} Nothing was run.`));
+router.post('/:id/run', requirePermission('admin', 'edit'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const flow = await db.flowDefinition.findUnique({ where: { id: req.params.id } });
+    if (!flow) return res.status(404).json({ error: 'Not found' });
+    const problem = flowProblem(flow);
+    if (problem) return res.status(400).json({ error: problem });
+    if (!permits(req, flow.module, 'edit')) return res.status(403).json({ error: 'Edit permission is required for the trigger module' });
+    if (!req.body.recordId) return res.status(400).json({ error: 'Choose a trigger record' });
+    const model = resolveModel(flow.module);
+    const record = await db[model].findFirst({ where: await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    res.json(publicRun(await startFlow(db, flow, record, req.userId)));
+  } catch (err) { next(err); }
+});
 
 // A run keeps a required link to its flow, so a flow that had ever run could
 // not be deleted. Its runs and elements go with it; versions cascade.
@@ -111,11 +137,31 @@ router.get('/:id/executions', authenticate, async (req, res, next) => {
       prisma.flowRun.findMany({ where: { flowId: req.params.id }, orderBy: { startedAt: 'desc' }, skip: (Math.max(parseInt(page) || 1, 1) - 1) * take, take }),
       prisma.flowRun.count({ where: { flowId: req.params.id } }),
     ]);
-    res.json({ data: execs, total, page: +page });
+    res.json({ data: execs.map(publicRun), total, page: +page });
   } catch (err) { next(err); }
 });
 
-router.post('/:id/test', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'FLOWS_UNAVAILABLE', `${FLOWS} Nothing was tested.`));
+router.post('/:id/test', requirePermission('admin', 'edit'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const flow = await db.flowDefinition.findUnique({ where: { id: req.params.id } });
+    if (!flow) return res.status(404).json({ error: 'Not found' });
+    const problem = flowProblem(flow);
+    if (problem) return res.status(400).json({ error: problem });
+    if (!req.body.recordId) return res.status(400).json({ error: 'Choose a trigger record' });
+    const model = resolveModel(flow.module);
+    const record = await db[model].findFirst({ where: await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    const path = []; let node = flow.canvas.nodes.find(n => n.type === 'start');
+    while (node) {
+      path.push({ id: node.id, type: node.type });
+      const branch = node.type === 'decision' ? String(evaluateConditions(node.config.conditions, record)) : null;
+      const edge = flow.canvas.edges.find(e => e.source === node.id && (!branch || e.condition === branch));
+      node = edge && flow.canvas.nodes.find(n => n.id === edge.target);
+    }
+    res.json({ dryRun: true, path, note: 'No actions executed. Branches use current record values.' });
+  } catch (err) { next(err); }
+});
 
 // Flow elements CRUD
 router.get('/:id/elements', authenticate, async (req, res, next) => {
@@ -161,7 +207,16 @@ router.delete('/:flowId/elements/:elementId', authenticate, requirePermission('a
   } catch (err) { next(err); }
 });
 
-router.post('/:id/publish', authenticate, requirePermission('admin', 'full'), (req, res) => unavailable(res, 'FLOWS_UNAVAILABLE', `${FLOWS} Nothing was published.`));
+router.post('/:id/publish', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const flow = await db.flowDefinition.findUnique({ where: { id: req.params.id } });
+    if (!flow) return res.status(404).json({ error: 'Not found' });
+    const problem = flowProblem(flow);
+    if (problem) return res.status(400).json({ error: problem });
+    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', publishedAt: new Date(), publishedById: req.userId } }));
+  } catch (err) { next(err); }
+});
 
 // Flow statistics
 router.get('/:id/stats', authenticate, async (req, res, next) => {
@@ -173,5 +228,14 @@ router.get('/:id/stats', authenticate, async (req, res, next) => {
       prisma.flowRun.count({ where: { flowId: req.params.id, status: 'Failed' } }),
     ]);
     res.json({ totalExecutions: total, successful: success, failed, successRate: total ? Math.round(success / total * 100) : 0 });
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/executions/:runId/retry', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const run = await db.flowRun.findFirst({ where: { id: req.params.runId, flowId: req.params.id, status: 'Failed' } });
+    if (!run) return res.status(404).json({ error: 'Failed run not found' });
+    res.json(publicRun(await resumeFlow(db, run.id, true)));
   } catch (err) { next(err); }
 });

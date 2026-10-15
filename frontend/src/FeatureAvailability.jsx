@@ -15,7 +15,8 @@ const FEATURES = {
   },
   flows: {
     title: "Running flows",
-    description: "Flows can be designed and saved here, but nothing runs them: activating, publishing, testing and running a flow are unavailable. Workflows run automation on every save.",
+    status: "Available",
+    description: "Record-triggered and manual flows support branches, waits, field updates, activities, notifications, execution history and retries. Screen flows and scheduled starts are not supported.",
   },
   aiAgents: {
     title: "Running AI agents",

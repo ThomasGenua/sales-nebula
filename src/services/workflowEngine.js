@@ -137,10 +137,8 @@ async function runActions(prisma, workflow, { moduleName, modelName, record, use
         // ownerId handed the record to whoever the rule named.
         const problem = plainFieldProblem(modelName, config.field, config.value);
         if (problem) throw new Error(`updateField refused: ${problem}`);
-        await prisma[modelName].update({
-          where: { id: record.id },
-          data: { [config.field]: config.value },
-        });
+        const updated = await require('./recordWrites').updateRecord(prisma, moduleName, record.id, { [config.field]: config.value }, { userId, source: 'workflow field update', skipWorkflows: true });
+        Object.assign(record, updated.record);
         // Keep the in-memory copy in step for any later action in this rule.
         record[config.field] = config.value;
         actionsRun.push(`Updated ${config.field}`);

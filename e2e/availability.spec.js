@@ -13,7 +13,6 @@ async function signIn(page) {
 test('pages for features that do not run say so', async ({ page }) => {
   await signIn(page);
   for (const [path, title] of [
-    ['/app/flowBuilder', 'Running flows'],
     ['/app/aiAgents', 'Running AI agents'],
     ['/app/marketplace', 'Installing apps'],
   ]) {

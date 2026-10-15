@@ -223,7 +223,7 @@ async function runFinalAction(prisma, request, process, outcome) {
       // Checked again: the process or the schema may have changed since.
       const problem = fieldUpdateProblem(request.module, config);
       if (problem) throw new Error(problem);
-      await prisma[modelName].update({ where: { id: request.recordId }, data: { [config.field]: config.value } });
+      await require('./recordWrites').updateRecord(prisma, request.module, request.recordId, { [config.field]: config.value }, { userId: request.submittedById, source: 'approval final action', skipWorkflows: true });
     } else if (action === 'createNotification') {
       const to = config.userId ? [config.userId] : modelName ? await recordOwners(prisma, modelName, request.recordId) : [];
       // The submitter hears of every outcome already.

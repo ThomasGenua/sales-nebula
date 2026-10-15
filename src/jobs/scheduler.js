@@ -350,58 +350,14 @@ const handlers = {
    * currencies, and an item took its deal's value unconverted. No request
    * here, so no row security: the forecast's owner decides.
    */
+  async resumeFlows() { return require('../services/flowEngine').resumeDueFlows(prisma); },
+
+  async drainSearchIndex() { return require('../services/searchIndexing').drainIndex(prisma); },
+
   async recalcForecasts() {
-    const { currencyContext, sumInBase } = require('../utils/currency');
-    const ctx = await currencyContext(prisma);
-    const forecasts = await prisma.forecast.findMany({
-      where: { status: 'Open' },
-      include: { items: { where: { deal: { is: { deletedAt: null } } }, include: { deal: true } } },
-    });
-
-    const { categoryFor } = require('../utils/forecastCategory');
-    for (const forecast of forecasts) {
-      // The owner's open deals that have come into the period since the
-      // forecast was made. Only the deals it began with were refreshed, so a
-      // deal moved into the period, or opened in it, never counted.
-      const listed = forecast.items.map(i => i.dealId);
-      const arrived = await prisma.deal.findMany({
-        where: {
-          ownerId: forecast.userId, stage: { notIn: ['Closed Won', 'Closed Lost'] },
-          closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd }, deletedAt: null,
-          ...(listed.length && { id: { notIn: listed } }),
-        },
-      });
-      for (const deal of arrived) {
-        await prisma.forecastItem.create({
-          data: { forecastId: forecast.id, dealId: deal.id, amount: ctx.toBase(deal.value, deal.currency), probability: deal.probability, closeDate: deal.closeDate, category: categoryFor(deal.probability) },
-        });
-      }
-
-      for (const item of forecast.items) {
-        if (item.deal && item.overrideAmount == null) {
-          await prisma.forecastItem.update({
-            where: { id: item.id },
-            data: { amount: ctx.toBase(item.deal.value, item.deal.currency), probability: item.deal.probability },
-          });
-        }
-      }
-
-      const items = await prisma.forecastItem.findMany({ where: { forecastId: forecast.id, deal: { is: { deletedAt: null } } } });
-      const getAmt = (i) => i.overrideAmount != null ? i.overrideAmount : i.amount;
-      const commit = items.filter(i => i.category === 'Commit').reduce((s, i) => s + getAmt(i), 0);
-      const bestCase = items.filter(i => ['Commit', 'Best Case'].includes(i.category)).reduce((s, i) => s + getAmt(i), 0);
-      const pipeline = items.filter(i => i.category !== 'Omitted').reduce((s, i) => s + getAmt(i), 0);
-
-      const closedDeals = await prisma.deal.findMany({
-        where: { ownerId: forecast.userId, stage: 'Closed Won', closeDate: { gte: forecast.periodStart, lte: forecast.periodEnd }, deletedAt: null },
-        select: { value: true, currency: true },
-      });
-
-      await prisma.forecast.update({
-        where: { id: forecast.id },
-        data: { commit, bestCase, pipeline, closed: sumInBase(closedDeals, ctx) },
-      });
-    }
+    const { refreshForecast } = require('../services/forecasting');
+    const forecasts = await prisma.forecast.findMany({ where: { status: 'Open' }, select: { id: true } });
+    for (const forecast of forecasts) await refreshForecast(prisma, forecast.id);
     return { recalculated: forecasts.length };
   },
 
@@ -703,11 +659,13 @@ function initJobQueue(databaseClient) {
 
     // Register processors with retry
     queues.maintenance.process('overdue-invoices', async () => withRetry('checkOverdueInvoices', handlers.checkOverdueInvoices));
+    queues.maintenance.process('search-index', async () => withRetry('drainSearchIndex', handlers.drainSearchIndex));
     queues.maintenance.process('recalc-forecasts', async () => withRetry('recalcForecasts', handlers.recalcForecasts));
     queues.maintenance.process('cleanup-audit', async () => withRetry('cleanupAuditLogs', handlers.cleanupAuditLogs));
     queues.maintenance.process('cleanup-event-logs', async () => withRetry('cleanupEventLogs', handlers.cleanupEventLogs));
     queues.maintenance.process('cleanup-notifications', async () => withRetry('cleanupNotifications', handlers.cleanupNotifications));
     queues.maintenance.process('stale-deals', async () => withRetry('checkStaleDeals', handlers.checkStaleDeals));
+    queues.workflows.process('resume-flows', async () => withRetry('resumeFlows', handlers.resumeFlows));
     queues.workflows.process('scheduled', async () => withRetry('runScheduledWorkflows', handlers.runScheduledWorkflows));
     // These five ran only under node-cron: with Redis configured, SLAs were
     // never enforced, reminders and sequence mail never went out, mailboxes
@@ -720,11 +678,13 @@ function initJobQueue(databaseClient) {
 
     // Schedule recurring jobs
     queues.maintenance.add('overdue-invoices', {}, { repeat: { cron: '0 6 * * *' } });
+    queues.maintenance.add('search-index', {}, { repeat: { cron: '* * * * *' } });
     queues.maintenance.add('recalc-forecasts', {}, { repeat: { cron: '0 */4 * * *' } });
     queues.maintenance.add('cleanup-audit', {}, { repeat: { cron: '0 2 * * 0' } });
     queues.maintenance.add('cleanup-event-logs', {}, { repeat: { cron: '30 2 * * *' } });
     queues.maintenance.add('cleanup-notifications', {}, { repeat: { cron: '0 3 * * 0' } });
     queues.maintenance.add('stale-deals', {}, { repeat: { cron: '0 8 * * 1' } });
+    queues.workflows.add('resume-flows', {}, { repeat: { cron: '* * * * *' } });
     queues.workflows.add('scheduled', {}, { repeat: { cron: '*/15 * * * *' } });
     queues.maintenance.add('enforce-sla', {}, { repeat: { cron: '*/30 * * * *' } });
     queues.maintenance.add('cleanup-recycle-bin', {}, { repeat: { cron: '0 4 * * *' } });
@@ -743,11 +703,13 @@ function initJobQueue(databaseClient) {
   } else if (cron) {
     // Wrap cron handlers with retry
     cron.schedule('0 6 * * *', () => withRetry('checkOverdueInvoices', handlers.checkOverdueInvoices).catch(() => {}));
+    cron.schedule('* * * * *', () => withRetry('drainSearchIndex', handlers.drainSearchIndex).catch(() => {}));
     cron.schedule('0 */4 * * *', () => withRetry('recalcForecasts', handlers.recalcForecasts).catch(() => {}));
     cron.schedule('0 2 * * 0', () => withRetry('cleanupAuditLogs', handlers.cleanupAuditLogs).catch(() => {}));
     cron.schedule('30 2 * * *', () => withRetry('cleanupEventLogs', handlers.cleanupEventLogs).catch(() => {}));
     cron.schedule('0 3 * * 0', () => withRetry('cleanupNotifications', handlers.cleanupNotifications).catch(() => {}));
     cron.schedule('0 8 * * 1', () => withRetry('checkStaleDeals', handlers.checkStaleDeals).catch(() => {}));
+    cron.schedule('* * * * *', () => withRetry('resumeFlows', handlers.resumeFlows).catch(() => {}));
     cron.schedule('*/15 * * * *', () => withRetry('runScheduledWorkflows', handlers.runScheduledWorkflows).catch(() => {}));
     cron.schedule('*/30 * * * *', () => withRetry('enforceSla', handlers.enforceSla).catch(() => {}));
     cron.schedule('0 4 * * *', () => withRetry('cleanupRecycleBin', handlers.cleanupRecycleBin).catch(() => {}));

@@ -77,7 +77,7 @@ async function visibleForecastWhere(req, where = {}) {
 function forecastAccess({ approve = false, action = 'approve' } = {}) {
   return async (req, res, next) => {
     try {
-      const forecast = await req.app.locals.prisma.forecast.findUnique({ where: { id: req.params.id }, select: { userId: true, status: true, quotaAmount: true } });
+      const forecast = await req.app.locals.prisma.forecast.findUnique({ where: { id: req.params.id }, select: { userId: true, status: true, quotaAmount: true, periodStart: true, periodEnd: true } });
       if (!forecast) return res.status(404).json({ error: 'Not found' });
       const isOwner = forecast.userId === req.userId;
       if (approve && isOwner) return res.status(403).json({ error: `You cannot ${action} your own forecast` });
@@ -196,6 +196,8 @@ router.post('/', requirePermission('deals', 'edit'), async (req, res, next) => {
       return res.status(400).json({ error: 'period, periodStart and periodEnd (dates) are required' });
     }
 
+    if (new Date(periodStart) > new Date(periodEnd)) return res.status(400).json({ error: 'periodEnd must be on or after periodStart' });
+
     // The creator owns it unless a manager or admin files it for a report, and
     // it starts Open. `rest` overrode both, so a rep could file an Approved
     // forecast, or one in a colleague's name.
@@ -285,6 +287,7 @@ router.put('/:id', requirePermission('deals', 'edit'), forecastAccess(), async (
     if (data.quotaAmount !== undefined && data.quotaAmount !== req.forecast.quotaAmount && !(await managesUser(req, req.forecast.userId))) {
       return res.status(403).json({ error: 'Only a manager of the forecast owner or an admin can set its quota' });
     }
+    if (new Date(data.periodStart || req.forecast.periodStart) > new Date(data.periodEnd || req.forecast.periodEnd)) return res.status(400).json({ error: 'periodEnd must be on or after periodStart' });
     const forecast = await prisma.forecast.update({ where: { id: req.params.id }, data, include: await includeFor(req) });
     res.json(forecast);
   } catch (err) { next(err); }
@@ -464,3 +467,28 @@ router.delete('/:id', requirePermission('deals', 'full'), forecastAccess(), asyn
 });
 
 module.exports = router;
+
+router.post('/:id/refresh', requirePermission('deals', 'edit'), forecastAccess(), async (req, res, next) => {
+  try {
+    if (req.forecast.status !== 'Open') return res.status(409).json({ error: 'Reopen this forecast before refreshing it' });
+    await require('../services/forecasting').refreshForecast(req.app.locals.prisma, req.params.id);
+    // Return only visible figures through the existing rollup endpoint.
+    res.json({ refreshed: true });
+  } catch (err) { next(err); }
+});
+router.get('/:id/history', requirePermission('deals', 'read'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const forecast = await db.forecast.findFirst({ where: await visibleForecastWhere(req, { id: req.params.id }) });
+    if (!forecast) return res.status(404).json({ error: 'Not found' });
+    const history = await db.forecastSnapshot.findMany({ where: { forecastId: forecast.id }, orderBy: { createdAt: 'desc' }, take: 100 });
+    const ids = [...new Set(history.flatMap(h => h.items.map(i => i.dealId)))];
+    const visible = new Set((await db.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { id: { in: ids } }), select: { id: true } })).map(d => d.id));
+    res.json({ data: history.map(h => {
+      const items = h.items.filter(i => visible.has(i.dealId));
+      const total = categories => items.filter(i => categories.includes(i.category)).reduce((n, i) => n + (i.overrideAmount ?? i.amount), 0);
+      return { id: h.id, createdAt: h.createdAt, reason: h.reason, currency: h.currency, quota: h.quota,
+        commit: total(['Commit']), pipeline: total(['Commit', 'Best Case', 'Pipeline']), closed: total(['Closed']) };
+    }) });
+  } catch (err) { next(err); }
+});

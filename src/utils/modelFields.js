@@ -73,7 +73,7 @@ function lineItemFields(item, { discount = true } = {}) {
 // set: a plain value, never who owns or links to a record, its identity or
 // its timestamps. Those would let a rule hand records to someone else, and a
 // value that is an object would be a nested write into another table.
-const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById']);
+const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById', 'pricingFingerprint', 'pricingUpdatedAt']);
 const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
 
 /**
