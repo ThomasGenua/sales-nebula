@@ -1,3 +1,8 @@
+import { ApprovalDesigner } from './ApprovalDesigner';
+import { ForecastHistory } from './ForecastHistory';
+import { TerritoryRules } from './TerritoryRules';
+import { FlowDesigner } from './FlowDesigner';
+import { CustomObjectWorkspace } from './CustomObjectWorkspace';
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
 import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
@@ -1516,7 +1521,7 @@ function EntitlementsPage() {
   />;
 }
 function CustomObjectsPage() {
-  return <ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects" nameField="label"
+  return <div className="space-y-4"><CustomObjectWorkspace /><ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects" nameField="label"
     columns={[
       { key: "label", label: "Label" }, { key: "apiName", label: "API Name" },
       { key: "description", label: "Description" },
@@ -1527,7 +1532,7 @@ function CustomObjectsPage() {
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "label", label: "Label", required: true },{ key: "apiName", label: "API Name" },{ key: "pluralLabel", label: "Plural Label" },{ key: "description", label: "Description" }]}
-  />;
+  /></div>;
 }
 function AiAgentsPage() {
   return <div className="space-y-4">
@@ -1635,6 +1640,7 @@ function ForecastsPage() {
           </div>
         </div>
       )}
+      <ForecastHistory period={f.period} />
     </div>
   );
 }
@@ -2661,7 +2667,7 @@ function SurveysPage() {
 }
 // ── Territories ──
 function TerritoriesPage() {
-  return <ModulePage title="Territories" icon={Globe} endpoint="/territories"
+  return <div className="space-y-4"><TerritoryRules /><ModulePage title="Territories" icon={Globe} endpoint="/territories"
     columns={[
       { key: "name", label: "Territory" }, { key: "type", label: "Type" },
       { key: "description", label: "Description" },
@@ -2675,7 +2681,7 @@ function TerritoriesPage() {
       { key: "createdAt", label: "Created", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
     ]}
     formFields={[{ key: "name", label: "Name", required: true },{ key: "type", label: "Type", type: "select", options: ["Sales","Support","Partner","Region","State","City","Custom"] },{ key: "description", label: "Description" }]}
-  />;
+  /></div>;
 }
 // ── Documents ──
 const DOCUMENT_CATEGORIES = ["Contract", "Proposal", "Invoice", "Report", "Other"];
@@ -2878,7 +2884,7 @@ function ApprovalsPage() {
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Approvals</h1>
-      <div className="flex gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit">{['pending','history'].map(t=><button key={t} onClick={()=>setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize touch-manipulation ${tab===t?'bg-[rgba(245,166,35,0.08)] text-[#F5A623]':'text-[#7E8598]'}`}>{t}{t==='pending'&&pending.length>0&&<span className="ml-1 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{pending.length}</span>}</button>)}</div>
+      <ApprovalDesigner /><div className="flex gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit">{['pending','history'].map(t=><button key={t} onClick={()=>setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize touch-manipulation ${tab===t?'bg-[rgba(245,166,35,0.08)] text-[#F5A623]':'text-[#7E8598]'}`}>{t}{t==='pending'&&pending.length>0&&<span className="ml-1 text-xs bg-[#F5A623] text-[#060B1A] rounded-full px-1.5">{pending.length}</span>}</button>)}</div>
       {loading ? <Spinner /> : items.length===0 ? <EmptyState icon={CheckCircle2} title={tab==='pending'?"No pending approvals":"No history"} /> : (
         <div className="space-y-2">{items.map(a=>(
           <div key={a.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4">
@@ -6424,7 +6430,7 @@ function AppShell({ go }) {
     orders: OrdersPage, entitlements: EntitlementsPage,
     subscriptions: SubscriptionsPage, workOrders: WorkOrdersPage,
     customObjects: CustomObjectsPage, aiAgents: AiAgentsPage,
-    flowBuilder: FlowBuilderPage, marketplace: MarketplacePage,
+    flowBuilder: FlowDesigner, marketplace: MarketplacePage,
     forecasts: ForecastsPage, cases: CasesPage, knowledge: KnowledgePage,
     workflows: WorkflowBuilderPage, search: GlobalSearchPage,
     settings: SettingsPage, admin: AdminDashboardPage,

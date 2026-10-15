@@ -54,9 +54,10 @@ router.post('/', authenticate, requirePermission('territories', 'edit'), auditMi
     const prisma = req.app.locals.prisma;
     const { name, parentId, type, description, rules } = req.body;
     if (!name) return res.status(400).json({ error: 'name required' });
+    if (rules !== undefined) return res.status(400).json({ error: 'Configure assignment rules through the territory rules editor' });
     // No type means the schema's default (Sales, as the seeded territories
     // have), not 'Geographic', which nothing else uses.
-    const t = await prisma.territory.create({ data: { name, parentId, type: type || undefined, description, rules } });
+    const t = await prisma.territory.create({ data: { name, parentId, type: type || undefined, description } });
     await req.audit({ action: 'create', module: 'territories', recordId: t.id });
     res.status(201).json(t);
   } catch (err) { next(err); }
@@ -264,3 +265,51 @@ router.get('/:id', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
+
+// Preview the complete visible account book without changing membership.
+router.post('/:id/rules/preview', requirePermission('accounts', 'read'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const territory = await db.territory.findFirst({ where: { id: req.params.id, deletedAt: null }, include: { rules: { where: { active: true } } } });
+    if (!territory) return res.status(404).json({ error: 'Territory not found' });
+    const accounts = await db.account.findMany({ where: await reachableWhere(req, 'accounts', 'account'), orderBy: { id: 'asc' } });
+    const { matches } = require('../services/territoryRules');
+    const matched = accounts.filter(a => matches(territory, a));
+    res.json({ total: matched.length, data: matched.map(a => ({ id: a.id, name: a.name })) });
+  } catch (err) { next(err); }
+});
+router.get('/:id/rules', async (req, res, next) => {
+  try { res.json(await req.app.locals.prisma.territoryRule.findMany({ where: { territoryId: req.params.id } })); } catch (err) { next(err); }
+});
+router.put('/:id/rules', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const { rules } = req.body;
+    const operators = ['equals', 'notEquals', 'contains', 'startsWith', 'greaterThan', 'lessThan', 'gte', 'lte', 'isEmpty', 'isNotEmpty'];
+    const { modelHasField } = require('../utils/modelFields');
+    if (!Array.isArray(rules) || rules.length > 30 || rules.some(r => !modelHasField('account', r.field) || !operators.includes(r.operator) || typeof r.value !== 'string')) return res.status(400).json({ error: 'Use up to 30 account field conditions with supported operators and text values' });
+    const db = req.app.locals.prisma;
+    if (!await db.territory.findFirst({ where: { id: req.params.id, deletedAt: null } })) return res.status(404).json({ error: 'Territory not found' });
+    await db.$transaction([
+      db.territoryRule.deleteMany({ where: { territoryId: req.params.id } }),
+      db.territoryRule.createMany({ data: rules.map(r => ({ territoryId: req.params.id, field: r.field, operator: r.operator, value: r.value, active: r.active !== false })) }),
+    ]);
+    res.json({ saved: rules.length });
+  } catch (err) { next(err); }
+});
+router.post('/:id/rules/apply', requirePermission('admin', 'full'), auditMiddleware, async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    if (!await db.territory.findFirst({ where: { id: req.params.id, deletedAt: null } })) return res.status(404).json({ error: 'Territory not found' });
+    const { applyTerritories } = require('../services/territoryRules');
+    let cursor, processed = 0;
+    do {
+      const accounts = await db.account.findMany({ where: { deletedAt: null }, orderBy: { id: 'asc' }, take: 200, ...(cursor && { cursor: { id: cursor }, skip: 1 }) });
+      if (!accounts.length) break;
+      for (const account of accounts) await applyTerritories(db, account, req.params.id);
+      processed += accounts.length;
+      cursor = accounts.at(-1).id;
+    } while (cursor);
+    await req.audit({ action: 'update', module: 'territories', recordId: req.params.id, details: 'Reconciled territory rules for ' + processed + ' accounts' });
+    res.json({ processed });
+  } catch (err) { next(err); }
+});

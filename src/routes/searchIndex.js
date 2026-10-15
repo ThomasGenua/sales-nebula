@@ -48,50 +48,7 @@ async function readableEntries(req, entries) {
   return entries.filter(entry => keep.has(entry));
 }
 
-/** Write one record's index entry and its postings. */
-async function indexRecord(prisma, module, record) {
-  const projected = projectRecord(module, record);
-  if (!projected) return { indexed: false, reason: 'no title' };
-
-  const entry = buildIndexEntry({ ...projected, boost: 1.0 });
-  const { postings, uniqueTerms, ...indexFields } = entry;
-
-  const existing = await prisma.searchIndex.findFirst({ where: { module, recordId: record.id } });
-
-  let indexId;
-  if (existing) {
-    await prisma.searchIndex.update({
-      where: { id: existing.id },
-      data: { ...indexFields, recordUpdatedAt: record.updatedAt || null, indexedAt: new Date(), deletedAt: null },
-    });
-    indexId = existing.id;
-    await prisma.searchPosting.deleteMany({ where: { indexId } });
-  } else {
-    const created = await prisma.searchIndex.create({
-      data: { ...indexFields, recordUpdatedAt: record.updatedAt || null },
-    });
-    indexId = created.id;
-  }
-
-  if (postings.length) {
-    await prisma.searchPosting.createMany({
-      data: postings.map(p => ({ indexId, term: p.term, field: p.field, frequency: p.frequency, positions: p.positions })),
-    });
-  }
-
-  return { indexed: true, indexId, terms: uniqueTerms, postings: postings.length };
-}
-
-/** Keep the corpus-level term statistics current. */
-async function refreshTermStats(prisma) {
-  const grouped = await prisma.searchPosting.groupBy({ by: ['term'], _count: { indexId: true }, _sum: { frequency: true } });
-  await prisma.searchTermStat.deleteMany({});
-  const batch = grouped.map(g => ({ term: g.term, docCount: g._count.indexId, totalFreq: g._sum.frequency || 0 }));
-  for (let i = 0; i < batch.length; i += 500) {
-    await prisma.searchTermStat.createMany({ data: batch.slice(i, i + 500) }).catch(() => {});
-  }
-  return batch.length;
-}
+const { indexRecord, refreshTermStats } = require('../services/searchIndexing');
 
 // ── SEARCH ────────────────────────────────────────────────────────────
 
@@ -327,32 +284,7 @@ router.post('/reindex', authenticate, requirePermission('admin', 'edit'), async 
 router.post('/queue/drain', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const items = await prisma.searchIndexQueue.findMany({ orderBy: { createdAt: 'asc' }, take: Math.min(parseInt(req.body.limit, 10) || 200, 1000) });
-
-    let processed = 0, failed = 0;
-    for (const item of items) {
-      try {
-        if (item.operation === 'delete') {
-          const entry = await prisma.searchIndex.findFirst({ where: { module: item.module, recordId: item.recordId } });
-          if (entry) {
-            await prisma.searchPosting.deleteMany({ where: { indexId: entry.id } });
-            await prisma.searchIndex.delete({ where: { id: entry.id } });
-          }
-        } else {
-          const model = MODEL_FOR[item.module];
-          const record = model ? await prisma[model].findUnique({ where: { id: item.recordId } }) : null;
-          if (record) await indexRecord(prisma, item.module, record);
-        }
-        await prisma.searchIndexQueue.delete({ where: { id: item.id } });
-        processed++;
-      } catch (e) {
-        failed++;
-        await prisma.searchIndexQueue.update({
-          where: { id: item.id },
-          data: { attempts: { increment: 1 }, lastError: String(e.message).slice(0, 300) },
-        }).catch(() => {});
-      }
-    }
+    const { processed, failed } = await require('../services/searchIndexing').drainIndex(prisma, Math.min(Math.max(parseInt(req.body.limit, 10) || 200, 1), 1000));
 
     const remaining = await prisma.searchIndexQueue.count();
     res.json({ processed, failed, remaining });

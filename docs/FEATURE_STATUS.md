@@ -53,16 +53,16 @@ Something can be missing in three ways:
 | Campaigns | Planning, members, recipients, responses, ROI. Attribution models computed from the campaign touches you enter. | Bulk sending (501). Nothing creates touches from campaign members. |
 | Import | CSV mapping, editable row preview, duplicate review/skip/update, per-row errors, and atomic custom values with each row. | Excel files; a whole-file rollback. |
 | Export | CSV and JSON. | Excel (asking for it is refused). Scheduled exports are saved and never run. |
-| Custom objects | Define objects and fields, and store records, through the API. | Records are not checked against their field definitions. The screen edits object definitions only: no fields or records. |
+| Custom objects | Define objects and fields, and store records, through the API. | Fields and records can be edited on the screen; writes and imports validate types, required/unique values and custom-object lookups. Per-object permissions and report/automation integration remain unfinished. |
 | Custom fields (Studio) | Definitions, picklists, typed record forms, list equality filters, report fields/measures/exports, and import mapping. Required custom values are checked on their form and imports. | Formula and related-record types; required custom values on the standard create form. |
 | Formula fields | Evaluated on request (`/api/formulas/evaluate`). | Not computed on records; no cross-object references; no screen. |
 | Sharing | Org-wide defaults, the role hierarchy, owner- and criteria-based rules, record shares. | `externalAccess`, `manual` rules and the `criteria` grant mode are saved and do nothing. |
 | Platform events | Published events are stored and sent to webhooks registered for `platform.<channel>`. | A subscription's own endpoint and secret are unused, and nothing in the app publishes events. |
-| Territories | A territory hierarchy; accounts mapped to territories by hand. | Assignment rules never run. Territory models can only be listed. |
+| Territories | A territory hierarchy; accounts mapped to territories by hand. | Rules run on account saves and can be previewed/applied from Territories. Territory models can only be listed. |
 | Omnichannel | "Least Active" routing gives work to the available agent with the fewest open items. | Other routing types assign nothing; agent capacity and skills are not checked. |
 | Entitlements | Case counts per entitlement. | Milestones are stored only; the SLA view uses fixed hours per priority; consuming an entitlement changes nothing. |
 | Knowledge | Articles, categories, search, publishing. A new version is a copy of the article. | Attachments. Versions are not linked to each other. |
-| CPQ | Bundles, price books, discount tiers, guided selling. | Price rules never apply. Product rules are checked only by `POST /api/cpq/advanced/validate-quote`. |
+| CPQ | Bundles, price books, discount tiers, guided selling. | Price rules apply on quote line writes and product validation rules run on quote saves. Broader product selection/filter actions and complete order-item enforcement remain unfinished. |
 | Macros | Update a field; add a comment to a case. | Any other action reports that it was not done. Scheduling (501). |
 | Field service | Work orders: dispatch, schedule (dates and assignee), complete, cancel. | No conflict check, appointments or line items. The "route" is the day's work orders in start order. |
 | Customer data platform | A contact's live profile (lifetime value, engagement) and segment evaluation over contacts. | Stored profiles' scores are never computed. Ingesting data (501). |
@@ -81,7 +81,7 @@ Something can be missing in three ways:
 | Scheduler | Booking and changing appointments, with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; "availability" only says who is busy now. |
 | Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. Pipeline board totals and monetary builder groups keep currencies separate. | Only deals have a currency. Arbitrary API reports can still aggregate unconverted amounts. No rate history. |
 | Revenue recognition | Schedules split evenly by month. | Periods are recognized by hand; the recognition method is ignored. |
-| Flows | Flows can be designed and saved. | Nothing runs them: run, test, activate and publish (501). |
+| Flows | Visual designer, record triggers, manual runs, branches, waits, database actions, checkpoints, history and retries. | Screen flows, loops, scheduled starts and arbitrary related-record actions remain unfinished. |
 | AI agents | Agents can be configured and saved. | No model is called with an agent's settings: run, activate and training (501). |
 | Custom code | Code can be saved, and its syntax checked. | Custom code never runs: activate and schedule (501). |
 | Sandboxes | The list, and metadata export. | Create, deploy, change sets, import, rollback and compare (501). |
@@ -96,15 +96,14 @@ Saving these changes nothing:
 - Custom components (nothing renders them)
 - Report types
 - Analytics dashboards
-- Territory assignment rules and entitlement milestones
-- CPQ price rules
+- Entitlement milestones
+- CPQ product selection/filter actions
 - Omnichannel agent capacity and skills
 
 ## Answers 501
 
 | Feature | Endpoints | Code |
 |---|---|---|
-| Flows | `POST /api/flows/:id/run`, `/test`, `/activate`, `/publish` | `FLOWS_UNAVAILABLE` |
 | Sandboxes | `POST /api/environments`, `/:id/deploy`, `/:id/rollback`, `/change-sets`, `/metadata/import`; `GET /api/environments/:id/compare` | `SANDBOXES_UNAVAILABLE` |
 | AI agents | `POST /api/ai-agents/:id/run`, `/activate`; `PUT /api/ai-agents/:id/training` | `AI_AGENTS_UNAVAILABLE` |
 | AI lead scoring | `POST /api/ai/leads/batch-score` | `AI_LEAD_SCORING_UNAVAILABLE` |
@@ -130,12 +129,14 @@ Saving these changes nothing:
 
 ## Not built
 
-- Gmail mail sync and Google/Outlook calendar sync. Personal Outlook email sync exists; attachments, remote deletions and moves are not synchronized.
+- Gmail mail sync and Google calendar sync. Personal Outlook email and calendar sync exist; email attachments, remote deletions and moves are not synchronized.
 - E-signature.
 - Slack or Teams.
-- PDF files of quotes and invoices; they print from the browser.
+- Generated invoice PDFs. Quotes already have downloadable PDFs and versioned customer acceptance; invoices print from the browser.
 - A mobile app (the `/api/mobile` endpoints exist).
 - Multi-tenancy: one install serves one company.
-- A visual flow designer, and anything that runs flows.
+- Screen flows and scheduled flow starts.
 
 See [sales workflow setup and limitations](SALES_NEXT_WORKFLOWS.md) for these additions.
+
+See [the parity implementation tracker](SALESFORCE_PARITY.md) for current additions and remaining roadmap work.

@@ -98,6 +98,7 @@ router.post('/:id/restore', requirePermission('settings', 'full'), async (req, r
     await prisma.recycleBinItem.delete({ where: { id: item.id } });
 
     await req.audit({ action: 'create', module: item.module, recordId: restored.id, details: `Restored from recycle bin` });
+    await require('../services/searchIndexing').enqueueIndex(prisma, item.module, restored.id);
     res.json({ success: true, restored });
   } catch (err) { next(err); }
 });
@@ -194,6 +195,7 @@ router.post('/restore/bulk', authenticate, requirePermission('admin', 'full'), a
     const result = await prisma[model].updateMany({ where: { id: { in: restoredIds } }, data: { deletedAt: null } });
     await prisma.recycleBinItem.deleteMany({ where: { module: binModule(model), recordId: { in: restoredIds } } });
     await req.audit({ action: 'restore', module: 'recycleBin', recordId: module, details: `Bulk restored ${result.count} ${module} records` });
+    for (const id of restoredIds) await require('../services/searchIndexing').enqueueIndex(prisma, binModule(model), id);
     res.json({ restored: result.count });
   } catch (err) { next(err); }
 });

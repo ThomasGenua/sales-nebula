@@ -546,6 +546,8 @@ model Product {
 }
 
 model Quote {
+  pricingFingerprint String?
+  pricingUpdatedAt DateTime?
   id         String   @id @default(uuid())
   number     String   @unique
   status     String   @default("Draft") // Draft, Sent, Accepted, Rejected
@@ -5754,4 +5756,17 @@ model UserInvite {
   @@index([email])
   @@index([status])
   @@index([expiresAt])
+}
+
+model ForecastSnapshot {
+  id String @id @default(uuid())
+  forecastId String
+  userId String
+  period String
+  reason String
+  currency String
+  quota Float
+  items Json
+  createdAt DateTime @default(now())
+  @@index([forecastId, createdAt])
 }

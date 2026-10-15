@@ -45,6 +45,7 @@ const { createNumbered } = require('../utils/numbering');
 const { checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplicates } = require('./recordRules');
 const { runWorkflowsSafely } = require('./workflowEngine');
 const { logger } = require('./logger');
+const { enqueueIndex } = require('./searchIndexing');
 
 /** A write the rules refused: `status` and `body` are the HTTP answer. */
 class RecordWriteError extends Error {
@@ -217,6 +218,24 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   // transaction (utils/numbering): make a numbered record outside one.
   if (hooks.numbering && Array.isArray(ctx.after)) throw new Error(`A ${moduleName} record is numbered, so it cannot be made inside a transaction`);
   let data = { ...input };
+  if (moduleName === 'quotes') data = await runHook(require('./quotePricing').prepareQuote, db, data, null, ctx);
+  if (moduleName === 'orders' && data.quoteId) {
+    const quote = await db.quote.findFirst({ where: { id: data.quoteId, deletedAt: null }, include: { items: true } });
+    if (!quote) throw new RecordWriteError(400, { error: 'Source quote not found' });
+    await runHook(require('./quotePricing').approvalRequired, db, quote, quote.items, quote);
+    if (data.total != null && Math.abs(Number(data.total) - quote.total) > 0.005) throw new RecordWriteError(400, { error: 'Order total must match its source quote' });
+    const quoteLines = quote.items.map(i => ({ productId: i.productId, description: i.description, quantity: i.quantity, unitPrice: i.unitPrice, discount: i.discount || 0, total: i.total }));
+    const suppliedLines = ctx.nested?.items?.create || ctx.req?.body?.items;
+    const lineKeys = lines => lines.map(i => JSON.stringify([i.productId, Number(i.quantity), Number(i.unitPrice), Number(i.discount || 0), Number(i.total ?? (Number(i.quantity) * Number(i.unitPrice) - Number(i.discount || 0)))])).sort().join('|');
+    if (suppliedLines && lineKeys(suppliedLines) !== lineKeys(quoteLines)) throw new RecordWriteError(400, { error: 'Order lines must match their source quote' });
+    for (const field of ['accountId', 'contactId', 'discount', 'tax']) {
+      if (data[field] != null && String(data[field]) !== String(quote[field])) throw new RecordWriteError(400, { error: 'Order ' + field + ' must match its source quote' });
+    }
+    data = { ...data, accountId: quote.accountId, contactId: quote.contactId, discount: quote.discount, tax: quote.tax, subtotal: quote.subtotal, total: quote.total, totalAmount: quote.total };
+    ctx.nested = { ...ctx.nested, items: { create: quoteLines } };
+
+  }
+
 
   if (hooks.validate) {
     const { valid, errors } = hooks.validate(data);
@@ -279,6 +298,8 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   const record = hooks.numbering
     ? await createNumbered(db, modelName, hooks.numbering, { data: createData, include: ctx.include })
     : await db[modelName].create({ data: createData, include: ctx.include });
+  await enqueueIndex(db, moduleName, record.id);
+  if (moduleName === 'accounts') await require('./territoryRules').applyTerritories(db, record);
   if (hooks.afterCreate) await hooks.afterCreate(record, hookContext(db, ctx));
   if (ctx.hydrate) await ctx.hydrate(record);
 
@@ -289,6 +310,7 @@ async function createRecord(db, moduleName, input, ctx = {}) {
     // Awaited so a rule's effects are in place before the caller sees the
     // record, and never thrown: automation must not fail the write itself.
     await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'create', record, userId: ctx.userId || null });
+    await require('./flowEngine').triggerFlows(prisma, { module: moduleName, trigger: 'create', record, userId: ctx.userId }).catch(err => logger.warn({ err }, 'Flow trigger failed'));
     await fireWebhook(prisma, `${moduleName}.created`, { id: record.id, module: moduleName, data: record });
     if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
   });
@@ -313,6 +335,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   }
 
   let data = { ...input };
+  if (moduleName === 'quotes') data = await runHook(require('./quotePricing').prepareQuote, db, data, oldRecord, ctx);
   if (hooks.beforeUpdate) data = await runHook(hooks.beforeUpdate, data, hookContext(db, ctx, oldRecord));
 
   // Validate the record as it will be, not just the fields supplied.
@@ -320,6 +343,12 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   if (violations.length) {
     throw new RecordWriteError(400, { error: violations[0].message, code: 'VALIDATION_RULE', violations });
   }
+
+  const duplicates = await findDuplicates(db, moduleName, { ...oldRecord, ...data }, { excludeId: oldRecord.id });
+  const blocking = duplicates.filter(d => d.action === 'block');
+  if (blocking.length) throw new RecordWriteError(409, {
+    error: 'This change would duplicate an existing record.', code: 'DUPLICATE_RECORD', duplicates: blocking,
+  });
 
   const { data: updateData } = pickModelFields(modelName, data);
   // An empty Json column sent back empty is no change; leave it unwritten.
@@ -333,6 +362,8 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   }
 
   const record = await db[modelName].update({ where: { id: oldRecord.id, ...(ctx.expectedVersion && { updatedAt: ctx.expectedVersion }) }, data: { ...updateData, ...(ctx.nested || {}) }, include: ctx.include });
+  await enqueueIndex(db, moduleName, record.id);
+  if (moduleName === 'accounts') await require('./territoryRules').applyTerritories(db, record);
   if (hooks.afterUpdate) await hooks.afterUpdate(record, hookContext(db, ctx, oldRecord));
   if (ctx.hydrate) await ctx.hydrate(record);
 
@@ -345,11 +376,13 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
 
   await automation(db, ctx, async prisma => {
     await assignSecurityGroups(prisma, moduleName, record, { onCreate: false });
+    if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
     if (changes.length) {
       await audit(prisma, { action: 'update', module: moduleName, recordId: record.id, details: `Updated ${modelName}${via(ctx.source)}: ${formatChanges(changes)}`, userId: ctx.userId || null });
     }
     sendRealtime(emitterFor(ctx), 'recordUpdated', moduleName, record);
     if (!ctx.skipWorkflows) await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: ctx.userId || null });
+    if (!ctx.skipWorkflows) await require('./flowEngine').triggerFlows(prisma, { module: moduleName, trigger: 'update', record, oldRecord, userId: ctx.userId }).catch(err => logger.warn({ err }, 'Flow trigger failed'));
     if (moved && !ctx.skipWorkflows) await runWorkflowsSafely(prisma, { module: moduleName, trigger: 'statusChange', record, oldRecord, userId: ctx.userId || null });
     await fireWebhook(prisma, `${moduleName}.updated`, { id: record.id, module: moduleName, changes: changes.map(c => c.field) });
     if (oldRecord.stage !== undefined && oldRecord.stage !== record.stage) {
@@ -357,7 +390,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     }
   });
 
-  return { record, oldRecord, changes };
+  return { record, oldRecord, changes, duplicates };
 }
 
 // ─── DELETE ───
@@ -384,6 +417,8 @@ async function deleteRecord(db, moduleName, target, ctx = {}) {
   } else {
     await db[modelName].delete({ where: { id: record.id } });
   }
+
+  await enqueueIndex(db, moduleName, record.id, 'delete');
 
   // Recycle bin, 30-day retention.
   try {

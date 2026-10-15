@@ -150,3 +150,17 @@ router.get('/approval-matrix', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+router.post('/approval-matrix', requirePermission('admin', 'full'), async (req, res, next) => {
+  try {
+    const { name, discountPercent, processId } = req.body;
+    if (!name || !Number.isFinite(Number(discountPercent)) || Number(discountPercent) < 0 || Number(discountPercent) > 100) return res.status(400).json({ error: 'Name and a discount threshold between 0 and 100 are required' });
+    const db = req.app.locals.prisma;
+    const process = await db.approvalProcess.findFirst({ where: { id: String(processId || ''), module: 'quotes', active: true } });
+    if (!process) return res.status(400).json({ error: 'Choose an active quote approval process' });
+    res.status(201).json(await db.cpqApprovalRule.create({ data: { name: String(name), conditions: [{ field: 'discountPercent', operator: 'gt', value: Number(discountPercent) }], approvers: { processId } } }));
+  } catch (err) { next(err); }
+});
+router.delete('/approval-matrix/:id', requirePermission('admin', 'full'), async (req, res, next) => {
+  try { await req.app.locals.prisma.cpqApprovalRule.delete({ where: { id: req.params.id } }); res.json({ deleted: true }); } catch (err) { next(err); }
+});
