@@ -4,6 +4,7 @@ import { TerritoryRules } from './TerritoryRules';
 import { FlowDesigner } from './FlowDesigner';
 import { CustomObjectWorkspace } from './CustomObjectWorkspace';
 import { LeadScoringPage } from './LeadScoring';
+import { MonitoringPage } from './Monitoring';
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
 import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
@@ -5964,6 +5965,8 @@ const NAV_ITEMS = [
   { id: "accessRequests", label: "Access requests", icon: Inbox, hideInDemo: true, requires: { module: "users", level: "read" } },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "admin", label: "Admin", icon: BarChart3, hideInDemo: true, requires: [{ module: "admin", level: "read" }, { module: "users", level: "read" }] },
+  // Everyone's sign-ins and requests: admin read alone is every Sales Rep's.
+  { id: "monitoring", label: "Monitoring", icon: Activity, hideInDemo: true, requires: [{ module: "admin", level: "read" }, { module: "users", level: "read" }] },
 ];
 
 function navContainsPage(item, page) {
@@ -6451,7 +6454,7 @@ function AppShell({ go }) {
     partners: PartnersPage, assets: AssetsPage, notes: NotesPage,
     sequences: SequenceBuilderPage, approvals: ApprovalsPage, users: UsersPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
     copilot: CopilotPage, chatter: ChatterPage, recycleBin: RecycleBinPage,
-    leadScoring: LeadScoringPage,
+    leadScoring: LeadScoringPage, monitoring: MonitoringPage,
     import: ImportPage,
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,
     templates: TemplatesPage, studio: StudioPage, sla: SlaPage,

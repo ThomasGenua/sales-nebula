@@ -7,6 +7,8 @@ All notable changes to Sales Nebula CRM.
 ### Recycle bin search, and screens for lead scoring and monitoring
 - The recycle bin is searched by any part of a record's name, in any case, or by its id. The search was read and ignored. Each entry keeps the name it is listed by; migration `20261020000000_recycle_bin_item_name` adds it and names the entries already there. The page can show every module again after one is picked, and says what kind of record each entry is.
 - Lead scoring rules have a screen (Automation & AI → More → Lead Scoring): add, edit, switch off and delete rules, and rescore the open leads. People with settings read see the rules; settings full changes them. The screen offers the fields and operators the scoring takes, from `GET /api/admin/scoring-rules`.
+- Monitoring has a screen: today's sign-ins, API calls, server errors and response times, alerts, the API event log filtered by module and outcome, and sign-in history. Only people who may read users see it. The event search names who made each request and filters by outcome (`status=server|client|ok`).
+- The memory alert weighs the heap in use against the most it may grow to. It compared it with what V8 had reserved so far, which stays close to what is used, so it warned at almost any load.
 
 ### The API starts again after #31
 - `src/services/recordWrites.js` failed to load: #31 and #30 each added a duplicate check to record updates, and the merge kept both, declaring `duplicates` twice. The server, the jobs and every test stopped at start-up. One check remains, #30's: it runs when an edit changes a field a rule matches on, and leaves out the record itself.
