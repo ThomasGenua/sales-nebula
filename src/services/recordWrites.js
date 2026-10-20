@@ -102,6 +102,10 @@ function moduleDefinition(moduleName) {
 /** Whether `moduleName`'s writes come through here (a CRUD module, or one registered by its router). */
 const isRecordModule = moduleName => modules.has(moduleName);
 
+/** The model a module's records are, or null for a module that is not written here. And back. */
+const moduleModel = moduleName => modules.get(moduleName)?.modelName || null;
+const modelModule = modelName => [...modules.values()].find(m => m.modelName === modelName)?.moduleName || null;
+
 // Ownership column, in preference order: a model that has `ownerId` uses it;
 // one that only has `assignedId` uses that instead.
 const OWNERSHIP_FIELDS = ['ownerId', 'assignedId'];
@@ -462,4 +466,6 @@ module.exports = {
   defineModule,
   moduleDefinition,
   isRecordModule,
+  moduleModel,
+  modelModule,
 };

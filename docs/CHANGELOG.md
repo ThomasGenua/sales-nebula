@@ -4,6 +4,10 @@ All notable changes to Sales Nebula CRM.
 
 ## Unreleased
 
+### Restoring every module from the recycle bin
+- A deleted asset, work order, partner, person account, subscription, project or prospect can be restored. Each went into the bin when deleted, but the bin restored from a fixed list of 15 modules and answered "Cannot restore module" for these. It now restores whatever the write path deletes.
+- A bulk restore of work orders, which are deleted outright, says to restore each from its bin entry. It failed with a server error.
+
 ### Recycle bin search, and screens for lead scoring and monitoring
 - The recycle bin is searched by any part of a record's name, in any case, or by its id. The search was read and ignored. Each entry keeps the name it is listed by; migration `20261020100000_recycle_bin_item_name` adds it and names the entries already there. The page can show every module again after one is picked, and says what kind of record each entry is.
 - Lead scoring rules have a screen (Automation & AI → More → Lead Scoring): add, edit, switch off and delete rules, and rescore the open leads. People with settings read see the rules; settings full changes them. The screen offers the fields and operators the scoring takes, from `GET /api/admin/scoring-rules`.

@@ -3606,7 +3606,8 @@ function RecycleBinPage() {
   useEffect(()=>{loadStats();},[loadStats]);
   useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?${new URLSearchParams({ module, search: query, limit: 50 })}`).then(d=>{setItems(d.data||d||[]);setTotal(d.meta?.total ?? (d.data||d||[]).length);}).catch(()=>{setItems([]);setTotal(0);}).finally(()=>setLoading(false));},[module,query,apiFetch]);
   const restore = async(id)=>{try{await apiFetch(`/recycle-bin/${id}/restore`,{method:'POST',body:{module}});setToast({message:'Restored',type:'success'});setItems(p=>p.filter(i=>i.id!==id));setTotal(t=>Math.max(0,t-1));loadStats();}catch(e){setToast({message:e.message,type:'error'});}};
-  const kind = mod => (mod || '').replace(/([A-Z])/g, ' $1').replace(/ies$/, 'y').replace(/s$/, '').replace(/^./, c => c.toUpperCase());
+  // What kind of record an entry is, by its module: work orders are filed under fieldService.
+  const kind = mod => mod === 'fieldService' ? 'Work order' : (mod || '').replace(/([A-Z])/g, ' $1').replace(/ies$/, 'y').replace(/s$/, '').replace(/^./, c => c.toUpperCase());
   const counts = Object.entries(stats?.byModule||{}).filter(([,v])=>v>0);
   const card = active => `p-3 rounded-xl border text-left touch-manipulation ${active?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`;
   return (
