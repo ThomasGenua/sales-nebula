@@ -22,8 +22,10 @@ router.get('/login-history', authenticate, requirePermission('admin', 'read'), r
   } catch (err) { next(err); }
 });
 
-// Event logs with search
-router.get('/event-logs', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+// Event logs with search. Every user's requests and the addresses they came
+// from, as sign-in history is: so it takes users read as well as admin read,
+// which every Sales Rep has.
+router.get('/event-logs', authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { eventType, module, userId, from, to, limit = 100, page = 1 } = req.query;

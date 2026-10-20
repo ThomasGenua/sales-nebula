@@ -4,6 +4,10 @@ All notable changes to Sales Nebula CRM.
 
 ## Unreleased
 
+### The API starts again after #31
+- `src/services/recordWrites.js` failed to load: #31 and #30 each added a duplicate check to record updates, and the merge kept both, declaring `duplicates` twice. The server, the jobs and every test stopped at start-up. One check remains, #30's: it runs when an edit changes a field a rule matches on, and leaves out the record itself.
+- The API event log (`GET /api/monitoring/event-logs`) takes user-management read as well as admin read, as sign-in history does. Every Sales Rep has admin read, and the log names who made each request and from which address.
+
 ### Salesforce parity foundations
 - Added validated custom-object record forms, forecast reconciliation and snapshots, an executable flow designer and approval-process editor.
 - Applied quote price/product rules on saves, added discount approval checks, executed territory rules, checked duplicates on edits, and queued automatic search indexing.

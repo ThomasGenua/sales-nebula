@@ -350,12 +350,6 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     throw new RecordWriteError(400, { error: violations[0].message, code: 'VALIDATION_RULE', violations });
   }
 
-  const duplicates = await findDuplicates(db, moduleName, { ...oldRecord, ...data }, { excludeId: oldRecord.id });
-  const blocking = duplicates.filter(d => d.action === 'block');
-  if (blocking.length) throw new RecordWriteError(409, {
-    error: 'This change would duplicate an existing record.', code: 'DUPLICATE_RECORD', duplicates: blocking,
-  });
-
   const { data: updateData } = pickModelFields(modelName, data);
   // An empty Json column sent back empty is no change; leave it unwritten.
   for (const [key, value] of Object.entries(updateData)) {
@@ -399,7 +393,6 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
 
   await automation(db, ctx, async prisma => {
     await assignSecurityGroups(prisma, moduleName, record, { onCreate: false });
-    if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
     if (changes.length) {
       await audit(prisma, { action: 'update', module: moduleName, recordId: record.id, details: `Updated ${modelName}${via(ctx.source)}: ${formatChanges(changes)}`, userId: ctx.userId || null });
     }
