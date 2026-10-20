@@ -1177,3 +1177,6 @@ router.get('/analytics/team-load', authenticate, requirePermission('admin', 'rea
 });
 
 module.exports = router;
+module.exports.expandEventsInRange = expandEventsInRange;
+module.exports.visibleEventWhere = visibleEventWhere;
+module.exports.participantWhere = participantWhere;

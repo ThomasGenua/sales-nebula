@@ -35,7 +35,8 @@ const DIRECT = [
  * Anything else writes one of these modules' records past their rules.
  */
 const ALLOWED = {
-  'src/services/workflowEngine.js': { named: 1, why: "a rule's createActivity action: through the write path it would run the rules again, and could loop (its field updates go through updateRecord with workflows skipped)" },
+  'src/services/workflowEngine.js': { named: 1, why: "a rule's createActivity action; field updates now use the central write path with recursive workflows disabled" },
+  'src/routes/configurationPackages.js': { dynamic: 2, why: "allowlisted workflow and validation-rule configuration tables only; never customer record modules" },
   'src/services/dataErasure.js': { dynamic: 1, why: 'erasing a data subject: no rule, workflow or webhook may see or keep what is being erased' },
   'src/routes/recycleBin.js': { dynamic: 4, why: 'restoring and purging the recycle bin, which puts back or removes what a delete already handled' },
   'src/utils/numbering.js': { dynamic: 2, why: 'the numbering helper itself (one in a comment), which recordWrites calls' },

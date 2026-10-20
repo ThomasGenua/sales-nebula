@@ -153,6 +153,10 @@ model Lead {
 }
 
 model Deal {
+  qualification Json?
+  nextStep String?
+  nextStepDate DateTime?
+  renewalContractId String? @unique
   id          String   @id @default(uuid())
   name        String
   stage       String   @default("Qualification") // Qualification, Discovery, Proposal, Negotiation, Closed Won, Closed Lost
@@ -5679,6 +5683,15 @@ model Setting {
   updatedAt DateTime @updatedAt
 
   @@index([category])
+}
+
+model ConfigurationRevision {
+  id String @id @default(uuid())
+  label String
+  before Json
+  after Json
+  createdById String
+  createdAt DateTime @default(now())
 }
 
 model CaseStatusHistory {

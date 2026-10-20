@@ -12,6 +12,7 @@ import { AuthContext, RouteContext, useAuth, can } from "./contexts";
 import { LeadActions, EmailActions, QuoteActions, QuoteFormExtras, RelatedRecords, LineItems, validateQuoteForm } from "./SalesWorkflows";
 import { RELATED, RelatedLists } from "./RelatedLists";
 import { MyDayPage, PipelinePage, SavedViews } from "./SalesWorkspace";
+import { SalesOperationsPage } from "./SalesOperations";
 import { ReportBuilderPage } from "./ReportBuilder";
 import { SequenceBuilderPage } from "./SequenceBuilder";
 import { MailboxPage, RecordMailbox } from "./Mailbox";
@@ -5809,6 +5810,7 @@ function MapsPage() {
 
 const NAV_ITEMS = [
   { id: "myDay", label: "My Day", icon: CheckCircle2 },
+  { id: "salesOperations", label: "Sales Operations", icon: LayoutGrid },
   { id: "pipeline", label: "Pipeline", icon: LayoutGrid, requires: { module: "deals", level: "read" } },
   { id: "mailbox", label: "Mailbox", icon: Inbox, requires: { module: "emails", level: "read" } },
   { id: "dashboard", label: "Dashboard", icon: Home },
@@ -6438,7 +6440,7 @@ function AppShell({ go }) {
   };
 
   const pageMap = {
-    dashboard: DashboardPage, myDay: MyDayPage, pipeline: PipelinePage, mailbox: MailboxPage, contacts: ContactsPage, leads: LeadsPage,
+    dashboard: DashboardPage, salesOperations: SalesOperationsPage, myDay: MyDayPage, pipeline: PipelinePage, mailbox: MailboxPage, contacts: ContactsPage, leads: LeadsPage,
     deals: DealsPage, accounts: AccountsPage, activities: ActivitiesPage,
     emails: EmailsPage, campaigns: CampaignsPage, products: ProductsPage,
     quotes: QuotesPage, invoices: InvoicesPage, contracts: ContractsPage,

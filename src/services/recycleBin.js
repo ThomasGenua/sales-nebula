@@ -8,7 +8,7 @@
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 // A person is known by their name, else their email; anything else by its
-// name or subject, else its number. Migration 20261020000000_recycle_bin_item_name
+// name or subject, else its number. Migration 20261020100000_recycle_bin_item_name
 // names the entries already in the bin the same way.
 const PEOPLE = new Set(['contacts', 'leads', 'personAccounts', 'prospects']);
 const NAME_KEYS = [

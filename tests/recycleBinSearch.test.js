@@ -65,7 +65,7 @@ test('the migration names the entries already in the bin as a delete names new o
   for (const [module, data] of snapshots) {
     await prisma.recycleBinItem.create({ data: { module, recordId: data.id, recordData: data, deletedById: 'someone', expiresAt: new Date() } });
   }
-  const sql = fs.readFileSync(path.join(__dirname, '../prisma/migrations/20261020000000_recycle_bin_item_name/migration.sql'), 'utf8');
+  const sql = fs.readFileSync(path.join(__dirname, '../prisma/migrations/20261020100000_recycle_bin_item_name/migration.sql'), 'utf8');
   await prisma.$executeRawUnsafe(sql.slice(sql.indexOf('UPDATE')));
 
   const rows = await prisma.recycleBinItem.findMany();
