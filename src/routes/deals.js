@@ -20,6 +20,7 @@ async function readable(req, module, model, where, find, none = []) {
 }
 
 module.exports = createCrudRouter('deal', 'deals', {
+  serverFields: ['renewalContractId'],
   include: {
     account: { select: { id: true, name: true, industry: true } },
     contact: { select: { id: true, firstName: true, lastName: true, email: true } },
@@ -35,10 +36,18 @@ module.exports = createCrudRouter('deal', 'deals', {
   orderBy: { updatedAt: 'desc' },
   // A deal's value is in its own currency; an unknown or inactive code is a
   // 400, and none at all means the default currency.
-  beforeCreate: async (data, { prisma }) => ({ ...data, currency: await resolveDealCurrency(prisma, data.currency) }),
+  beforeCreate: async (data, { prisma, source }) => {
+    if (source !== 'renewal opportunity') delete data.renewalContractId;
+    return { ...await require('../services/dealCoaching').prepareDeal(prisma, data), currency: await resolveDealCurrency(prisma, data.currency) };
+  },
   // A stage move is kept in the deal's stage history, however it was made:
   // the edit form, a bulk or mass update, an import.
   afterUpdate: async (record, { prisma, oldRecord, userId, emit }) => {
+    const serialize = v => v == null ? null : v instanceof Date ? v.toISOString() : String(v);
+    const changes = ['stage', 'value', 'currency', 'closeDate', 'ownerId'].filter(f => serialize(record[f]) !== serialize(oldRecord[f]));
+    for (const field of changes) await prisma.dealHistory.create({ data: {
+      dealId: record.id, field, oldValue: serialize(oldRecord[field]), newValue: serialize(record[field]), changedById: userId || 'system',
+    } });
     const oldStage = oldRecord.stage;
     if (oldStage && oldStage !== record.stage) {
       // Calculate days in old stage
@@ -63,7 +72,9 @@ module.exports = createCrudRouter('deal', 'deals', {
       try { emit?.dealStageChanged?.(record, oldStage, record.stage); } catch (e) { /* Real-time is best-effort */ }
     }
   },
-  beforeUpdate: async (data, { prisma }) => {
+  beforeUpdate: async (data, { prisma, oldRecord }) => {
+    delete data.renewalContractId;
+    data = await require('../services/dealCoaching').prepareDeal(prisma, data, oldRecord);
     if (data.currency !== undefined) data = { ...data, currency: await resolveDealCurrency(prisma, data.currency) };
     return data;
   },
@@ -239,7 +250,7 @@ module.exports = createCrudRouter('deal', 'deals', {
         });
         if (!source) return res.status(404).json({ error: 'Not found' });
 
-        const { id, createdAt, updatedAt, deletedAt, lineItems, stageHistory, ...data } = source;
+        const { id, createdAt, updatedAt, deletedAt, lineItems, stageHistory, renewalContractId, ...data } = source;
         // The copy links only to records the caller can see: it took the
         // source's account, contact and partner, and its items' products,
         // unchecked. A hidden link is dropped rather than refusing the clone,

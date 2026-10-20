@@ -20,6 +20,13 @@ Something can be missing in three ways:
 
 ## Works
 
+The **Sales Operations** workspace adds daily meetings/unanswered mail, an
+account-wide timeline, deal coaching, renewal/expansion opportunities, pipeline
+field history, data-quality review, integration diagnostics and configuration
+versioning. See [exact scope and limits](SALES_OPERATIONS.md). Configuration
+packages cover workflow rules, validation rules and deal-stage requirements;
+hosted sandboxes remain unavailable.
+
 | Area | What works |
 |---|---|
 | Records | Accounts, contacts, leads, deals, activities, cases, products, quotes, invoices, orders, contracts and the other standard modules: lists with search, column filters and paging; record pages; create, edit, delete to the recycle bin, restore. Accounts, contacts, deals and quotes have a **Related** tab. |
@@ -66,7 +73,7 @@ Something can be missing in three ways:
 | Macros | Update a field; add a comment to a case. | Any other action reports that it was not done. Scheduling (501). |
 | Field service | Work orders: dispatch, schedule (dates and assignee), complete, cancel. | No conflict check, appointments or line items. The "route" is the day's work orders in start order. |
 | Customer data platform | A contact's live profile (lifetime value, engagement) and segment evaluation over contacts. | Stored profiles' scores are never computed. Ingesting data (501). |
-| Integrations | Stores configuration and field mappings. | Sync, connection tests and sync schedules (501). |
+| Integrations | Stores configuration and field mappings. Sales Operations shows personal mailbox errors/reconciliation, mail/calendar retries, webhook delivery history/retries and search-queue counts. | Generic connectors' sync, connection tests and sync schedules remain unavailable (501). |
 | Inbound email | Microsoft mailboxes through Graph; IMAP and POP3 accounts with encrypted passwords. | IMAP and POP3 need an outside worker to fetch mail. Replies go only from Microsoft mailboxes (501 otherwise). |
 | Email status | "sent" when a mail server took the message. | Without SMTP an email is logged and shown as **not sent**; nothing sends it later. Opens are not tracked. |
 | Sales path, person accounts | Work through the API. | No screens. |
@@ -77,7 +84,7 @@ Something can be missing in three ways:
 | Duplicate rules | Checked when a record is created, and when an edit changes a field a rule matches on; text matches regardless of case. Merge for contacts, leads and accounts. | `auto_merge` only warns. On the SQLite development fallback, text must also match in case. |
 | Consent | Consent per contact/type for signed-in users, plus public signed unsubscribe links on sequence emails. | A general public consent-preference center. |
 | Customer portal | One configuration with branding; portal logins for contacts, created by an administrator. | Self-registration; portals for partners or employees (the portal type is a label). |
-| Timeline | A record's own activities, emails, notes, cases, changes and posts. | Items from child records (an account's contacts or deals); quotes, invoices and events. |
+| Timeline | A record's own timeline; Account 360 adds visible child activities/email, quotes, orders, invoices, contracts and calendar events. | Account 360 uses bounded recent results, not a complete historical export. |
 | Scheduler | Booking and changing appointments, with an overlap check, and cancellation. | Open slots assume 9 to 5 in server time and offer one slot per free gap; "availability" only says who is busy now. |
 | Currencies | One exchange rate per currency; deal totals converted in dashboards and forecasts. Pipeline board totals and monetary builder groups keep currencies separate. | Only deals have a currency. Arbitrary API reports can still aggregate unconverted amounts. No rate history. |
 | Revenue recognition | Schedules split evenly by month. | Periods are recognized by hand; the recognition method is ignored. |
