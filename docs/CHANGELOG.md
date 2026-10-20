@@ -4,6 +4,13 @@ All notable changes to Sales Nebula CRM.
 
 ## Unreleased
 
+### Sales operations
+- Added a Sales Operations workspace for daily work, Account 360, deal qualification and buying committees, renewals/expansion, pipeline changes, data-quality review, integration diagnostics and configuration versions.
+- Enforced optional deal-stage requirements in central writes and recorded stage/value/currency/close-date/owner history. Renewal opportunity links are unique and server-managed.
+- Added configuration previews, dependency validation, transactional application and version restoration for workflow rules, validation rules and stage requirements.
+- Made duplicate merges transactional and checked full module/record access. Removed duplicate declarations introduced in the merged shared write service that prevented startup.
+- See [scope and operational limits](SALES_OPERATIONS.md).
+
 ### Salesforce parity foundations
 - Added validated custom-object record forms, forecast reconciliation and snapshots, an executable flow designer and approval-process editor.
 - Applied quote price/product rules on saves, added discount approval checks, executed territory rules, checked duplicates on edits, and queued automatic search indexing.

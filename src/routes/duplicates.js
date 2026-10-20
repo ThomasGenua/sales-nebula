@@ -4,7 +4,7 @@ const { reachableWhere } = require('../middleware/access');
 const { auditMiddleware } = require('../middleware/audit');
 const { summaryRoute } = require('../utils/moduleStatus');
 const { columnsFrom, modelHasField } = require('../utils/modelFields');
-const { updateRecord, deleteRecord } = require('../services/recordWrites');
+const { updateRecord, deleteRecord, runAfter } = require('../services/recordWrites');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -111,12 +111,18 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
     const { masterId, fieldOverrides } = req.body;
     const modelName = MODEL_MAP[module];
     if (!modelName) return res.status(400).json({ error: 'Invalid module' });
+    if (!permits(req, module, 'full')) return res.status(403).json({ error: `Full ${module} permission is required to merge` });
     // Records other than the master: naming the master here deleted it.
     const mergeIds = Array.isArray(req.body.mergeIds) ? req.body.mergeIds.map(String).filter(id => id !== String(masterId)) : [];
     if (!masterId || !mergeIds.length) return res.status(400).json({ error: 'masterId and mergeIds required' });
+    if (mergeIds.length > 50 || new Set(mergeIds).size !== mergeIds.length) return res.status(400).json({ error: 'Choose up to 50 distinct source records' });
+    const accessible = await prisma[modelName].count({ where: await reachableWhere(req, module, modelName, { id: { in: [String(masterId), ...mergeIds] } }, 'Full') });
+    if (accessible !== mergeIds.length + 1) return res.status(404).json({ error: 'One or more records are unavailable for merge' });
 
-    const master = await prisma[modelName].findFirst({ where: { id: String(masterId), deletedAt: null } });
-    if (!master) return res.status(404).json({ error: 'Master record not found' });
+    const after = [];
+    const result = await prisma.$transaction(async tx => {
+    const master = await tx[modelName].findFirst({ where: { id: String(masterId), deletedAt: null } });
+    if (!master) throw Object.assign(new Error('Master record not found'), { status: 404 });
 
     // Apply field overrides to master, as an edit would
     // (services/recordWrites): its rules, links the caller can see, its
@@ -124,7 +130,7 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
     // overrides went to Prisma whole.
     if (fieldOverrides && Object.keys(fieldOverrides).length > 0) {
       const { deletedAt, ...overrides } = columnsFrom(modelName, fieldOverrides);
-      await updateRecord(prisma, module, master, overrides, { req, userId: req.userId, source: 'duplicate merge', mergingWith: mergeIds });
+      await updateRecord(tx, module, master, overrides, { req, userId: req.userId, source: 'duplicate merge', mergingWith: mergeIds, after, prisma });
     }
 
     // Reassign child records from merge targets to master. An account's
@@ -137,10 +143,8 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
     let merged = 0;
     for (const mergeId of mergeIds) {
       for (const child of childModels) {
-        if (prisma[child]) {
-          try {
-            await prisma[child].updateMany({ where: { [fkField]: mergeId }, data: { [fkField]: master.id } });
-          } catch (e) { /* FK might not exist on this model */ }
+        if (tx[child]) {
+            await tx[child].updateMany({ where: { [fkField]: mergeId }, data: { [fkField]: master.id } });
         }
       }
       // Soft delete the merged record, with its recycle bin entry, as the
@@ -148,21 +152,22 @@ router.post('/merge/:module', requirePermission('admin', 'full'), async (req, re
       // every contact left pointing at it, or failed on a linked contract,
       // unseen, and left the duplicate in place while reporting it merged.
       // Deleted as a delete is (services/recordWrites), so its webhook fires.
-      try {
-        const record = await prisma[modelName].findFirst({ where: { id: mergeId, deletedAt: null } });
+        const record = await tx[modelName].findFirst({ where: { id: mergeId, deletedAt: null } });
         if (record) {
-          await deleteRecord(prisma, module, record, {
+          await deleteRecord(tx, module, record, {
             req, userId: req.userId, source: `merged into ${master.id}`,
+            after, prisma,
             alsoSet: modelHasField(modelName, 'mergedIntoId') ? { mergedIntoId: master.id } : {},
           });
           merged++;
         }
-      } catch (e) { /* best-effort */ }
     }
 
-    await req.audit({ action: 'update', module, recordId: master.id, details: `Merged ${merged} records` });
-    const result = await prisma[modelName].findUnique({ where: { id: master.id } });
-    res.json({ master: result, mergedCount: merged });
+    return { master: await tx[modelName].findUnique({ where: { id: master.id } }), mergedCount: merged };
+    }, { isolationLevel: 'Serializable', timeout: 30000 });
+    await runAfter(after);
+    await req.audit({ action: 'update', module, recordId: result.master.id, details: `Merged ${result.mergedCount} records` });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
