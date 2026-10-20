@@ -2,22 +2,20 @@ const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { binName } = require('../services/recycleBin');
+const { moduleModel, modelModule } = require('../services/recordWrites');
+const { modelHasField } = require('../utils/modelFields');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
 
-const MODEL_MAP = {
-  contacts: 'contact', leads: 'lead', deals: 'deal', accounts: 'account',
-  activities: 'activity', cases: 'case', products: 'product',
-  quotes: 'quote', invoices: 'invoice', campaigns: 'campaign',
-  documents: 'document', emails: 'email',
-  contracts: 'contract', orders: 'order', entitlements: 'entitlement',
-};
-
 // A bin module as its model, named as the bin names it (contacts) or as the
-// model (contact); null for anything else. And back.
-const binModel = name => MODEL_MAP[name] || (Object.values(MODEL_MAP).includes(name) ? name : null);
-const binModule = model => Object.keys(MODEL_MAP).find(key => MODEL_MAP[key] === model);
+// model (contact); null for anything else. And back. The bin holds what a
+// delete filed: a module the write path knows (services/recordWrites), or
+// emails, which their own routes delete. A list here knew 15 of them, so a
+// deleted asset, work order, partner, person account, subscription, project
+// or prospect went into the bin and could not come back out.
+const binModel = name => (name === 'emails' || name === 'email' ? 'email' : moduleModel(name) || (modelModule(name) ? name : null));
+const binModule = model => (model === 'email' ? 'emails' : modelModule(model));
 
 // LIST deleted items
 router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
@@ -77,7 +75,7 @@ router.post('/:id/restore', requirePermission('settings', 'full'), async (req, r
     const item = await prisma.recycleBinItem.findUnique({ where: { id: req.params.id } });
     if (!item) return res.status(404).json({ error: 'Not found in recycle bin' });
 
-    const modelName = MODEL_MAP[item.module];
+    const modelName = binModel(item.module);
     if (!modelName || !prisma[modelName]) {
       return res.status(400).json({ error: `Cannot restore module: ${item.module}` });
     }
@@ -97,7 +95,8 @@ router.post('/:id/restore', requirePermission('settings', 'full'), async (req, r
     } else if (existing) {
       return res.status(409).json({ error: 'A record with this ID already exists. It may have been re-created.' });
     } else {
-      // Hard-deleted (Deal and Workflow have no deletedAt): rebuild from the snapshot.
+      // Deleted outright (a work order, which has no deletedAt, or an email
+      // deleted on its own): rebuild from the snapshot.
       const data = typeof item.recordData === 'string' ? JSON.parse(item.recordData) : item.recordData;
       delete data.createdAt;
       delete data.updatedAt;
@@ -187,6 +186,10 @@ router.post('/restore/bulk', authenticate, requirePermission('admin', 'full'), a
     if (!module || !Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'module and ids required' });
     const model = binModel(module);
     if (!model) return res.status(400).json({ error: `Cannot restore module: ${module}` });
+    // This puts back rows kept in their table. A work order is deleted
+    // outright, so it is rebuilt from its snapshot, one entry at a time: this
+    // was a 500, filtering on a column its model does not have.
+    if (!modelHasField(model, 'deletedAt')) return res.status(400).json({ error: `${module} are deleted outright: restore each from its recycle bin entry` });
     const deleted = await prisma[model].findMany({ where: { id: { in: ids.map(String) }, deletedAt: { not: null } }, select: { id: true } });
     const restoredIds = deleted.map(r => r.id);
     const result = await prisma[model].updateMany({ where: { id: { in: restoredIds } }, data: { deletedAt: null } });
