@@ -4,6 +4,7 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { linkRefusal } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
+const { binEntry } = require('../services/recycleBin');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -162,13 +163,7 @@ router.delete('/:id', requirePermission('emails', 'full'), async (req, res, next
 
     // Recycle bin snapshot
     try {
-      await prisma.recycleBinItem.create({
-        data: {
-          module: 'emails', recordId: req.params.id,
-          recordData: record, deletedById: req.userId,
-          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        },
-      });
+      await prisma.recycleBinItem.create({ data: binEntry('emails', record, req.userId) });
     } catch (e) { /* best-effort */ }
 
     res.json({ success: true });

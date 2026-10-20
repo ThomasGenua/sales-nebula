@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { authenticate, requirePermission } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
+const { binName } = require('../services/recycleBin');
 
 const router = Router();
 router.use(authenticate, auditMiddleware);
@@ -22,7 +23,8 @@ const binModule = model => Object.keys(MODEL_MAP).find(key => MODEL_MAP[key] ===
 router.get('/', requirePermission('settings', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { module, page = 1, limit = 50, search } = req.query;
+    const { module, page = 1, limit = 50 } = req.query;
+    const search = String(req.query.search || '').trim();
     const take = Math.min(parseInt(limit) || 50, 200);
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
@@ -30,6 +32,14 @@ router.get('/', requirePermission('settings', 'read'), async (req, res, next) =>
     // The Recycle Bin page asks for a model name (contact); entries are filed
     // by module (contacts), so it opened on an empty list.
     if (module) where.module = binModule(binModel(module)) || module;
+    // By any part of the name, in any case, or by the record's id. The search
+    // was read and ignored, so the bin listed everything. SQLite, the
+    // development fallback, has no case-insensitive mode; its LIKE ignores
+    // case anyway.
+    if (search) {
+      const insensitive = req.app.locals.databaseProvider !== 'sqlite';
+      where.OR = [{ name: { contains: search, ...(insensitive && { mode: 'insensitive' }) } }, { recordId: search }];
+    }
 
     const [items, total] = await Promise.all([
       prisma.recycleBinItem.findMany({
@@ -50,7 +60,7 @@ router.get('/', requirePermission('settings', 'read'), async (req, res, next) =>
       id: item.id,
       module: item.module,
       recordId: item.recordId,
-      name: extractName(item.module, item.recordData),
+      name: item.name || binName(item.module, item.recordData),
       deletedBy: userMap[item.deletedById] || null,
       deletedAt: item.deletedAt,
       expiresAt: item.expiresAt,
@@ -160,19 +170,6 @@ router.get('/stats', requirePermission('settings', 'read'), async (req, res, nex
     res.json({ total, byModule });
   } catch (err) { next(err); }
 });
-
-function extractName(module, data) {
-  const d = typeof data === 'string' ? JSON.parse(data) : data;
-  switch (module) {
-    case 'contacts': return `${d.firstName || ''} ${d.lastName || ''}`.trim();
-    case 'leads': return `${d.firstName || ''} ${d.lastName || ''}`.trim();
-    case 'deals': return d.name || '';
-    case 'accounts': return d.name || '';
-    case 'cases': return d.subject || d.caseNumber || '';
-    case 'products': return d.name || '';
-    default: return d.name || d.subject || d.id || '';
-  }
-}
 
 module.exports = router;
 

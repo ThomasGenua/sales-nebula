@@ -3594,16 +3594,26 @@ function ChatterPage() {
 function RecycleBinPage() {
   const { apiFetch, user } = useAuth();
   const canRestore = can(user, "settings", "full");
-  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [module, setModule] = useState(''); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
-  useEffect(()=>{apiFetch('/recycle-bin/stats').then(setStats).catch(()=>{});},[apiFetch]);
-  useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?module=${module}&limit=50`).then(d=>setItems(d.data||d||[])).catch(()=>setItems([])).finally(()=>setLoading(false));},[module,apiFetch]);
-  const restore = async(id)=>{try{await apiFetch(`/recycle-bin/${id}/restore`,{method:'POST',body:{module}});setToast({message:'Restored',type:'success'});setItems(p=>p.filter(i=>i.id!==id));}catch(e){setToast({message:e.message,type:'error'});}};
+  const [stats, setStats] = useState(null); const [items, setItems] = useState([]); const [total, setTotal] = useState(0); const [module, setModule] = useState(''); const [loading, setLoading] = useState(true); const [toast, setToast] = useState(null);
+  // The bin is searched by name, any part of it in any case, or by a record's id.
+  const [search, setSearch] = useState(''); const [query, setQuery] = useState('');
+  useEffect(() => { const t = setTimeout(() => setQuery(search.trim()), 300); return () => clearTimeout(t); }, [search]);
+  // The counts are read again after a restore, which changes them.
+  const loadStats = useCallback(()=>apiFetch('/recycle-bin/stats').then(setStats).catch(()=>{}),[apiFetch]);
+  useEffect(()=>{loadStats();},[loadStats]);
+  useEffect(()=>{setLoading(true);apiFetch(`/recycle-bin?${new URLSearchParams({ module, search: query, limit: 50 })}`).then(d=>{setItems(d.data||d||[]);setTotal(d.meta?.total ?? (d.data||d||[]).length);}).catch(()=>{setItems([]);setTotal(0);}).finally(()=>setLoading(false));},[module,query,apiFetch]);
+  const restore = async(id)=>{try{await apiFetch(`/recycle-bin/${id}/restore`,{method:'POST',body:{module}});setToast({message:'Restored',type:'success'});setItems(p=>p.filter(i=>i.id!==id));setTotal(t=>Math.max(0,t-1));loadStats();}catch(e){setToast({message:e.message,type:'error'});}};
+  const kind = mod => (mod || '').replace(/([A-Z])/g, ' $1').replace(/ies$/, 'y').replace(/s$/, '').replace(/^./, c => c.toUpperCase());
+  const counts = Object.entries(stats?.byModule||{}).filter(([,v])=>v>0);
+  const card = active => `p-3 rounded-xl border text-left touch-manipulation ${active?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`;
   return (
     <div>
       <h1 className="text-lg sm:text-xl font-bold text-[#F0EDE5] mb-4">Recycle Bin</h1>
-      {stats&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">{Object.entries(stats.byModule||{}).filter(([,v])=>v>0).map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={`p-3 rounded-xl border text-left touch-manipulation ${module===mod?'bg-[rgba(245,166,35,0.08)] border-[rgba(245,166,35,0.20)]':'bg-[#0B1228] border-[#182550]'}`}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}</div></button>))}</div>}
-      {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title="Empty" subtitle="Deleted items appear here for 30 days" />:(
-        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]">Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div>{canRestore&&<Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button>}</div>))}</div>)}
+      {counts.length>0&&<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4"><button onClick={()=>setModule('')} className={card(!module)}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{counts.reduce((sum,[,v])=>sum+v,0)}</div><div className="text-xs text-[#4A5168]">All</div></button>{counts.map(([mod,count])=>(<button key={mod} onClick={()=>setModule(mod)} className={card(module===mod)}><div className="text-lg font-bold font-mono text-[#F0EDE5]">{count}</div><div className="text-xs text-[#4A5168] capitalize">{mod}</div></button>))}</div>}
+      <Input className="mb-4" value={search} onChange={setSearch} placeholder="Search by name or record id" aria-label="Search the bin" />
+      {loading?<Spinner/>:items.length===0?<EmptyState icon={Recycle} title={query?'Nothing found':'Empty'} subtitle={query?`No deleted record matches "${query}"`:'Deleted items appear here for 30 days'} />:(
+        <div className="space-y-2">{items.map(item=>(<div key={item.id} className="bg-[#0B1228] border border-[#182550] rounded-xl p-4 flex items-center justify-between"><div><div className="text-sm text-[#F0EDE5]">{item.name||item.firstName||item.subject||'Untitled'}</div><div className="text-xs text-[#4A5168]"><span>{kind(item.module)}</span> · Deleted {item.deletedAt?new Date(item.deletedAt).toLocaleDateString(...fmt()):''}</div></div>{canRestore&&<Button variant="secondary" size="sm" onClick={()=>restore(item.id)}>Restore</Button>}</div>))}
+          {total>items.length&&<p className="text-xs text-[#4A5168]">Showing the latest {items.length} of {total}. Search to find the others.</p>}</div>)}
       {toast && <Toast {...toast} onClose={()=>setToast(null)} />}
     </div>
   );

@@ -1456,6 +1456,7 @@ model RecycleBinItem {
   module     String   // contacts, leads, deals, accounts, etc.
   recordId   String
   recordData Json     // Full snapshot of deleted record
+  name       String?  // What the bin lists and searches it by (services/recycleBin)
   deletedById String
   deletedAt  DateTime @default(now())
   expiresAt  DateTime // Auto-purge after 30 days
