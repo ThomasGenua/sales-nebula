@@ -81,6 +81,19 @@ test('the rescore leaves a lead in the recycle bin as it is', async () => {
   expect((await prisma.lead.findUnique({ where: { id: binned.id } })).score).toBe(3);
 });
 
+test('the rules screen is offered what the scoring takes: its operators and a lead\'s own fields', async () => {
+  const res = await api('get', '/api/admin/scoring-rules');
+  expect(res.status).toBe(200);
+  expect(res.body.operators).toEqual(expect.arrayContaining(['equals', 'contains', 'endsWith', 'greaterThan', 'isNotEmpty']));
+  expect(res.body.operators).not.toContain('is_not_empty');
+  expect(res.body.fields).toEqual(expect.arrayContaining(['company', 'email', 'source', 'title', 'value']));
+  for (const hidden of ['id', 'ownerId', 'createdAt', 'score']) expect(res.body.fields).not.toContain(hidden);
+  // Every one offered is one a rule may be saved with.
+  const { scoringRuleProblem } = require('../src/services/leadScoring');
+  expect(res.body.operators.map(operator => scoringRuleProblem({ operator })).filter(Boolean)).toEqual([]);
+  expect(res.body.fields.map(field => scoringRuleProblem({ field })).filter(Boolean)).toEqual([]);
+});
+
 test('a rule no lead could match is refused when it is saved', async () => {
   for (const body of [{ field: 'company', operator: 'fuzzy' }, { field: 'nickname', operator: 'equals' }, { field: 'score', operator: 'greaterThan' }]) {
     const res = await api('post', '/api/admin/scoring-rules', { name: 'Never', value: 'x', points: 10, ...body });

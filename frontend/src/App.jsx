@@ -3,6 +3,7 @@ import { ForecastHistory } from './ForecastHistory';
 import { TerritoryRules } from './TerritoryRules';
 import { FlowDesigner } from './FlowDesigner';
 import { CustomObjectWorkspace } from './CustomObjectWorkspace';
+import { LeadScoringPage } from './LeadScoring';
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
 import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
@@ -5889,6 +5890,7 @@ const NAV_ITEMS = [
           { id: "copilot", label: "AI Copilot", icon: Zap },
           { id: "flowBuilder", label: "Flow Builder", icon: GitBranch },
           { id: "sequences", label: "Sequences", icon: GitBranch },
+          { id: "leadScoring", label: "Lead Scoring", icon: Target, requires: { module: "settings", level: "read" } },
         ],
       },
     ],
@@ -6449,6 +6451,7 @@ function AppShell({ go }) {
     partners: PartnersPage, assets: AssetsPage, notes: NotesPage,
     sequences: SequenceBuilderPage, approvals: ApprovalsPage, users: UsersPage, accessRequests: AccessRequestsPage, analytics: AnalyticsPage,
     copilot: CopilotPage, chatter: ChatterPage, recycleBin: RecycleBinPage,
+    leadScoring: LeadScoringPage,
     import: ImportPage,
     calendar: CalendarPage, projects: ProjectsPage, securityGroups: SecurityGroupsPage,
     templates: TemplatesPage, studio: StudioPage, sla: SlaPage,

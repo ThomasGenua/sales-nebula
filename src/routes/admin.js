@@ -6,7 +6,7 @@ const { hashApiKey } = require('../utils/apiKeys');
 const { permits } = require('../middleware/auth');
 const { reachableWhere } = require('../middleware/access');
 const { columnsFrom } = require('../utils/modelFields');
-const { scoreLead, activeScoringRules, scoringRuleProblem } = require('../services/leadScoring');
+const { OFFERED, scoreLead, activeScoringRules, scoringRuleProblem } = require('../services/leadScoring');
 const { LEASE_PREFIX } = require('../utils/lease');
 
 const router = Router();
@@ -213,7 +213,8 @@ router.get('/scoring-rules', requirePermission('settings', 'read'), async (req, 
   try {
     const prisma = req.app.locals.prisma;
     const rules = await prisma.leadScoringRule.findMany({ orderBy: { createdAt: 'desc' } });
-    res.json({ data: rules });
+    // With the fields and operators a rule may use, for the rules screen.
+    res.json({ data: rules, ...OFFERED });
   } catch (err) { next(err); }
 });
 

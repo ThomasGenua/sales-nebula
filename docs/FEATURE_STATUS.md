@@ -46,7 +46,7 @@ Something can be missing in three ways:
 | Area | What it does | What it does not do |
 |---|---|---|
 | AI Copilot without a key | Answers from fixed rules using your open deals, cases and activities; the screen says so under each answer. | `/api/copilot/chat` answers 503. Conversation threads exist in the API only. |
-| Lead scoring | Scores a lead by your rules whenever it is saved, wherever the save comes from. Not AI. A rule with an operator or field the scoring doesn't know is refused. | Changing a rule rescores no lead until it is next saved; `POST /api/admin/score-all-leads` rescores the open ones. Rules are managed through the API; there is no screen for them. |
+| Lead scoring | Scores a lead by your rules whenever it is saved, wherever the save comes from. Not AI. Rules are kept on the **Lead Scoring** screen (Automation & AI → More), which also rescores the open leads; a rule with an operator or field the scoring doesn't know is refused. | Changing a rule rescores no lead until it is next saved or the open leads are rescored. |
 | Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
 | Reports | Tabular, summary and chart reports, a report builder, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. The API export gives raw rows; the builder exports the displayed detail or summary. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
