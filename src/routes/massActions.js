@@ -3,6 +3,7 @@ const { authenticate, permits } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { reachableWhere, linkRefusal } = require('../middleware/access');
 const { editableFields, modelHasField } = require('../utils/modelFields');
+const { binEntry } = require('../services/recycleBin');
 const {
   updateRecord, deleteRecord, batchClient, isRecordModule, RecordWriteError,
 } = require('../services/recordWrites');
@@ -133,10 +134,7 @@ router.post('/delete', async (req, res, next) => {
     if (isRecordModule(module)) {
       ({ done: deleted } = await eachRecord(req, records, (db, record, ctx) => deleteRecord(db, module, record, ctx)));
     } else {
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      await Promise.all(records.map(record => prisma.recycleBinItem.create({
-        data: { module, recordId: record.id, recordData: record, deletedById: req.userId, expiresAt },
-      }).catch(() => {})));
+      await Promise.all(records.map(record => prisma.recycleBinItem.create({ data: binEntry(module, record, req.userId) }).catch(() => {})));
       const ids = records.map(r => r.id);
       deleted = (modelHasField(model, 'deletedAt')
         ? await prisma[model].updateMany({ where: { id: { in: ids } }, data: { deletedAt: new Date() } })

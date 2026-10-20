@@ -49,6 +49,7 @@ const { checkValidationRules, applyAssignmentRules, findDuplicates, recordDuplic
 const { runWorkflowsSafely } = require('./workflowEngine');
 const { logger } = require('./logger');
 const { enqueueIndex } = require('./searchIndexing');
+const { binEntry } = require('./recycleBin');
 
 /** A write the rules refused: `status` and `body` are the HTTP answer. */
 class RecordWriteError extends Error {
@@ -393,7 +394,6 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
 
   await automation(db, ctx, async prisma => {
     await assignSecurityGroups(prisma, moduleName, record, { onCreate: false });
-    if (duplicates.length) await recordDuplicates(prisma, moduleName, record.id, duplicates);
     if (changes.length) {
       await audit(prisma, { action: 'update', module: moduleName, recordId: record.id, details: `Updated ${modelName}${via(ctx.source)}: ${formatChanges(changes)}`, userId: ctx.userId || null });
     }
@@ -440,15 +440,7 @@ async function deleteRecord(db, moduleName, target, ctx = {}) {
 
   // Recycle bin, 30-day retention.
   try {
-    await db.recycleBinItem.create({
-      data: {
-        module: moduleName,
-        recordId: record.id,
-        recordData: record,
-        deletedById: ctx.userId || null,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      },
-    });
+    await db.recycleBinItem.create({ data: binEntry(moduleName, record, ctx.userId || null) });
   } catch (e) { /* The recycle bin is best-effort */ }
 
   await automation(db, ctx, async prisma => {

@@ -55,6 +55,14 @@ describe('Sign-in records take user-management read', () => {
     expect(JSON.stringify(res.body)).not.toContain('203.0.113.7');
   });
 
+  test('the API event log, which says who made each request and from where', async () => {
+    const anyUser = await prisma.user.findFirst();
+    await prisma.eventLog.create({ data: { eventType: 'API', userId: anyUser.id, sourceIp: '192.0.2.44', uri: '/api/leads/:id', method: 'GET', statusCode: 200 } });
+    expect(await statuses('/api/monitoring/event-logs')).toEqual([200, 200, 403, 200]);
+    const res = await get('/api/monitoring/event-logs', 'Sales Rep');
+    expect(JSON.stringify(res.body)).not.toContain('192.0.2.44');
+  });
+
   test('active sessions and failed sign-ins', async () => {
     expect(await statuses('/api/security/sessions')).toEqual([200, 200, 403, 200]);
     expect(await statuses('/api/security/threats')).toEqual([200, 200, 403, 200]);

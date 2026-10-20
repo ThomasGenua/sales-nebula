@@ -151,8 +151,9 @@ function createApp(rawPrisma, options = {}) {
   // ─── EVENT LOG ───
   // Each API request, for /api/monitoring's counts and event search
   // (services/eventLog). Off in tests, as the request log and metrics are,
-  // unless a test asks for it.
-  app.locals.eventLog = (options.eventLog ?? !isTest) ? createEventLog(prisma) : null;
+  // unless a test asks for it: `true`, or the log's own options ({ flushMs }).
+  const eventLog = options.eventLog ?? !isTest;
+  app.locals.eventLog = eventLog ? createEventLog(prisma, typeof eventLog === 'object' ? eventLog : {}) : null;
   if (app.locals.eventLog) app.use('/api', app.locals.eventLog.middleware);
 
   // ─── STATIC FILES ───

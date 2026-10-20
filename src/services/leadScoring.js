@@ -38,6 +38,14 @@ OPERATORS.is_not_empty = OPERATORS.isNotEmpty;
 const FIELDS = new Set(Prisma.dmmf.datamodel.models.find(m => m.name === 'Lead').fields
   .filter(f => f.kind !== 'object' && f.name !== 'score').map(f => f.name));
 
+// What the rules screen offers: the operators by their own names, and a
+// lead's columns but its ids and timestamps. The seed's spellings and those
+// columns are still scored.
+const OFFERED = {
+  operators: Object.keys(OPERATORS).filter(operator => !operator.includes('_')),
+  fields: [...FIELDS].filter(field => field !== 'id' && !/Id$/.test(field) && !/At$/.test(field)).sort(),
+};
+
 const known = operator => typeof operator === 'string' && Object.hasOwn(OPERATORS, operator);
 const matches = (rule, lead) => FIELDS.has(rule.field) && known(rule.operator) && OPERATORS[rule.operator](lead[rule.field], rule.value);
 
@@ -69,4 +77,4 @@ function scoringRuleProblem({ field, operator } = {}) {
   return null;
 }
 
-module.exports = { BASE_SCORE, scoreLead, activeScoringRules, withRuleScore, scoringRuleProblem };
+module.exports = { BASE_SCORE, OFFERED, scoreLead, activeScoringRules, withRuleScore, scoringRuleProblem };

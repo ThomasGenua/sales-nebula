@@ -38,7 +38,9 @@ async function start() {
   const app = express();
   // Test harness only; never mounted by the production app.
   app.get('/__test/mail', (req, res) => res.json(messages));
-  app.use(createApp(prisma));
+  // The API event log, which tests leave off, for the Monitoring screen; its
+  // rows written within half a second rather than five.
+  app.use(createApp(prisma, { eventLog: { flushMs: 500 } }));
   await new Promise(resolve => smtp.listen(2526, '127.0.0.1', resolve));
   server = app.listen(7545, '127.0.0.1', () => console.log('Browser test API ready.'));
 }

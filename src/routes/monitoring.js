@@ -22,24 +22,36 @@ router.get('/login-history', authenticate, requirePermission('admin', 'read'), r
   } catch (err) { next(err); }
 });
 
-// Event logs with search
-router.get('/event-logs', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+// Event logs with search. Every user's requests and the addresses they came
+// from, as sign-in history is: so it takes users read as well as admin read,
+// which every Sales Rep has.
+router.get('/event-logs', authenticate, requirePermission('admin', 'read'), requirePermission('users', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { eventType, module, userId, from, to, limit = 100, page = 1 } = req.query;
+    const { eventType, module, userId, from, to, status, limit = 100, page = 1 } = req.query;
     const where = {};
     if (eventType) where.eventType = eventType;
     if (module) where.module = module;
     if (userId) where.userId = userId;
+    // By outcome: a server error, a request refused, or one that went through.
+    const OUTCOMES = { server: { gte: 500 }, client: { gte: 400, lt: 500 }, ok: { lt: 400 } };
+    if (OUTCOMES[status]) where.statusCode = OUTCOMES[status];
     if (from || to) {
       where.timestamp = {};
       if (from) where.timestamp.gte = new Date(from);
       if (to) where.timestamp.lte = new Date(to);
     }
-    const [data, total] = await Promise.all([
+    const [events, total] = await Promise.all([
       prisma.eventLog.findMany({ where, orderBy: { timestamp: 'desc' }, take: +limit, skip: (+page - 1) * +limit }),
       prisma.eventLog.count({ where }),
     ]);
+    // Who made each request, by name: the log keeps only an id.
+    const people = await prisma.user.findMany({
+      where: { id: { in: [...new Set(events.map(e => e.userId).filter(Boolean))] } },
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+    const byId = new Map(people.map(p => [p.id, p]));
+    const data = events.map(e => ({ ...e, user: e.userId ? byId.get(e.userId) || null : null }));
     res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
   } catch (err) { next(err); }
 });
@@ -80,8 +92,11 @@ router.get('/alerts', authenticate, requirePermission('admin', 'read'), async (r
     const alerts = [];
     const failedLogins = await prisma.loginHistory.count({ where: { loginTime: { gte: new Date(Date.now() - 3600000) }, status: 'Failed' } });
     if (failedLogins > 10) alerts.push({ severity: 'high', type: 'security', message: `${failedLogins} failed logins in the last hour`, timestamp: new Date() });
-    const memUsage = process.memoryUsage();
-    if (memUsage.heapUsed / memUsage.heapTotal > 0.85) alerts.push({ severity: 'warning', type: 'performance', message: 'Memory usage above 85%', timestamp: new Date() });
+    // Against the most the heap may grow to. heapTotal is only what V8 has
+    // reserved so far, which it keeps close to what is used, so the warning
+    // showed at almost any load.
+    const { heap_size_limit: heapLimit } = require('v8').getHeapStatistics();
+    if (process.memoryUsage().heapUsed / heapLimit > 0.85) alerts.push({ severity: 'warning', type: 'performance', message: 'Memory usage above 85%', timestamp: new Date() });
     res.json({ alerts, checkedAt: new Date() });
   } catch (err) { next(err); }
 });

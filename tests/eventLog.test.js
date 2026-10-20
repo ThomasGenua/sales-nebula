@@ -86,6 +86,21 @@ test('monitoring counts the last hour\'s calls and server errors, and finds the 
   expect(found.body.total).toBe(2);
 });
 
+test('the event search filters by outcome and names who made each request', async () => {
+  await request(app).get('/api/contacts').set(authHeader(token));
+  await request(app).get('/api/contacts/not-a-record').set(authHeader(token));
+  await request(app).get('/api/contacts');
+  await events.flush();
+
+  const search = async status => (await request(app).get(`/api/monitoring/event-logs?module=contacts${status ? `&status=${status}` : ''}`).set(authHeader(token))).body;
+  expect((await search()).total).toBe(3);
+  const ok = await search('ok');
+  expect(ok.data.map(e => [e.statusCode, e.user && e.user.email])).toEqual([[200, 'admin@test.com']]);
+  expect((await search('client')).data.map(e => [e.statusCode, e.user])).toEqual(expect.arrayContaining([[401, null]]));
+  expect((await search('client')).total).toBe(2);
+  expect((await search('server')).total).toBe(0);
+});
+
 test('a request is answered even when its row cannot be written, and rows go in one batch', async () => {
   const createMany = jest.fn().mockRejectedValue(new Error('database down'));
   const log = createEventLog({ eventLog: { createMany } });
@@ -98,6 +113,16 @@ test('a request is answered even when its row cannot be written, and rows go in 
   await expect(log.flush()).resolves.toBeUndefined();
   expect(createMany).toHaveBeenCalledTimes(1);
   expect(createMany.mock.calls[0][0].data).toHaveLength(2);
+});
+
+test('the memory warning weighs the heap in use against the most it may grow to', async () => {
+  const v8 = require('v8');
+  const alertsWith = async limit => {
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockReturnValue({ heap_size_limit: limit });
+    try { return (await request(app).get('/api/monitoring/alerts').set(authHeader(token))).body.alerts.map(a => a.message); } finally { spy.mockRestore(); }
+  };
+  expect(await alertsWith(process.memoryUsage().heapUsed)).toContain('Memory usage above 85%');
+  expect(await alertsWith(64 * 1024 ** 3)).not.toContain('Memory usage above 85%');
 });
 
 test('the cleanup job deletes events older than 30 days', async () => {
