@@ -1,5 +1,7 @@
 # Salesforce parity implementation
 
+The next enterprise implementation and its explicit boundaries are described in [Enterprise foundations](ENTERPRISE_FOUNDATIONS.md). The implementation and remaining-work list below describes the earlier October 15 release.
+
 This is an incremental implementation of the eight-area roadmap, **not full
 Salesforce parity**. The remaining items below are still part of the requested work.
 

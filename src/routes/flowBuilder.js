@@ -9,6 +9,13 @@ const { reachableWhere } = require('../middleware/access');
 const publicRun = run => run && ({ id: run.id, flowId: run.flowId, status: run.status, triggerRecordId: run.triggerRecordId, triggerModule: run.triggerModule, log: run.log, startedAt: run.startedAt, completedAt: run.completedAt, error: run.error });
 const router = Router();
 router.use(authenticate, requirePermission('admin', 'read'));
+router.get('/field-metadata/:module', async (req, res, next) => {
+  if (req.params.module.startsWith('custom:')) { try { const object = await req.app.locals.prisma.customObject.findFirst({ where: { id: req.params.module.slice(7), deletedAt: null }, include: { fields: true } }); if (!object) return res.status(404).json({ error: 'Object not found' }); return res.json({ fields: object.fields.map(f => ({ name: f.apiName, type: ['Number','Currency'].includes(f.type) ? 'Float' : f.type === 'Checkbox' ? 'Boolean' : 'String' })), relations: [] }); } catch (e) { return next(e); } }
+  const { findModel } = require('../utils/modelFields');
+  const model = findModel(resolveModel(req.params.module));
+  const fields = (model?.fields || []).filter(f => f.kind !== 'object' && ['String', 'Int', 'Float', 'Boolean'].includes(f.type) && !f.name.endsWith('Id') && !['id', 'createdAt', 'updatedAt', 'deletedAt'].includes(f.name) && !require('../utils/modelFields').plainFieldProblem(model.name, f.name, f.type === 'String' ? '' : f.type === 'Boolean' ? false : 0)).map(f => ({ name: f.name, type: f.type }));
+  res.json({ fields, relations: require('../services/relatedFlowActions').relations(req.params.module) });
+});
 
 // Paged and searched, with a total, as the Flow Builder page asks; its search
 // box did nothing and every flow came back on every page.
@@ -87,7 +94,7 @@ router.post('/:id/activate', requirePermission('admin', 'full'), async (req, res
     if (!flow) return res.status(404).json({ error: 'Not found' });
     const problem = flowProblem(flow);
     if (problem) return res.status(400).json({ error: problem });
-    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', publishedAt: new Date(), publishedById: req.userId } }));
+    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', ...(flow.type === 'Scheduled' && { nextRun: new Date() }), publishedAt: new Date(), publishedById: req.userId } }));
   } catch (err) { next(err); }
 });
 
@@ -98,10 +105,12 @@ router.post('/:id/run', requirePermission('admin', 'edit'), async (req, res, nex
     if (!flow) return res.status(404).json({ error: 'Not found' });
     const problem = flowProblem(flow);
     if (problem) return res.status(400).json({ error: problem });
-    if (!permits(req, flow.module, 'edit')) return res.status(403).json({ error: 'Edit permission is required for the trigger module' });
+    if (!(flow.module.startsWith('custom:') ? require('../services/customObjectAccess').canAccess(req, flow.module.slice(7), 'edit') : permits(req, flow.module, 'edit'))) return res.status(403).json({ error: 'Edit permission is required for the trigger module' });
     if (!req.body.recordId) return res.status(400).json({ error: 'Choose a trigger record' });
-    const model = resolveModel(flow.module);
-    const record = await db[model].findFirst({ where: await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    const customId = flow.module.startsWith('custom:') && flow.module.slice(7);
+    const model = customId ? 'customRecord' : resolveModel(flow.module);
+    const row = await db[model].findFirst({ where: customId ? { id: String(req.body.recordId), customObjectId: customId, deletedAt: null } : await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    const record = customId && row ? { ...row.data, id: row.id } : row;
     if (!record) return res.status(404).json({ error: 'Record not found' });
     res.json(publicRun(await startFlow(db, flow, record, req.userId)));
   } catch (err) { next(err); }
@@ -149,8 +158,11 @@ router.post('/:id/test', requirePermission('admin', 'edit'), async (req, res, ne
     const problem = flowProblem(flow);
     if (problem) return res.status(400).json({ error: problem });
     if (!req.body.recordId) return res.status(400).json({ error: 'Choose a trigger record' });
-    const model = resolveModel(flow.module);
-    const record = await db[model].findFirst({ where: await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    const customId = flow.module.startsWith('custom:') && flow.module.slice(7);
+    if (!(customId ? require('../services/customObjectAccess').canAccess(req, customId, 'edit') : permits(req, flow.module, 'edit'))) return res.status(403).json({ error: 'Edit permission required' });
+    const model = customId ? 'customRecord' : resolveModel(flow.module);
+    const row = await db[model].findFirst({ where: customId ? { id: String(req.body.recordId), customObjectId: customId, deletedAt: null } : await reachableWhere(req, flow.module, model, { id: String(req.body.recordId) }, 'Edit') });
+    const record = customId && row ? { ...row.data, id: row.id } : row;
     if (!record) return res.status(404).json({ error: 'Record not found' });
     const path = []; let node = flow.canvas.nodes.find(n => n.type === 'start');
     while (node) {
@@ -214,7 +226,7 @@ router.post('/:id/publish', requirePermission('admin', 'full'), async (req, res,
     if (!flow) return res.status(404).json({ error: 'Not found' });
     const problem = flowProblem(flow);
     if (problem) return res.status(400).json({ error: problem });
-    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', publishedAt: new Date(), publishedById: req.userId } }));
+    res.json(await db.flowDefinition.update({ where: { id: flow.id }, data: { status: 'Active', ...(flow.type === 'Scheduled' && { nextRun: new Date() }), publishedAt: new Date(), publishedById: req.userId } }));
   } catch (err) { next(err); }
 });
 

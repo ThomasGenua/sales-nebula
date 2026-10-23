@@ -71,11 +71,16 @@ async function validateValues(db, object, input, options = {}) {
 
 // Serialize saves for each definition, so concurrent creates cannot both pass
 // a unique-value check. The lock also coordinates updates with imports.
-async function saveValues(prisma, objectId, input, userId, recordId) {
-  return prisma.$transaction(async db => {
+async function saveValuesInTransaction(db, objectId, input, userId, recordId) {
     await db.$queryRaw`SELECT id FROM "CustomObject" WHERE id = ${objectId} FOR UPDATE`;
     const object = await db.customObject.findFirst({ where: { id: objectId, deletedAt: null }, include: { fields: true } });
     if (!object) return { status: 404, error: 'Object not found' };
+    const actor = userId && await db.user.findUnique({ where: { id: userId }, include: { role: { include: { permissions: true } } } });
+    for (const field of object.fields.filter(f => ['lookup', 'masterdetail'].includes(String(f.type).toLowerCase()))) {
+      if (!input[field.apiName]) continue;
+      const target = await db.customObject.findFirst({ where: { deletedAt: null, OR: [{ id: field.lookupObject || '' }, { apiName: field.lookupObject || '' }] } });
+      if (!target || !require('./customObjectAccess').canAccess({ user: actor }, target.id)) return { status: 400, error: 'Choose a related object you can access' };
+    }
     const old = recordId && await db.customRecord.findFirst({ where: { id: recordId, customObjectId: objectId, deletedAt: null } });
     if (recordId && !old) return { status: 404, error: 'Record not found' };
     const result = await validateValues(db, object, { ...Object.fromEntries(Object.entries(old?.data || {}).filter(([key]) => object.fields.some(f => f.apiName === key))), ...input }, { defaults: !old, excludeId: recordId });
@@ -83,8 +88,12 @@ async function saveValues(prisma, objectId, input, userId, recordId) {
     const record = old
       ? await db.customRecord.update({ where: { id: old.id }, data: { data: result.data } })
       : await db.customRecord.create({ data: { customObjectId: objectId, data: result.data, createdById: userId } });
-    return { record };
-  });
+    return { record, oldRecord: old || null };
+}
+async function saveValues(prisma, objectId, input, userId, recordId) {
+  const result = await prisma.$transaction(db => saveValuesInTransaction(db, objectId, input, userId, recordId));
+  if (result.record) await require('./flowEngine').triggerFlows(prisma, { module: 'custom:' + objectId, trigger: recordId ? 'update' : 'create', record: { ...result.record.data, id: result.record.id }, oldRecord: result.oldRecord ? { ...result.oldRecord.data, id: result.oldRecord.id } : null, userId });
+  return result;
 }
 
-module.exports = { TYPES, normalizeValues, validateValues, saveValues };
+module.exports = { TYPES, normalizeValues, validateValues, saveValues, saveValuesInTransaction };

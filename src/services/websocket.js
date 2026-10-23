@@ -204,7 +204,7 @@ function initWebSocket(server, prisma) {
 const emit = {
   // Notify a specific user (e.g., approval request, @mention)
   toUser(userId, event, data) {
-    if (io) io.to(`user:${userId}`).emit(event, data);
+    if (io) io.to(`user:${userId}`).emit(event, ['notification', 'approval:required'].includes(event) ? { id: data?.id } : data);
   },
 
   // Notify all users viewing a specific record
@@ -246,7 +246,7 @@ const emit = {
 
   // To whoever is watching the deal, and its owner.
   dealStageChanged(deal, oldStage, newStage) {
-    const event = { module: 'deals', recordId: deal.id, oldStage, newStage };
+    const event = { module: 'deals', recordId: deal.id };
     this.toRecord('deals', deal.id, 'deal:stageChanged', event);
     if (deal.ownerId) this.toUser(deal.ownerId, 'deal:stageChanged', event);
   },

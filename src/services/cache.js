@@ -99,6 +99,7 @@ const cache = new CacheService();
 function cacheMiddleware(ttl = 300, keyPrefix = '') {
   return async (req, res, next) => {
     if (req.method !== 'GET' || !cache.enabled) return next();
+    if ((await require('./fieldSecurity').policies(req.app.locals.prisma)).length) return next();
     const key = `${keyPrefix}:${req.originalUrl}:${req.userId || 'anon'}`;
     try {
       const cached = await cache.get(key);

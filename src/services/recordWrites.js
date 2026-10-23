@@ -223,6 +223,7 @@ const via = source => (source ? ` (${source})` : '');
  * RecordWriteError when a rule refuses it.
  */
 async function createRecord(db, moduleName, input, ctx = {}) {
+  await require('./fieldSecurity').assertInput(db, moduleName, input, ctx.req?.user || (ctx.userId ? await db.user.findUnique({ where: { id: ctx.userId }, include: { role: true } }) : null));
   const { modelName, hooks } = moduleDefinition(moduleName);
   // Numbering retries a clash, which Postgres does not allow inside a
   // transaction (utils/numbering): make a numbered record outside one.
@@ -247,6 +248,14 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   }
 
 
+  if (moduleName === 'orders' && !data.quoteId) {
+    const source = ctx.nested?.items?.create || ctx.req?.body?.items;
+    if (source) {
+      const priced = await runHook(require('./orderPricing').prepareOrderLines, db, data, source.map(l => ({ productId: l.productId || null, description: l.description || null, quantity: l.quantity, unitPrice: l.unitPrice ?? l.price, discount: l.discount || 0 })));
+      const { lines, ...totals } = priced; data = { ...data, ...totals };
+      ctx.nested = { ...ctx.nested, items: { create: lines } };
+    }
+  }
   if (hooks.validate) {
     const { valid, errors } = hooks.validate(data);
     // The message names the fields: the pages show only `error`, which
@@ -293,6 +302,7 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   // The creator is whoever made it; row security reads it as the owner of a
   // record with no owner column (a document).
   if (modelHasField(modelName, 'createdById') && ctx.userId) data.createdById = ctx.userId;
+  data = await runHook(require('./recordTypes').enforceRecordType, db, moduleName, data, null, { ...ctx, authored: input });
 
   // A key the model does not have would fail the write. Relation keys go
   // too; a module whose records take nested rows (order items) builds them
@@ -336,6 +346,7 @@ async function createRecord(db, moduleName, input, ctx = {}) {
  * duplicates being those a warning rule let through.
  */
 async function updateRecord(db, moduleName, target, input, ctx = {}) {
+  await require('./fieldSecurity').assertInput(db, moduleName, input, ctx.req?.user || (ctx.userId ? await db.user.findUnique({ where: { id: ctx.userId }, include: { role: true } }) : null));
   const { modelName, hooks } = moduleDefinition(moduleName);
   const oldRecord = target && typeof target === 'object'
     ? target
@@ -348,6 +359,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
   let data = { ...input };
   if (moduleName === 'quotes') data = await runHook(require('./quotePricing').prepareQuote, db, data, oldRecord, ctx);
   if (hooks.beforeUpdate) data = await runHook(hooks.beforeUpdate, data, hookContext(db, ctx, oldRecord));
+  data = await runHook(require('./recordTypes').enforceRecordType, db, moduleName, data, oldRecord, { ...ctx, authored: input });
 
   // Validate the record as it will be, not just the fields supplied.
   const violations = await checkValidationRules(db, moduleName, { ...oldRecord, ...data });

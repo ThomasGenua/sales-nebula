@@ -278,8 +278,8 @@ function withinModule(report, config = MODULE_CONFIG[report.module]) {
 
 /** Whether the caller may run a report on this module; otherwise answer. */
 function mayRun(req, res, module) {
-  if (!MODULE_CONFIG[module]) { res.status(400).json({ error: `Invalid module: ${module}` }); return false; }
-  if (!permits(req, module, 'read')) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
+  if (!MODULE_CONFIG[module] && !module?.startsWith('custom:')) { res.status(400).json({ error: `Invalid module: ${module}` }); return false; }
+  if (!(module?.startsWith('custom:') ? require('../services/customObjectAccess').canAccess(req, module.slice(7)) : permits(req, module, 'read'))) { res.status(403).json({ error: `Insufficient permissions for ${module}` }); return false; }
   return true;
 }
 
@@ -363,6 +363,17 @@ router.get('/metadata', async (req, res, next) => {
       relations: Object.keys(config.relations),
     };
   }
+  for (const object of await req.app.locals.prisma.customObject.findMany({ where: { deletedAt: null } })) {
+    if (require('../services/customObjectAccess').canAccess(req, object.id)) modules['custom:' + object.id] = await require('../services/reportExtensions').customConfig(req.app.locals.prisma, req, 'custom:' + object.id);
+  }
+  const permissions = await require('../services/fieldSecurity').policies(req.app.locals.prisma);
+  for (const [module, config] of Object.entries(MODULE_CONFIG)) for (const relation of Object.keys(config.relations)) {
+    const target = ({ account: 'accounts', contact: 'contacts', deal: 'deals' })[relation];
+    if (target && permits(req, target, 'read')) for (const [field, meta] of Object.entries(MODULE_CONFIG[target].fields)) {
+      if (!permissions.some(p => p.module === target && p.field === field && !p.visible)) modules[module].fields[relation + '.' + field] = { ...meta, label: relation + ' · ' + meta.label };
+    }
+  }
+  for (const p of permissions.filter(p => !p.visible)) if (modules[p.module]) delete modules[p.module].fields[p.field];
   res.json({
     modules,
     operators: Object.keys(OPERATORS),
@@ -419,7 +430,7 @@ router.post('/', async (req, res, next) => {
     const { name, description, module, reportType, chartType, columns, filters, groupBy, aggregations, sortBy, joins, limit, isPublic, folderId } = req.body;
 
     if (!name || !module) return res.status(400).json({ error: 'name and module required' });
-    if (!MODULE_CONFIG[module]) return res.status(400).json({ error: `Invalid module: ${module}` });
+    if (!MODULE_CONFIG[module] && !module.startsWith('custom:')) return res.status(400).json({ error: `Invalid module: ${module}` });
 
     const report = await prisma.report.create({
       data: {
@@ -512,14 +523,26 @@ router.post('/execute', async (req, res, next) => {
 // Runs as the requesting user: over the live rows their row security lets
 // them see. Reports read every row, deleted ones included, whoever asked.
 async function executeReport(prisma, definition, req) {
-  const baseConfig = MODULE_CONFIG[definition.module];
+  const baseConfig = definition.module.startsWith('custom:') ? await require('../services/reportExtensions').customConfig(prisma, req, definition.module) : MODULE_CONFIG[definition.module];
   const config = baseConfig && { ...baseConfig, fields: { ...baseConfig.fields, ...await customMetadata(prisma, definition.module) } };
   if (!config) throw new Error(`Unknown module: ${definition.module}`);
 
   const model = prisma[config.model];
   if (!model) throw new Error(`Prisma model not found: ${config.model}`);
 
+  for (const [relation] of Object.entries(config.relations)) {
+    const target = ({ account: 'accounts', contact: 'contacts', deal: 'deals' })[relation];
+    if (target && MODULE_CONFIG[target] && permits(req, target, 'read')) for (const [field, meta] of Object.entries(MODULE_CONFIG[target].fields)) config.fields[relation + '.' + field] = { ...meta, label: relation + ' · ' + meta.label };
+  }
+  const permissions = await require('../services/fieldSecurity').policies(prisma);
+  const used = [...(definition.columns || []).map(c => c.field), ...(definition.filters || []).map(c => c.field), ...(definition.groupBy || []), ...(definition.aggregations || []).map(c => c.field), ...(definition.sortBy || []).map(c => c.field)];
+  for (const field of used) {
+    const parts = field.split('.'), target = field.startsWith('custom.') ? definition.module : parts.length === 2 ? ({ account: 'accounts', contact: 'contacts', deal: 'deals' })[parts[0]] : definition.module;
+    if (permissions.some(p => p.module === target && p.field === (field.startsWith('custom.') ? field : parts.at(-1)) && !p.visible)) throw Object.assign(new Error('Report references a hidden field'), { status: 403 });
+  }
+  if (definition._strictFilters && (definition.filters || []).some(f => !Object.hasOwn(config.fields, f.field))) throw Object.assign(new Error('A shared filter is unavailable for this report'), { status: 400 });
   const report = withinModule(definition, config);
+  if (definition.module.startsWith('custom:') || report.reportType === 'matrix' || used.some(f => f.includes('.') && !f.startsWith('custom.'))) return require('../services/reportExtensions').execute(prisma, report, req, MODULE_CONFIG, config);
   const accessFilter = await buildAccessFilter(prisma, req.user, report.module, { modelName: config.model });
   const live = modelHasField(config.model, 'deletedAt') ? { deletedAt: null } : {};
   const where = applyAccessFilter({ ...buildWhere(report.filters.filter(f => !f.field.startsWith('custom.'))), ...live }, accessFilter);
@@ -722,16 +745,17 @@ router.delete('/folders/:id', async (req, res, next) => {
 router.post('/:id/schedule', async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { cron, format, recipients } = req.body;
-    if (!cron) return res.status(400).json({ error: 'cron expression required' });
+
     // A report's schedules are its owner's, as its edits are. Anyone could add
     // one to any report, and an unknown report id failed as a 500.
-    const report = await prisma.report.findUnique({ where: { id: req.params.id }, select: { createdById: true } });
+    const report = await prisma.report.findUnique({ where: { id: req.params.id }, select: { id: true, createdById: true } });
     if (!report) return res.status(404).json({ error: 'Report not found' });
     if (report.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can schedule' });
     // No job runs a schedule or sends a report: one was saved, and nobody got
     // anything. Removing one still works.
-    unavailable(res, 'REPORT_DELIVERY_UNAVAILABLE', 'Scheduled report delivery is not available: nothing runs a schedule or sends a report. No schedule was saved.');
+    const cron = String(req.body.cron || '0 8 * * *');
+    const nextRun = require('../services/reportDelivery').nextRun(cron);
+    res.status(201).json(await prisma.reportSchedule.create({ data: { reportId: report.id, cron, format: 'json', recipients: [req.userId], nextRun } }));
   } catch (err) { next(err); }
 });
 
@@ -764,3 +788,5 @@ router.post('/:id/clone', async (req, res, next) => {
 });
 
 module.exports = router;
+
+module.exports.executeReport = executeReport;

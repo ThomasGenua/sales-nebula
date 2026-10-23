@@ -79,6 +79,7 @@ model Permission {
 // ─── CRM CORE ───
 
 model Contact {
+  recordTypeId String?
   id          String   @id @default(uuid())
   firstName   String
   lastName    String
@@ -120,6 +121,7 @@ model Contact {
 }
 
 model Lead {
+  recordTypeId String?
   id          String   @id @default(uuid())
   firstName   String
   lastName    String
@@ -153,6 +155,7 @@ model Lead {
 }
 
 model Deal {
+  recordTypeId String?
   qualification Json?
   nextStep String?
   nextStepDate DateTime?
@@ -217,6 +220,7 @@ model DealStageHistory {
 }
 
 model Account {
+  recordTypeId String?
   id             String   @id @default(uuid())
   name           String
   industry       String?
@@ -265,6 +269,7 @@ model Account {
 }
 
 model Activity {
+  recordTypeId String?
   leadId     String?
   @@index([leadId])
   id         String    @id @default(uuid())
@@ -343,6 +348,7 @@ model EmailTemplate {
 // ─── CASES ───
 
 model Case {
+  recordTypeId String?
   id          String   @id @default(uuid())
   caseNumber  String   @unique
   subject     String
@@ -519,6 +525,7 @@ model TargetList {
 // ─── PRODUCTS / QUOTES / INVOICES ───
 
 model Product {
+  recordTypeId String?
   id          String   @id @default(uuid())
   name        String
   sku         String   @unique
@@ -550,6 +557,7 @@ model Product {
 }
 
 model Quote {
+  recordTypeId String?
   pricingFingerprint String?
   pricingUpdatedAt DateTime?
   id         String   @id @default(uuid())
@@ -607,6 +615,7 @@ model QuoteItem {
 }
 
 model Invoice {
+  recordTypeId String?
   id          String    @id @default(uuid())
   number      String    @unique
   status      String    @default("Draft") // Draft, Sent, Paid, Overdue
@@ -1215,6 +1224,7 @@ model ReportFolder {
 }
 
 model ReportSchedule {
+  lastError String?
   id        String   @id @default(uuid())
   reportId  String
   report    Report   @relation(fields: [reportId], references: [id], onDelete: Cascade)
@@ -1537,6 +1547,7 @@ model Currency {
 // ═══════════════════════════════════════
 
 model Contract {
+  recordTypeId String?
   id              String    @id @default(uuid())
   contractNumber  String    @unique
   accountId       String
@@ -1586,6 +1597,7 @@ model Contract {
 // ═══════════════════════════════════════
 
 model Order {
+  recordTypeId String?
   id            String    @id @default(uuid())
   orderNumber   String    @unique
   accountId     String
@@ -1796,6 +1808,8 @@ model ValidationRule {
 // ═══════════════════════════════════════
 
 model RecordType {
+  roleIds Json?
+  allowedValues Json?
   id          String  @id @default(uuid())
   name        String
   module      String
@@ -2098,6 +2112,8 @@ model RevenueScheduleEntry {
 // ═══════════════════════════════════════
 
 model FlowDefinition {
+  scheduleMinutes Int?
+  nextRun DateTime?
   id          String  @id @default(uuid())
   name        String
   description String?
@@ -4505,6 +4521,7 @@ model BusinessHours {
 // ═══════════════════════════════════════════════════════════════
 
 model Project {
+  recordTypeId String?
   id             String    @id @default(uuid())
   name           String
   code           String?
@@ -5235,6 +5252,7 @@ model MapLayer {
 // ═══════════════════════════════════════════════════════════
 
 model Prospect {
+  recordTypeId String?
   id             String    @id @default(uuid())
   salutation     String?
   firstName      String?

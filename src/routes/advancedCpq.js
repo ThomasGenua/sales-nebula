@@ -4,17 +4,27 @@ const { auditMiddleware } = require('../middleware/audit');
 const { columnsFrom } = require('../utils/modelFields');
 const router = Router();
 router.use(authenticate);
+function validateRule(kind) { return async (req, res, next) => {
+  try {
+    const table = kind === 'price' ? 'priceRule' : 'productRule';
+    const current = req.params.id ? await req.app.locals.prisma[table].findUnique({ where: { id: req.params.id } }) : {};
+    const problem = require('../services/productSelection').ruleProblem(kind, { targetObject: 'QuoteLine', type: 'Validation', ...current, ...req.body });
+    if (problem) return res.status(400).json({ error: problem });
+    next();
+  } catch(e) { next(e); }
+}; }
+
 
 // Product Rules
 router.get('/product-rules', async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.productRule.findMany({ where: { active: true }, orderBy: { sortOrder: 'asc' } }) }); }
+  try { res.json({ data: await req.app.locals.prisma.productRule.findMany({ where: req.query.includeInactive === 'true' ? {} : { active: true }, orderBy: { sortOrder: 'asc' } }) }); }
   catch (err) { next(err); }
 });
-router.post('/product-rules', requirePermission('products', 'edit'), async (req, res, next) => {
+router.post('/product-rules', requirePermission('products', 'edit'), validateRule('product'), async (req, res, next) => {
   try { res.status(201).json(await req.app.locals.prisma.productRule.create({ data: columnsFrom('productRule', req.body) })); }
   catch (err) { next(err); }
 });
-router.put('/product-rules/:id', requirePermission('products', 'edit'), async (req, res, next) => {
+router.put('/product-rules/:id', requirePermission('products', 'edit'), validateRule('product'), async (req, res, next) => {
   try { res.json(await req.app.locals.prisma.productRule.update({ where: { id: req.params.id }, data: columnsFrom('productRule', req.body) })); }
   catch (err) { next(err); }
 });
@@ -25,21 +35,21 @@ router.delete('/product-rules/:id', requirePermission('products', 'full'), async
 
 // Price Rules
 router.get('/price-rules', async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.priceRule.findMany({ where: { active: true }, orderBy: { evalOrder: 'asc' } }) }); }
+  try { res.json({ data: await req.app.locals.prisma.priceRule.findMany({ where: req.query.includeInactive === 'true' ? {} : { active: true }, orderBy: { evalOrder: 'asc' } }) }); }
   catch (err) { next(err); }
 });
-router.post('/price-rules', requirePermission('products', 'edit'), async (req, res, next) => {
+router.post('/price-rules', requirePermission('products', 'edit'), validateRule('price'), async (req, res, next) => {
   try { res.status(201).json(await req.app.locals.prisma.priceRule.create({ data: columnsFrom('priceRule', req.body) })); }
   catch (err) { next(err); }
 });
-router.put('/price-rules/:id', requirePermission('products', 'edit'), async (req, res, next) => {
+router.put('/price-rules/:id', requirePermission('products', 'edit'), validateRule('price'), async (req, res, next) => {
   try { res.json(await req.app.locals.prisma.priceRule.update({ where: { id: req.params.id }, data: columnsFrom('priceRule', req.body) })); }
   catch (err) { next(err); }
 });
 
 // Guided Selling
 router.get('/guided-selling', async (req, res, next) => {
-  try { res.json({ data: await req.app.locals.prisma.guidedSellingRule.findMany({ where: { active: true }, orderBy: { sortOrder: 'asc' } }) }); }
+  try { res.json({ data: await req.app.locals.prisma.guidedSellingRule.findMany({ where: req.query.includeInactive === 'true' ? {} : { active: true }, orderBy: { sortOrder: 'asc' } }) }); }
   catch (err) { next(err); }
 });
 router.post('/guided-selling', requirePermission('products', 'edit'), async (req, res, next) => {
@@ -164,3 +174,5 @@ router.post('/approval-matrix', requirePermission('admin', 'full'), async (req, 
 router.delete('/approval-matrix/:id', requirePermission('admin', 'full'), async (req, res, next) => {
   try { await req.app.locals.prisma.cpqApprovalRule.delete({ where: { id: req.params.id } }); res.json({ deleted: true }); } catch (err) { next(err); }
 });
+
+router.delete('/price-rules/:id', requirePermission('products', 'full'), async (req,res,next) => { try { await req.app.locals.prisma.priceRule.delete({where:{id:req.params.id}});res.json({success:true}); } catch(e){next(e);} });

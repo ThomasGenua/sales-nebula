@@ -48,15 +48,29 @@ const router = createCrudRouter('order', 'orders', {
   },
   beforeCreate: async (data, { req }) => {
     const lines = orderLines(req);
-    if (lines.length) {
+    if (lines.length && data.subtotal === undefined) {
       data.subtotal = lines.reduce((sum, line) => sum + line.total, 0);
       data.total = data.subtotal + (Number(data.tax) || 0) - (Number(data.discount) || 0);
     }
     return withTotals(data);
   },
-  beforeUpdate: async (data, { oldRecord }) => {
-    if (data.total === undefined && data.totalAmount === undefined) return data;
-    return withTotals(data, oldRecord);
+  beforeUpdate: async (data, { oldRecord, prisma }) => {
+    const changed = key => data[key] !== undefined && String(data[key]) !== String(oldRecord[key]);
+    if (changed('quoteId')) throw Object.assign(new Error('An existing order cannot change its source quote'), { status: 400 });
+    if (oldRecord.quoteId && ['subtotal','tax','discount','total','totalAmount','accountId','contactId'].some(changed)) throw Object.assign(new Error('Revise the source quote and create a replacement order'), { status: 400 });
+    if (oldRecord.quoteId && data.status && data.status !== oldRecord.status && data.status !== 'Cancelled') {
+      const quote = await prisma.quote.findFirst({ where: { id: oldRecord.quoteId, deletedAt: null }, include: { items: true } });
+      if (!quote || quote.total !== oldRecord.total) throw Object.assign(new Error('The source quote has changed'), { status: 400 });
+      await require('../services/quotePricing').approvalRequired(prisma, quote, quote.items, quote);
+    }
+    if (!['subtotal','tax','discount','total','totalAmount'].some(key => data[key] !== undefined)) return data;
+    const lines = await prisma.orderItem.findMany({ where: { orderId: oldRecord.id } });
+    const subtotal = Math.round(lines.reduce((sum,l) => sum + l.total, 0) * 100) / 100;
+    const tax = Number(data.tax ?? oldRecord.tax ?? 0), discount = Number(data.discount ?? oldRecord.discount ?? 0);
+    if (!Number.isFinite(tax) || tax < 0 || !Number.isFinite(discount) || discount < 0 || discount > subtotal) throw Object.assign(new Error('Invalid order tax or discount'), { status: 400 });
+    const total = Math.round((subtotal + tax - discount) * 100) / 100;
+    for (const [key,value] of Object.entries({ subtotal, total, totalAmount: total })) if (data[key] !== undefined && Math.abs(Number(data[key]) - value) > 0.005) throw Object.assign(new Error('Order totals must match its line items'), { status: 400 });
+    return { ...data, subtotal, total, totalAmount: total };
   },
   // The items went to Prisma exactly as sent, as a bare list it rejected.
   nestedWrites: async (req, operation) => {
@@ -171,30 +185,46 @@ router.get('/:id/items', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:id/items', authenticate, requirePermission('orders', 'full'), async (req, res, next) => {
+async function mutateItem(req, res, next) {
   try {
-    const prisma = req.app.locals.prisma;
-    const { productId, quantity, unitPrice, discount } = req.body;
-    if (!productId) return res.status(400).json({ error: 'productId required' });
-    // A live product the caller can see; the id was stored as sent.
-    const linkProblem = await linkRefusal(req, 'orderItem', { productId });
-    if (linkProblem) return res.status(400).json({ error: linkProblem, code: 'LINK_NOT_VISIBLE' });
-    const product = await prisma.product.findUnique({ where: { id: productId } });
-    const price = Number(unitPrice) || product?.price || 0;
-    const qty = parseInt(quantity) || 1;
-    const off = Number(discount) || 0;
-    const item = await prisma.orderItem.create({ data: { orderId: req.params.id, productId, quantity: qty, unitPrice: price, discount: off, total: price * qty * (1 - off / 100) } });
-    // Recalculate the order's subtotal and total from its lines, as a create
-    // does; only totalAmount was set, so the order's total and PDF kept the old one.
-    const allItems = await prisma.orderItem.findMany({ where: { orderId: req.params.id } });
-    const subtotal = allItems.reduce((s, i) => s + (i.total || 0), 0);
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { tax: true, discount: true } });
-    const total = subtotal + (order?.tax || 0) - (order?.discount || 0);
-    // As an edit of the order, so a rule on its total sees the new one.
-    await updateRecord(prisma, 'orders', req.params.id, { subtotal, total, totalAmount: total }, { req, userId: req.userId, source: 'line items' });
-    res.status(201).json(item);
+    const db = req.app.locals.prisma, after = [];
+    const result = await db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${req.params.id} FOR UPDATE`;
+      const order = await tx.order.findFirst({ where: await reachableWhere(req, 'orders', 'order', { id: req.params.id }, 'Edit'), include: { items: true } });
+      if (!order) throw Object.assign(new Error('Not found'), { status: 404 });
+      if (order.status !== 'Draft') throw Object.assign(new Error('Only draft orders can change lines'), { status: 409 });
+      if (order.quoteId) throw Object.assign(new Error('Revise and approve the source quote, then create a replacement order'), { status: 409 });
+      const current = req.params.itemId && order.items.find(i => i.id === req.params.itemId);
+      if (req.params.itemId && !current) throw Object.assign(new Error('Item not found'), { status: 404 });
+      let candidate;
+      if (req.method !== 'DELETE') {
+        const input = { ...current, ...req.body };
+        const problem = await linkRefusal(req, 'orderItem', { productId: input.productId });
+        if (problem) throw Object.assign(new Error(problem), { status: 400 });
+        const product = input.productId && await tx.product.findUnique({ where: { id: input.productId } });
+        candidate = { productId: input.productId || null, description: input.description || null,
+          quantity: Number(input.quantity ?? 1), unitPrice: Number(input.unitPrice ?? product?.price ?? 0), discount: Number(input.discount ?? 0) };
+      }
+      const sources = order.items.filter(i => i.id !== current?.id);
+      if (candidate) sources.push(candidate);
+      const priced = await require('../services/orderPricing').prepareOrderLines(tx, order, sources);
+      // Reprice the entire order in the same transaction as its totals.
+      await tx.orderItem.deleteMany({ where: { orderId: order.id } });
+      for (const line of priced.lines) {
+        const { id, orderId, createdAt, updatedAt, ...data } = line;
+        await tx.orderItem.create({ data: { ...data, ...(id && { id }), orderId: order.id } });
+      }
+      const { lines, ...totals } = priced;
+      await updateRecord(tx, 'orders', order, totals, { req, userId: req.userId, source: 'line items', after, prisma: db });
+      return tx.order.findUnique({ where: { id: order.id }, include: { items: true } });
+    }, { timeout: 30000 });
+    await require('../services/recordWrites').runAfter(after);
+    res.status(req.method === 'POST' ? 201 : 200).json(result);
   } catch (err) { next(err); }
-});
+}
+router.post('/:id/items', authenticate, requirePermission('orders', 'full'), mutateItem);
+router.put('/:id/items/:itemId', authenticate, requirePermission('orders', 'full'), mutateItem);
+router.delete('/:id/items/:itemId', authenticate, requirePermission('orders', 'full'), mutateItem);
 
 // Clone order
 router.post('/:id/clone', authenticate, requirePermission('orders', 'full'), async (req, res, next) => {

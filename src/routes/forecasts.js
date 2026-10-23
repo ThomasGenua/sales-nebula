@@ -298,6 +298,7 @@ router.put('/:id/items/:itemId', requirePermission('deals', 'edit'), forecastAcc
   try {
     const prisma = req.app.locals.prisma;
     const { category, overrideAmount, notes } = req.body;
+    if (overrideAmount !== undefined && overrideAmount !== null && (typeof overrideAmount !== 'number' || !Number.isFinite(overrideAmount) || overrideAmount < 0)) return res.status(400).json({ error: 'Override must be a nonnegative amount or null' });
     if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: `category must be one of: ${CATEGORIES.join(', ')}` });
     // An item of the forecast in the path: any forecast's items went by id.
     // Its deal must be one the caller can see, as GET shows only those; the
@@ -490,5 +491,20 @@ router.get('/:id/history', requirePermission('deals', 'read'), async (req, res, 
       return { id: h.id, createdAt: h.createdAt, reason: h.reason, currency: h.currency, quota: h.quota,
         commit: total(['Commit']), pipeline: total(['Commit', 'Best Case', 'Pipeline']), closed: total(['Closed']) };
     }) });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/compare', requirePermission('deals', 'read'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const forecast = await db.forecast.findFirst({ where: await visibleForecastWhere(req, { id: req.params.id }) });
+    if (!forecast) return res.status(404).json({ error: 'Not found' });
+    const snapshots = await db.forecastSnapshot.findMany({ where: { forecastId: forecast.id, id: { in: [String(req.query.before || ''), String(req.query.after || '')] } } });
+    const before = snapshots.find(s => s.id === req.query.before), after = snapshots.find(s => s.id === req.query.after);
+    if (!before || !after) return res.status(404).json({ error: 'Choose two snapshots of this forecast' });
+    if (before.createdAt > after.createdAt) return res.status(400).json({ error: 'Before must precede after' });
+    const ids = [...new Set([...before.items, ...after.items].map(i => i.dealId))];
+    const deals = await db.deal.findMany({ where: await reachableWhere(req, 'deals', 'deal', { id: { in: ids } }), select: { id: true, name: true } });
+    res.json(require('../services/forecastComparison').compareSnapshots(before, after, deals));
   } catch (err) { next(err); }
 });

@@ -7,6 +7,7 @@ const { pickModelFields, columnsFrom } = require('../utils/modelFields');
 const { saveValues, validateValues } = require('../services/customObjectValues');
 
 const router = Router();
+const { requireAccess, canAccess } = require('../services/customObjectAccess');
 
 /**
  * The custom object in the path, if it exists and is not deleted. A record's
@@ -39,7 +40,7 @@ router.get('/', authenticate, async (req, res, next) => {
     const where = { deletedAt: null };
     if (search) where.OR = [{ label: { contains: search, mode: 'insensitive' } }, { apiName: { contains: search, mode: 'insensitive' } }];
     const [data, total] = await Promise.all([prisma.customObject.findMany({ where, orderBy: { label: 'asc' }, take: +limit, skip: (+page - 1) * +limit }), prisma.customObject.count({ where })]);
-    res.json({ data, total, page: +page, pages: Math.ceil(total / +limit) });
+    res.json({ data: data.filter(o => canAccess(req, o.id)), total, page: +page, pages: Math.ceil(total / +limit) });
   } catch (err) { next(err); }
 });
 
@@ -143,7 +144,7 @@ router.delete('/:id/fields/:fieldId', authenticate, requirePermission('admin', '
 // Objects are defined under admin, and there is no per-object permission, so
 // their records answer to admin too: read to look, edit to change. These took
 // a session alone.
-router.get('/:id/records', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/:id/records', authenticate, requireAccess('read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { page = 1, limit = 50, search } = req.query;
@@ -156,7 +157,7 @@ router.get('/:id/records', authenticate, requirePermission('admin', 'read'), asy
   } catch (err) { next(err); }
 });
 
-router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/records', authenticate, requireAccess('edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
@@ -168,7 +169,7 @@ router.post('/:id/records', authenticate, requirePermission('admin', 'edit'), au
   } catch (err) { next(err); }
 });
 
-router.put('/:id/records/:recordId', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.put('/:id/records/:recordId', authenticate, requireAccess('edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const values = recordValues(req.body);
@@ -181,7 +182,7 @@ router.put('/:id/records/:recordId', authenticate, requirePermission('admin', 'e
 });
 
 // Only a live record of the object in the path, as for the update above.
-router.delete('/:id/records/:recordId', authenticate, requirePermission('admin', 'edit'), async (req, res, next) => {
+router.delete('/:id/records/:recordId', authenticate, requireAccess('edit'), async (req, res, next) => {
   try {
     const { count } = await req.app.locals.prisma.customRecord.updateMany({ where: { id: req.params.recordId, customObjectId: req.params.id, deletedAt: null }, data: { deletedAt: new Date() } });
     if (!count) return res.status(404).json({ error: 'Not found' });
@@ -207,7 +208,7 @@ module.exports = router;
 // record made any other way. Values are matched here, among the latest 1000:
 // `string_contains` with no path only matches a JSON value that is itself a
 // string, and a record's data is an object, so the query matched nothing.
-router.get('/:id/records/search', authenticate, requirePermission('admin', 'read'), async (req, res, next) => {
+router.get('/:id/records/search', authenticate, requireAccess('read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { q, limit = 25 } = req.query;
@@ -239,7 +240,7 @@ router.get('/:id/relationships', authenticate, async (req, res, next) => {
 });
 
 // Validate record against schema
-router.post('/:id/records/validate', authenticate, async (req, res, next) => {
+router.post('/:id/records/validate', authenticate, requireAccess('edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const obj = await prisma.customObject.findUnique({ where: { id: req.params.id }, include: { fields: true } });
@@ -253,7 +254,7 @@ router.post('/:id/records/validate', authenticate, async (req, res, next) => {
 // Into CustomRecord, as create does. This wrote CustomObjectRecord, so an
 // imported record never showed in the list and could not be edited or
 // deleted.
-router.post('/:id/records/import', authenticate, requirePermission('admin', 'edit'), auditMiddleware, async (req, res, next) => {
+router.post('/:id/records/import', authenticate, requireAccess('edit'), auditMiddleware, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
     const { records } = req.body;
@@ -271,4 +272,8 @@ router.post('/:id/records/import', authenticate, requirePermission('admin', 'edi
     }
     res.json({ imported: created, errors, total: records.length });
   } catch (err) { next(err); }
+});
+
+router.get('/:id/records/:recordId', authenticate, requireAccess('read'), async (req,res,next) => {
+  try { const record = await req.app.locals.prisma.customRecord.findFirst({ where: { id: req.params.recordId, customObjectId: req.params.id, deletedAt: null } }); if (!record) return res.status(404).json({ error: 'Not found' }); res.json(record); } catch(e) { next(e); }
 });

@@ -350,7 +350,7 @@ const handlers = {
    * currencies, and an item took its deal's value unconverted. No request
    * here, so no row security: the forecast's owner decides.
    */
-  async resumeFlows() { return require('../services/flowEngine').resumeDueFlows(prisma); },
+  async resumeFlows() { await require('../services/reportDelivery').deliverDue(prisma); return require('../services/flowEngine').resumeDueFlows(prisma); },
 
   async drainSearchIndex() { return require('../services/searchIndexing').drainIndex(prisma); },
 

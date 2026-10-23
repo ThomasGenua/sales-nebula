@@ -112,7 +112,8 @@ router.get('/', async (req, res, next) => {
     }
 
     const totalResults = Object.values(results).reduce((s, arr) => s + arr.length, 0);
-    res.json({ query: search, totalResults, results });
+    results.customRecords = await require('../services/customObjectAccess').search(prisma, req, search);
+    res.json({ query: search, totalResults: totalResults + results.customRecords.length, results });
   } catch (err) { next(err); }
 });
 
