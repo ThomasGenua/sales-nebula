@@ -52,8 +52,9 @@ function inlineScriptHashes(spaDir) {
 function createApp(rawPrisma, options = {}) {
   // Every query the app makes goes through the guard: no write reaches users,
   // roles or access settings by way of another table (utils/nestedWriteGuard).
-  const prisma = guardNestedWrites(rawPrisma);
+  const prisma = require('./services/fieldSecurity').secureClient(guardNestedWrites(rawPrisma));
   const app = express();
+  app.use((req, res, next) => require('./services/fieldSecurity').context.run({ req, policyDb: rawPrisma }, next));
   const isTest = process.env.NODE_ENV === 'test';
   const isProd = process.env.NODE_ENV === 'production';
   const spaDir = path.join(__dirname, '..', 'frontend', 'dist');

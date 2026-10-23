@@ -53,4 +53,4 @@ async function execute(db, config, report, where) {
   result.totals = { type: 'totals', data: aggregate(rows, report.aggregations) };
   return result;
 }
-module.exports = { execute, matches };
+module.exports = { execute, matches, aggregate };

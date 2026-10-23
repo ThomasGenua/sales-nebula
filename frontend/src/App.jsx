@@ -918,6 +918,21 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterValues, setFilterValues] = useState({});
   const [customDefs, setCustomDefs] = useState([]);
+  const [recordMeta, setRecordMeta] = useState({ recordTypes: [], layouts: [], fieldPermissions: [] });
+  useEffect(() => { let live = true; apiFetch('/configuration/record-metadata/' + endpoint.slice(1)).then(m => live && setRecordMeta(m)).catch(() => live && setRecordMeta({ recordTypes: [], layouts: [], fieldPermissions: [] })); return () => { live = false; }; }, [apiFetch, endpoint]);
+  const visibleField = key => !recordMeta.fieldPermissions.some(p => p.field === key && !p.visible);
+  const editableField = key => !recordMeta.fieldPermissions.some(p => p.field === key && (!p.visible || !p.editable));
+  const selectedType = recordMeta.recordTypes.find(t => t.id === (form.recordTypeId || editing?.recordTypeId)) || (!editing && recordMeta.recordTypes.find(t => t.isDefault));
+  const assignedLayout = recordMeta.layouts.find(l => l.id === selectedType?.layoutId);
+  const layoutFields = assignedLayout?.sections?.flatMap(s => s.fields || []);
+  formFields = (formFields || []).filter(f => visibleField(f.key) && (!layoutFields || layoutFields.some(l => l.name === f.key))).map(f => {
+    const layout = layoutFields?.find(l => l.name === f.key);
+    return { ...f, required: f.required || layout?.required, disabled: !editableField(f.key) || layout?.readOnly,
+      ...(selectedType?.allowedValues?.[f.key] && { type: 'select', options: selectedType.allowedValues[f.key] }) };
+  });
+  columns = columns.filter(f => visibleField(f.key));
+  detailFields = detailFields?.filter(f => visibleField(f.key));
+  filterDefs = filterDefs?.filter(f => visibleField(f.key));
   useEffect(() => { let live = true; apiFetch('/studio/fields/' + endpoint.slice(1)).then(rows => live && setCustomDefs(rows.filter(f => !['relate', 'formula'].includes(f.fieldType)))).catch(() => live && setCustomDefs([])); return () => { live = false; }; }, [apiFetch, endpoint]);
   filterDefs = [...(filterDefs || []), ...customDefs.map(f => ({ key: 'custom.' + f.name, label: f.label, type: 'text' }))];
   columns = [...columns, ...customDefs.slice(0, 4).map(f => ({ key: 'custom.' + f.name, label: f.label, render: v => { return Array.isArray(v) ? v.join(', ') : String(v ?? '—'); } }))];
@@ -979,7 +994,9 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
     if (savingRef.current) return;
     savingRef.current = true; setSaving(true);
     try {
-      const problem = validateForm?.(form);
+      const payload = Object.fromEntries(Object.entries(form).filter(([key]) => editableField(key) && !layoutFields?.some(f => f.name === key && f.readOnly)));
+      if (selectedType) payload.recordTypeId = selectedType.id;
+      const problem = validateForm?.(payload);
       if (problem) throw new Error(problem);
       if (editing) {
         // The form sends the whole record back, so a save over someone else's
@@ -987,7 +1004,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         // "Updated successfully". If-Match is the version the form was opened
         // on; the API refuses (409) when the record has moved on since.
         const saved = await apiFetch(`${endpoint}/${editing.id}`, {
-          method: "PUT", body: form,
+          method: "PUT", body: payload,
           ...(typeof editing.updatedAt === "string" && { headers: { "If-Match": editing.updatedAt } }),
         });
         // The detail page showed the record as it was before this save, and its
@@ -997,7 +1014,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
           if (saved && typeof saved === "object" && saved.id === editing.id) setDetailRecord(prev => ({ ...prev, ...saved }));
           apiFetch(`${endpoint}/${editing.id}`).then(setDetailRecord).catch(() => {});
         }
-      } else { await apiFetch(endpoint, { method: "POST", body: form }); }
+      } else { await apiFetch(endpoint, { method: "POST", body: payload }); }
       setModalOpen(false); setEditing(null); setForm({}); load();
       setToast({ message: editing ? "Updated successfully" : "Created successfully", type: "success" });
     } catch (e) {
@@ -1054,11 +1071,13 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         {customDefs.length > 0 && <CustomFields module={endpoint.slice(1)} recordId={detailRecord.id} />}
         <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
           title={`Edit ${title.slice(0, -1)}`}>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          {recordMeta.recordTypes.length > 0 && <Select label="Record type" placeholder="Choose a record type" value={selectedType?.id || ''} options={recordMeta.recordTypes.map(t => ({ value: t.id, label: t.name }))} onChange={v => setForm(p => ({ ...p, recordTypeId: v }))} />}
+        {assignedLayout && <p className="text-sm my-2">{assignedLayout.name}</p>}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
             {(formFields || []).map(f => {
-              if (f.type === "select") return <Select key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} options={f.options} placeholder={`Select ${f.label}`} />;
-              if (f.type === "textarea") return <TextArea key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} className="sm:col-span-2" />;
-              return <Input key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
+              if (f.type === "select") return <Select key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} options={f.options} placeholder={`Select ${f.label}`} />;
+              if (f.type === "textarea") return <TextArea key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} className="sm:col-span-2" />;
+              return <Input key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
             })}
           </div>
           {formExtras?.(form, setForm)}
@@ -1141,11 +1160,13 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
         title={editing ? (editTitle || `Edit ${title.slice(0, -1)}`) : (createTitle || `New ${title.slice(0, -1)}`)}>
         {!editing && draft?.label && <p className="text-sm text-[#7E8598] mb-3">Linked to {draft.label}</p>}
+        {recordMeta.recordTypes.length > 0 && <Select label="Record type" placeholder="Choose a record type" value={selectedType?.id || ''} options={recordMeta.recordTypes.map(t => ({ value: t.id, label: t.name }))} onChange={v => setForm(p => ({ ...p, recordTypeId: v }))} />}
+        {assignedLayout && <p className="text-sm my-2">{assignedLayout.name}</p>}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
           {(formFields || []).map(f => {
-            if (f.type === "select") return <Select key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} options={f.options} placeholder={`Select ${f.label}`} />;
-            if (f.type === "textarea") return <TextArea key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} className="sm:col-span-2" />;
-            return <Input key={f.key} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
+            if (f.type === "select") return <Select key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} options={f.options} placeholder={`Select ${f.label}`} />;
+            if (f.type === "textarea") return <TextArea key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} className="sm:col-span-2" />;
+            return <Input key={f.key} disabled={f.disabled} label={f.label} value={form[f.key]} onChange={v => setForm(p => ({ ...p, [f.key]: v }))} type={f.type || "text"} required={f.required} />;
           })}
         </div>
         {formExtras?.(form, setForm)}
@@ -1524,6 +1545,8 @@ function EntitlementsPage() {
   />;
 }
 function CustomObjectsPage() {
+  const { user } = useAuth();
+  if (!can(user, 'admin', 'full')) return <CustomObjectWorkspace />;
   return <div className="space-y-4"><CustomObjectWorkspace /><ModulePage title="Custom Objects" icon={Database} endpoint="/custom-objects" nameField="label"
     columns={[
       { key: "label", label: "Label" }, { key: "apiName", label: "API Name" },
@@ -1773,7 +1796,7 @@ function DashboardPage() {
 }
 
 /** Search result modules that have a record page to open. */
-const SEARCH_OPENABLE = new Set(["contacts", "leads", "deals", "accounts", "cases", "products", "quotes", "invoices", "campaigns", "emails", "knowledge", "contracts", "orders"]);
+const SEARCH_OPENABLE = new Set(["customRecords","contacts", "leads", "deals", "accounts", "cases", "products", "quotes", "invoices", "campaigns", "emails", "knowledge", "contracts", "orders"]);
 
 function GlobalSearchPage() {
   const { apiFetch } = useAuth();
@@ -6447,7 +6470,7 @@ function AppShell({ go }) {
     quotes: QuotesPage, invoices: InvoicesPage, contracts: ContractsPage,
     orders: OrdersPage, entitlements: EntitlementsPage,
     subscriptions: SubscriptionsPage, workOrders: WorkOrdersPage,
-    customObjects: CustomObjectsPage, aiAgents: AiAgentsPage,
+    customRecords: CustomObjectWorkspace, customObjects: CustomObjectsPage, aiAgents: AiAgentsPage,
     flowBuilder: FlowDesigner, marketplace: MarketplacePage,
     forecasts: ForecastsPage, cases: CasesPage, knowledge: KnowledgePage,
     workflows: WorkflowBuilderPage, search: GlobalSearchPage,

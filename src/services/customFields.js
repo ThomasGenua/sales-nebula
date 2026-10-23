@@ -7,7 +7,10 @@ const SUPPORTED = ['text', 'textarea', 'number', 'currency', 'percent', 'date', 
 const fail = message => Object.assign(new Error(message), { status: 400 });
 const modelFor = module => require('../utils/crud').crudModelFor(module) || ({ quotes: 'quote', invoices: 'invoice', projects: 'project', prospects: 'prospect' })[module];
 async function definitions(db, module) {
-  const fields = await db.customFieldDef.findMany({ where: { module, active: true, deletedAt: null }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] });
+  const permissions = await require('./fieldSecurity').policies(db);
+  const fields = (await db.customFieldDef.findMany({ where: { module, active: true, deletedAt: null }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }))
+    .filter(f => !permissions.some(p => p.module === module && p.field === 'custom.' + f.name && !p.visible))
+    .map(f => ({ ...f, readOnly: f.readOnly || permissions.some(p => p.module === module && p.field === 'custom.' + f.name && !p.editable) }));
   const lists = await db.picklistValue.findMany({ where: { picklistId: { in: fields.map(f => f.picklistId).filter(Boolean) }, active: true }, orderBy: { sortOrder: 'asc' } });
   return fields.map(f => ({ ...f, supported: SUPPORTED.includes(f.fieldType), options: lists.filter(v => v.picklistId === f.picklistId).map(v => ({ value: v.value, label: v.label })) }));
 }

@@ -1,3 +1,5 @@
+import { PricingRules } from './PricingRules';
+import { EnterpriseSettings } from './EnterpriseSettings';
 import React, { useContext, useEffect, useState } from 'react';
 import { useAuth, can, RouteContext } from './contexts';
 import { Button, Input, Select, TextArea } from './Controls';
@@ -176,6 +178,8 @@ export function SalesOperationsPage() {
     ['changes', 'Pipeline changes', Changes, can(user, 'deals', 'read')],
     ['quality', 'Data quality', Quality, ['contacts', 'leads', 'accounts'].some(m => can(user, m, 'read'))],
     ['integrations', 'Integration operations', Integrations, true],
+    ['pricing', 'Pricing rules', PricingRules, can(user, 'products', 'full')],
+    ['enterprise', 'Enterprise configuration', EnterpriseSettings, can(user, 'admin', 'full')],
     ['configuration', 'Configuration versions', Configuration, can(user, 'admin', 'full')],
   ].filter(t => t[3]);
   const [tab, setTab] = useState('daily'), Component = tabs.find(t => t[0] === tab)?.[2] || Daily;

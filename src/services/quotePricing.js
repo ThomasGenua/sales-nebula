@@ -49,7 +49,12 @@ async function prepareQuote(db, input, current, ctx) {
   const rules = await db.priceRule.findMany({ where: { active: true }, orderBy: [{ evalOrder: 'asc' }, { id: 'asc' }] });
   const supplied = ctx.nested?.items?.create;
   let lines = supplied || (current?.id ? await db.quoteItem.findMany({ where: { quoteId: current.id } }) : []);
+  if (!supplied) {
+    const selected = await require('./productSelection').selectProducts(db, { ...current, ...data }, lines);
+    if (selected.length !== lines.length) refuse('Edit the quote lines to apply the current product selection rules');
+  }
   if (supplied) {
+    lines = await require('./productSelection').selectProducts(db, { ...current, ...data }, lines);
     const products = await db.product.findMany({ where: { id: { in: lines.map(l => l.productId).filter(Boolean) }, deletedAt: null }, select: { id: true, price: true } });
     lines = priceLines(lines, rules, products);
     ctx.nested = { ...ctx.nested, items: { ...ctx.nested.items, create: lines } };

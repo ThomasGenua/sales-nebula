@@ -120,6 +120,9 @@ router.get('/:id/download', async (req, res, next) => {
   try {
     const exp = await req.app.locals.prisma.dataExport.findUnique({ where: { id: req.params.id } });
     if (!exp || exp.requestedById !== req.userId) return res.status(404).json({ error: 'Not found' });
+    if (!canRead(req, exp.module)) return res.status(403).json({ error: 'Export access is no longer available' });
+    const policy = await require('../services/fieldSecurity').policies(req.app.locals.prisma);
+    if (policy.some(p => p.module === exp.module && !p.visible)) return res.status(403).json({ error: 'Stored export snapshots cannot be downloaded with hidden-field restrictions. Use a current direct export.' });
     if (!exp.fileUrl) return res.status(400).json({ error: 'Export not ready' });
     const name = path.basename(exp.fileUrl);
     const full = path.join(EXPORT_DIR, name);

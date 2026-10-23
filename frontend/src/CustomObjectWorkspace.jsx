@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import { Button, Input, Select } from './Controls';
-import { useAuth, can } from './contexts';
+import { useAuth, can, RouteContext } from './contexts';
 import { panel, Problem } from './SalesWorkspace';
 
 export function CustomObjectWorkspace() {
   const { apiFetch, user } = useAuth();
+  const { recordId: routeId } = useContext(RouteContext);
+  useEffect(() => { if (routeId?.includes('~')) setId(routeId.split('~')[0]); }, [routeId]);
   const [objects, setObjects] = useState([]), [id, setId] = useState(''), [definition, setDefinition] = useState(null);
   const [rows, setRows] = useState([]), [record, setRecord] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const [field, setField] = useState({ label: '', type: 'Text', options: '', required: false, unique: false });
@@ -15,10 +17,11 @@ export function CustomObjectWorkspace() {
     if (!id) return;
     const [obj, records] = await Promise.all([apiFetch(base), apiFetch(base + '/records?limit=25&page=' + page)]);
     setDefinition(obj); setRows(records.data); setPages(records.pages);
+    if (routeId?.startsWith(id + '~')) setRecord(await apiFetch(base + '/records/' + routeId.split('~')[1]));
   };
   useEffect(() => { apiFetch('/custom-objects?limit=200').then(r => setObjects(r.data)).catch(e => setError(e.message)); }, [apiFetch]);
   useEffect(() => { setRecord(null); load().catch(e => setError(e.message)); }, [id, page]);
-  const edit = can(user, 'admin', 'edit');
+  const edit = user?.role?.name === 'Admin' || can(user, 'custom:' + id, 'edit');
   const admin = can(user, 'admin', 'full');
   return <section className={panel}><h2 className="text-lg font-bold mb-3">Fields and records</h2><Problem message={error} />
     <Select label="Custom object" placeholder="Choose an object" value={id} options={objects.map(o => ({ value: o.id, label: o.label }))} onChange={v => { setId(v); setPage(1); }} />
@@ -37,13 +40,24 @@ export function CustomObjectWorkspace() {
         {definition.fields.map(f => {
           const value = record.data?.[f.apiName] ?? '';
           const change = v => setRecord(r => ({ ...r, data: { ...r.data, [f.apiName]: v } }));
+          if (f.type === 'Lookup') return <RelationshipPicker key={f.id} field={f} value={value} onChange={change} />;
           if (f.type === 'Picklist') return <Select key={f.id} label={f.label} placeholder="Choose a value" options={f.picklistValues} value={value} onChange={change} />;
           if (f.type === 'Checkbox') return <label key={f.id} className="block"><input type="checkbox" checked={value === true || value === 'true'} onChange={e => change(e.target.checked)} /> {f.label}</label>;
           return <Input key={f.id} label={f.label + (f.type === 'Lookup' ? ' (related record ID)' : '')} required={f.required} value={value} onChange={change} type={['Number', 'Currency'].includes(f.type) ? 'number' : f.type === 'Date' ? 'date' : f.type === 'DateTime' ? 'datetime-local' : 'text'} step="any" />;
-        })}<Button type="submit" disabled={busy}>Save record</Button><Button variant="ghost" onClick={() => setRecord(null)}>Cancel</Button>
+        })}<Button type="submit" disabled={busy || !edit}>Save record</Button><Button variant="ghost" onClick={() => setRecord(null)}>Cancel</Button>
       </form>}
       <div className="overflow-auto"><table className="w-full text-sm"><thead><tr><th className="text-left p-2">Record ID</th>{definition.fields.map(f => <th key={f.id} className="text-left p-2">{f.label}</th>)}<th>Actions</th></tr></thead><tbody>{rows.map(r => <tr key={r.id}><td className="p-2">{r.id}</td>{definition.fields.map(f => <td key={f.id} className="p-2">{String(r.data?.[f.apiName] ?? '')}</td>)}<td>{edit && <Button variant="ghost" onClick={() => setRecord(r)}>Edit</Button>}</td></tr>)}</tbody></table></div>
       <div className="flex gap-3"><Button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button><span>Page {page} of {Math.max(1, pages)}</span><Button disabled={page >= pages} onClick={() => setPage(p => p + 1)}>Next</Button></div>
     </div>}
   </section>;
+}
+
+function RelationshipPicker({ field, value, onChange }) {
+  const { apiFetch } = useAuth();
+  const [query, setQuery] = useState(''), [options, setOptions] = useState([]), [error, setError] = useState('');
+  useEffect(() => { if (!field.lookupObject || query.length < 2) return; let live = true;
+    const timer = setTimeout(() => apiFetch('/custom-objects/' + field.lookupObject + '/records/search?q=' + encodeURIComponent(query)).then(r => live && setOptions(r.results)).catch(e => live && setError(e.message)), 250);
+    return () => { live = false; clearTimeout(timer); };
+  }, [query, field.lookupObject, apiFetch]);
+  return <div><Input label={'Search ' + field.label} value={query} onChange={setQuery} /><Problem message={error} /><Select label={field.label} value={value} placeholder="Choose a related record" onChange={onChange} options={[...(value && !options.some(r => r.id === value) ? [{ value, label: 'Selected record · ' + value }] : []), ...options.map(r => ({ value: r.id, label: Object.values(r.data || {}).filter(v => typeof v === 'string').slice(0, 2).join(' · ') || r.id }))]} /></div>;
 }

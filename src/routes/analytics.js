@@ -239,3 +239,22 @@ router.get('/activity-effectiveness', authenticate, requirePermission('reports',
     res.json(effectiveness);
   } catch (err) { next(err); }
 });
+
+router.post('/dashboards/:id/run', requirePermission('reports', 'read'), async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const dashboard = await db.analyticsDashboard.findFirst({ where: { id: req.params.id, OR: [{ createdById: req.userId }, { isPublic: true }] } });
+    if (!dashboard) return res.status(404).json({ error: 'Dashboard not found' });
+    const widgets = [];
+    if (!Array.isArray(dashboard.layout) || dashboard.layout.length > 20) return res.status(400).json({ error: 'A dashboard supports at most 20 reports' });
+    const filters = [...new Map([...(Array.isArray(dashboard.filters) ? dashboard.filters : []), ...(Array.isArray(req.body.filters) ? req.body.filters : [])].map(f => [f.field, f])).values()];
+    for (const widget of dashboard.layout) {
+      const reportId = widget.config?.reportId;
+      const report = await db.report.findFirst({ where: { id: String(reportId || ''), OR: [{ createdById: req.userId }, { isPublic: true }] } });
+      if (!report || !(report.module.startsWith('custom:') ? require('../services/customObjectAccess').canAccess(req, report.module.slice(7)) : permits(req, report.module, 'read'))) { widgets.push({ reportId, error: 'Report unavailable' }); continue; }
+      try { widgets.push({ reportId, name: report.name, result: await require('./reports').executeReport(db, { ...report, _strictFilters: true, filters: [...report.filters, ...filters] }, req) }); }
+      catch (err) { widgets.push({ reportId, name: report.name, error: err.message }); }
+    }
+    res.json({ widgets });
+  } catch (err) { next(err); }
+});

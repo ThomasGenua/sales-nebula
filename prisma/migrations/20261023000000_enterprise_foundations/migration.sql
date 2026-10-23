@@ -1,0 +1,16 @@
+ALTER TABLE "Contact" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Account" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Lead" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Deal" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Case" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Activity" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Quote" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Invoice" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Order" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Contract" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Product" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Project" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "Prospect" ADD COLUMN "recordTypeId" TEXT;
+ALTER TABLE "RecordType" ADD COLUMN "roleIds" JSONB, ADD COLUMN "allowedValues" JSONB;
+ALTER TABLE "FlowDefinition" ADD COLUMN "scheduleMinutes" INTEGER, ADD COLUMN "nextRun" TIMESTAMP(3);
+ALTER TABLE "ReportSchedule" ADD COLUMN "lastError" TEXT;
