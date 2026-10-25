@@ -11,3 +11,4 @@ private-exports/
 test-results/
 playwright-report/
 backups/
+/test-results-revenue/

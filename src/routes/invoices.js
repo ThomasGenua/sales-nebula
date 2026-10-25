@@ -64,8 +64,17 @@ function invoiceAmounts(data, lines, current = {}) {
 // workflow or webhook on invoices saw them.
 defineModule('invoices', 'invoice', {
   numbering: INVOICE_NUMBER,
-  beforeCreate: data => invoiceAmounts(data, null),
-  beforeUpdate: (data, { oldRecord }) => invoiceAmounts(data, null, oldRecord),
+  beforeCreate: async (data,{prisma}) => {
+    if(data.status==='Paid'||data.status==='Partially Paid')throw Object.assign(new Error('Record received payments after creating the invoice'),{status:400});
+    return invoiceAmounts({...data,currency:await require('../utils/currency').resolveDealCurrency(prisma,data.currency)},null);
+  },
+  beforeUpdate: async (data, { oldRecord,prisma,source }) => {
+    if(data.currency!==undefined)data.currency=await require('../utils/currency').resolveDealCurrency(prisma,data.currency);
+    const next=invoiceAmounts(data,null,oldRecord),payments=await prisma.invoicePayment.count({where:{invoiceId:oldRecord.id}});
+    if(payments&&['currency','total','totalAmount','subtotal','tax'].some(k=>next[k]!==undefined&&!sameValue(next[k],oldRecord[k])))throw Object.assign(new Error('Invoices with payments cannot change their currency or amounts; issue a replacement invoice'),{status:409});
+    if(source!=='payment reconciliation'&&next.status!==undefined&&next.status!==oldRecord.status&&(payments||['Paid','Partially Paid'].includes(next.status)))throw Object.assign(new Error('Payment status is maintained by payment reconciliation'),{status:409});
+    return next;
+  },
 });
 
 async function lineProblem(req, lines, kept = new Set()) {
@@ -168,6 +177,7 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
     // (services/recordWrites), its workflows and webhooks once both are in.
     const after = [];
     const invoice = await prisma.$transaction(async tx => {
+      if(lines&&await tx.invoicePayment.count({where:{invoiceId:current.id}}))throw Object.assign(new Error('Invoice items cannot change after payment'),{status:409});
       if (lines) await tx.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } });
       return (await updateRecord(tx, 'invoices', current, invoiceAmounts(data, lines && lines.length ? lines : null, current), {
         userId: req.userId, emit: req.app.locals.emit, include, after, prisma, ...(lines && { nested: { items: { create: lines } } }),
@@ -182,9 +192,9 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
 router.post('/:id/pay', requirePermission('invoices', 'edit'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { record: invoice } = await updateRecord(prisma, 'invoices', req.params.id, {
-      status: 'Paid', paidDate: new Date(), payMethod: req.body.payMethod || 'Wire Transfer',
-    }, { req, userId: req.userId, source: 'paid', include });
+    const current=await prisma.invoice.findUnique({where:{id:req.params.id}}),payments=require('../services/payments'),balance=await payments.balance(prisma,current);
+    if(balance.outstandingMinor)await payments.recordPayment(prisma,current.id,{amountMinor:balance.outstandingMinor,currency:current.currency,provider:'manual',reference:'manual-full:'+current.id,createdById:req.userId},{req,userId:req.userId});
+    const invoice=await prisma.invoice.findUnique({where:{id:current.id},include});
     await fireWebhookEvent(prisma, 'invoice.paid', { id: invoice.id, number: invoice.number, total: invoice.total });
     res.json(invoice);
   } catch (err) { next(err); }
@@ -217,18 +227,21 @@ router.get('/stats/summary', requirePermission('invoices', 'read'), async (req, 
     // Still owed: sent, or marked overdue by the daily job, which took them
     // out of outstanding. Overdue: owed and past due; a draft or cancelled
     // invoice is neither.
-    const outstanding = invoices.filter(i => ['Sent', 'Overdue'].includes(i.status));
+    const outstanding = invoices.filter(i => ['Sent', 'Overdue', 'Partially Paid'].includes(i.status));
+    const receipts=await prisma.invoicePayment.findMany({where:{invoiceId:{in:outstanding.map(i=>i.id)}},select:{invoiceId:true,amountMinor:true}});
+    const paidById=new Map();for(const p of receipts)paidById.set(p.invoiceId,(paidById.get(p.invoiceId)||0)+p.amountMinor/100);
+    const currency=await currencyContext(prisma);
     const paid = invoices.filter(i => i.status === 'Paid');
     const overdue = outstanding.filter(i => i.status === 'Overdue' || (i.dueDate && new Date(i.dueDate) < new Date()));
     res.json({
-      outstanding: { count: outstanding.length, total: outstanding.reduce((s, i) => s + calcTotal(i), 0) },
-      paid: { count: paid.length, total: paid.reduce((s, i) => s + calcTotal(i), 0) },
-      overdue: { count: overdue.length },
+      outstanding: { count: outstanding.length, total: outstanding.reduce((s, i) => s + currency.toBase(Math.max(0,calcTotal(i)-(paidById.get(i.id)||0)),i.currency), 0) },
+      paid: { count: paid.length, total: paid.reduce((s, i) => s + currency.toBase(calcTotal(i),i.currency), 0) },
+      overdue: { count: overdue.length }, currency:currency.base,
     });
   } catch (err) { next(err); }
 });
 
-// Generate invoice as printable HTML
+// Generate a PDF, with explicit JSON/HTML preview compatibility.
 router.get('/:id/pdf', requirePermission('invoices', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
@@ -245,7 +258,7 @@ router.get('/:id/pdf', requirePermission('invoices', 'read'), async (req, res, n
 
     // In the organisation's currency, which the document assumed was dollars.
     const html = generateDocumentHtml('INVOICE', {
-      currency: (await currencyContext(prisma)).base,
+      currency: invoice.currency,
       number: invoice.number,
       date: invoice.date,
       dueDate: invoice.dueDate,
@@ -271,8 +284,8 @@ router.get('/:id/pdf', requirePermission('invoices', 'read'), async (req, res, n
     if (req.query.format === 'json') {
       return res.json({ invoice, html });
     }
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
+    const data={...require('../services/customerQuotes').snapshot({...invoice,createdAt:invoice.date,discount:0},invoice.currency),documentType:'Invoice'};
+    res.type('application/pdf').send(await require('../services/customerQuotes').pdf(data));
   } catch (err) { next(err); }
 });
 

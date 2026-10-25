@@ -12,7 +12,7 @@ async function definitions(db, module) {
     .filter(f => !permissions.some(p => p.module === module && p.field === 'custom.' + f.name && !p.visible))
     .map(f => ({ ...f, readOnly: f.readOnly || permissions.some(p => p.module === module && p.field === 'custom.' + f.name && !p.editable) }));
   const lists = await db.picklistValue.findMany({ where: { picklistId: { in: fields.map(f => f.picklistId).filter(Boolean) }, active: true }, orderBy: { sortOrder: 'asc' } });
-  return fields.map(f => ({ ...f, supported: SUPPORTED.includes(f.fieldType), options: lists.filter(v => v.picklistId === f.picklistId).map(v => ({ value: v.value, label: v.label })) }));
+  return [...fields.map(f => ({ ...f, supported: SUPPORTED.includes(f.fieldType), options: lists.filter(v => v.picklistId === f.picklistId).map(v => ({ value: v.value, label: v.label })) })), ...await require('./computedFields').definitions(db,module)];
 }
 async function accessibleRecord(req, module, id, level = 'read') {
   const model = modelFor(module);
@@ -64,6 +64,7 @@ async function prepareValues(db, module, input, recordId, { useDefaults = false 
   const existing = recordId ? await db.studioFieldValue.findMany({ where: { module, recordId } }) : [];
   const changes = [];
   for (const field of fields.filter(f => f.supported)) {
+    if (field.computed) { if(Object.hasOwn(input,field.name)) throw fail(field.label+' is computed and cannot be saved'); continue; }
     const old = existing.find(v => v.fieldId === field.id);
     const supplied = Object.hasOwn(input, field.name);
     if (supplied && field.readOnly) {
@@ -85,6 +86,7 @@ async function hydrate(db, module, rows) {
   const fields = await definitions(db, module);
   const values = rows.length ? await db.studioFieldValue.findMany({ where: { module, recordId: { in: rows.map(r => r.id) }, fieldId: { in: fields.map(f => f.id) } } }) : [];
   for (const row of rows) for (const field of fields) row['custom.' + field.name] = values.find(v => v.recordId === row.id && v.fieldId === field.id)?.value ?? null;
+  await require('./computedFields').hydrate(db,module,rows,fields.filter(f=>f.computed));
   return rows;
 }
 // Results are intersected with normal row security by the caller.
@@ -96,6 +98,7 @@ async function filterWhere(db, module, filters) {
   for (const filter of custom) {
     const field = fields.find(f => 'custom.' + f.name === filter.field);
     if (!field) throw fail('Unknown custom field');
+    if(field.computed) { const matched=await require('./computedFields').filterIds(db,module,[filter],[field]);ids=ids===null?matched:ids.filter(id=>matched.includes(id));continue; }
     const values = await db.studioFieldValue.findMany({ where: { module, fieldId: field.id } });
     const matched = values.filter(v => evaluateConditions([{ field: 'value', operator: filter.operator || 'equals', value: filter.value }], { value: v.value })).map(v => v.recordId);
     ids = ids === null ? matched : ids.filter(id => matched.includes(id));

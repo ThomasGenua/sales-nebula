@@ -1,3 +1,4 @@
+import { PaymentsWorkspace, ComputedFieldsWorkspace, CampaignExecution, DealRoomsWorkspace, SuccessWorkspace } from './RevenueWorkflows';
 import { PricingRules } from './PricingRules';
 import { EnterpriseSettings } from './EnterpriseSettings';
 import React, { useContext, useEffect, useState } from 'react';
@@ -180,6 +181,11 @@ export function SalesOperationsPage() {
     ['integrations', 'Integration operations', Integrations, true],
     ['pricing', 'Pricing rules', PricingRules, can(user, 'products', 'full')],
     ['enterprise', 'Enterprise configuration', EnterpriseSettings, can(user, 'admin', 'full')],
+    ['payments', 'Payments', PaymentsWorkspace, can(user,'invoices','read')],
+    ['computed', 'Computed fields', ComputedFieldsWorkspace, can(user,'settings','read')],
+    ['campaignDelivery', 'Campaign delivery', CampaignExecution, can(user,'campaigns','read')],
+    ['dealRooms', 'Deal rooms', DealRoomsWorkspace, can(user,'deals','read')],
+    ['success', 'Account success', SuccessWorkspace, can(user,'accounts','read')],
     ['configuration', 'Configuration versions', Configuration, can(user, 'admin', 'full')],
   ].filter(t => t[3]);
   const [tab, setTab] = useState('daily'), Component = tabs.find(t => t[0] === tab)?.[2] || Daily;

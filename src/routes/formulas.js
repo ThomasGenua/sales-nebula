@@ -37,11 +37,12 @@ router.get('/', requirePermission('settings', 'read'), async (req, res, next) =>
 router.post('/', requirePermission('settings', 'full'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { name, module, formula, returnType, precision } = req.body;
+    const { name, module, formula = '0', returnType, precision, rollup } = req.body;
+    require('../services/computedFields').validate({name,module,formula,rollup,precision});
     if (!name || !module || !formula) return res.status(400).json({ error: 'name, module, and formula required' });
     const fieldKey = `ff_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
     const field = await prisma.formulaField.create({
-      data: { name, fieldKey, module, formula, returnType: returnType || 'text', precision },
+      data: { name, fieldKey, module, formula, returnType: returnType || 'text', precision, ...(rollup&&{rollup}) },
     });
     await req.audit({ action: 'create', module: 'settings', recordId: field.id, details: `Created formula field: ${name}` });
     res.status(201).json(field);
@@ -54,6 +55,9 @@ router.put('/:id', requirePermission('settings', 'full'), async (req, res, next)
     const prisma = req.app.locals.prisma;
     const { id, createdAt, updatedAt, ...rest } = req.body || {};
     const { data } = pickModelFields('formulaField', rest);
+    const current=await prisma.formulaField.findUnique({where:{id:req.params.id}});
+    if(!current)return res.status(404).json({error:'Not found'});
+    require('../services/computedFields').validate({...current,...data});
     const field = await prisma.formulaField.update({ where: { id: req.params.id }, data });
     res.json(field);
   } catch (err) { next(err); }
@@ -93,11 +97,12 @@ router.post('/evaluate', requirePermission('settings', 'read'), async (req, res,
     if (!record) return res.status(404).json({ error: 'Record not found' });
 
     // Get formula fields for this module
-    const fields = await prisma.formulaField.findMany({ where: { module, active: true } });
+    const fields = await require('../services/computedFields').definitions(prisma,module);
 
     const results = {};
     for (const field of fields) {
-      const value = evaluateFormula(field.formula, record);
+      await require('../services/computedFields').hydrate(prisma,module,[record],fields);
+      const value = record['custom.'+field.fieldKey];
       results[field.fieldKey] = {
         name: field.name,
         value,
@@ -120,13 +125,14 @@ router.post('/evaluate-bulk', requirePermission('settings', 'read'), async (req,
     if (!modelName) return;
     const ids = Array.isArray(recordIds) ? recordIds.slice(0, 500).map(String) : [];
     const records = await prisma[modelName].findMany({ where: await reachableWhere(req, module, modelName, { id: { in: ids } }) });
-    const fields = await prisma.formulaField.findMany({ where: { module, active: true } });
+    const fields = await require('../services/computedFields').definitions(prisma,module);
+    await require('../services/computedFields').hydrate(prisma,module,records,fields);
 
     const results = {};
     for (const record of records) {
       results[record.id] = {};
       for (const field of fields) {
-        results[record.id][field.fieldKey] = evaluateFormula(field.formula, record);
+        results[record.id][field.fieldKey] = record['custom.'+field.fieldKey];
       }
     }
 

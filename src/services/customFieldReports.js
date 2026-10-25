@@ -37,7 +37,7 @@ function aggregate(rows, aggregations) {
   return result;
 }
 async function execute(db, config, report, where) {
-  let rows = await db[config.model].findMany({ where, select: Object.fromEntries(Object.keys(config.fields).filter(k => !k.startsWith('custom.')).map(k => [k, true])), take: 10001 });
+  let rows = await db[config.model].findMany({ where, take: 10001 });
   if (rows.length > 10000) throw Object.assign(new Error('Narrow this report with record filters to at most 10,000 rows before using custom fields.'), { status: 400 });
   await custom.hydrate(db, report.module, rows);
   rows = rows.filter(row => report.filters.filter(f => f.field.startsWith('custom.')).every(f => matches(row[f.field], f)));

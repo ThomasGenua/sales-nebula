@@ -15,6 +15,8 @@ async function visiblePeople(req) {
 }
 function stepProblem(steps) {
   if (!Array.isArray(steps) || steps.length > 50) return 'Use a list of at most 50 email steps';
+  const cadenceProblem = require('../services/cadences').validateSteps(steps);
+  if (cadenceProblem) return cadenceProblem;
   for (const step of steps) {
     if (!step || typeof step !== 'object' || Array.isArray(step)) return 'Every step must be an email definition';
     if (step.delayDays != null && (!Number.isInteger(Number(step.delayDays)) || Number(step.delayDays) < 0 || Number(step.delayDays) > 365)) return 'Step delays must be whole days between 0 and 365';
@@ -29,6 +31,7 @@ async function activationProblem(prisma, steps) {
   if (!steps.length) return 'At least one step required';
   for (const step of steps) {
     const template = step.templateId ? await prisma.emailTemplate.findUnique({ where: { id: step.templateId } }) : null;
+    if (step.type && step.type !== 'email') { if (!step.subject?.trim()) return 'Manual steps need a task subject'; continue; }
     if (!(step.subject || template?.subject)?.trim() || !(step.body || template?.body)?.trim()) return 'Every email step needs a subject and body, or an existing template';
     if (policy.templateProblem(step.subject || template?.subject) || policy.templateProblem(step.body || template?.body)) return 'Template contains an unsupported merge field';
   }
@@ -262,7 +265,7 @@ router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res,
         where: { sequenceId: req.params.id, contactId, status: 'Active' },
       });
       if (!existing) {
-        enrollments.push({ sequenceId: req.params.id, contactId, enrolledById: req.userId, nextSendAt });
+        enrollments.push({ sequenceId: req.params.id, contactId, enrolledById: req.userId, nextSendAt, stepSnapshot: steps });
       }
     }
     for (const leadId of leadIds) {
@@ -270,7 +273,7 @@ router.post('/:id/enroll', requirePermission('emails', 'edit'), async (req, res,
         where: { sequenceId: req.params.id, leadId, status: 'Active' },
       });
       if (!existing) {
-        enrollments.push({ sequenceId: req.params.id, leadId, enrolledById: req.userId, nextSendAt });
+        enrollments.push({ sequenceId: req.params.id, leadId, enrolledById: req.userId, nextSendAt, stepSnapshot: steps });
       }
     }
 
@@ -336,4 +339,24 @@ router.post('/process', requirePermission('emails', 'edit'), async (req, res, ne
   } catch (err) { next(err); }
 });
 
+router.post('/:id/enrollments/:enrollmentId/outcome', requirePermission('emails', 'edit'), requirePermission('activities', 'edit'), async (req,res,next) => {
+  try {
+    const db=req.app.locals.prisma, { OUTCOMES }=require('../services/cadences');
+    if(!OUTCOMES.includes(req.body.outcome)) return res.status(400).json({error:'Choose a supported outcome'});
+    const enrollment=await db.emailSequenceEnrollment.findFirst({where:{id:req.params.enrollmentId,sequenceId:req.params.id,status:'Active'}});
+    if(!enrollment) return res.status(404).json({error:'Active enrollment not found'});
+    if(enrollment.contactId && !await mayReachPerson(req,res,'contactId',enrollment.contactId)) return;
+    if(enrollment.leadId && !await mayReachPerson(req,res,'leadId',enrollment.leadId)) return;
+    const activity=await db.activity.findFirst({where:await reachableWhere(req,'activities','activity',{cadenceKey:enrollment.id+':'+enrollment.currentStep},'Edit')});
+    if(!activity) return res.status(409).json({error:'The cadence worker has not created an accessible task yet'});
+    const {record}=await require('../services/recordWrites').updateRecord(db,'activities',activity,{status:'Completed',result:req.body.outcome,completedAt:new Date()},{req,userId:req.userId});
+    res.json(record);
+  } catch(e){next(e);}
+});
+router.get('/:id/conversion-report', requirePermission('emails','read'), async(req,res,next)=>{
+  try { const {where}=await visiblePeople(req); const rows=await req.app.locals.prisma.emailSequenceEnrollment.findMany({where:{AND:[where,{sequenceId:req.params.id}]},select:{status:true,convertedAt:true,lastOutcome:true}});
+    const converted=rows.filter(r=>r.convertedAt).length;
+    res.json({total:rows.length,converted,conversionRate:rows.length?converted/rows.length:0,outcomes:rows.reduce((out,r)=>{const k=r.lastOutcome||r.status;out[k]=(out[k]||0)+1;return out;},{})});
+  }catch(e){next(e);}
+});
 module.exports = router;

@@ -45,10 +45,7 @@ const router = createCrudRouter('campaign', 'campaigns', {
         const prisma = req.app.locals.prisma;
         const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { id: true } });
         if (!campaign) return res.status(404).json({ error: 'Not found' });
-        res.status(501).json({
-          code: 'CAMPAIGN_DELIVERY_UNAVAILABLE',
-          error: 'Campaign email delivery is not available yet. No messages were sent or queued, and the campaign and recipients were not changed.',
-        });
+        res.json(await require('../services/campaignDelivery').queue(prisma,req,campaign.id,req.body));
       } catch (err) { next(err); }
     });
 
@@ -226,4 +223,5 @@ router.post('/:id/clone', authenticate, requirePermission('campaigns', 'full'), 
   } catch (err) { next(err); }
 });
 
+router.get('/:id/delivery',authenticate,requirePermission('campaigns','read'),async(req,res,next)=>{try{const db=req.app.locals.prisma;if(!await db.campaign.findFirst({where:await reachableWhere(req,'campaigns','campaign',{id:req.params.id})}))return res.sendStatus(404);const rows=await db.campaignDelivery.findMany({where:{campaignId:req.params.id},orderBy:{createdAt:'desc'},take:200});const visible=[];for(const row of rows){const module=row.contactId?'contacts':'leads',model=row.contactId?'contact':'lead';if(permits(req,module,'read')&&await db[model].findFirst({where:await reachableWhere(req,module,model,{id:row.contactId||row.leadId||''}),select:{id:true}}))visible.push(row);}res.json({data:visible,counts:visible.reduce((n,r)=>{n[r.status]=(n[r.status]||0)+1;return n;},{})});}catch(e){next(e);}});
 module.exports = router;

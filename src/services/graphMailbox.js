@@ -70,6 +70,7 @@ async function withToken(prisma, account, fn) {
 
 /** Store the tokens from a completed consent redirect. */
 async function connect(prisma, account, { code, redirectUri, codeVerifier, calendar = false }) {
+  if(account.provider==='google') return require('./googleWorkspace').connect(prisma,account,{code,redirectUri,codeVerifier,calendar});
   const scope = graph.MAIL_SCOPES + (calendar ? ' https://graph.microsoft.com/Calendars.ReadWrite' : '');
   const tokens = await graph.exchangeCode({ ...credentials(account), code, redirectUri, scope, ...(codeVerifier && { codeVerifier }) });
   const profileRequest = graph.getProfile({
@@ -115,6 +116,7 @@ async function testConnection(prisma, account) {
  * Throttling is surfaced rather than swallowed so the scheduler can back off.
  */
 async function pollAccount(prisma, account) {
+  if(account.provider==='google') return require('./googleWorkspace').pollAccount(prisma,account);
   if (account.ownerId) return require('./salesMailbox').pollPersonalMailbox(prisma, account);
   const startedAt = Date.now();
   await prisma.inboundEmailAccount.update({ where: { id: account.id }, data: { status: 'Polling' } });
@@ -155,6 +157,7 @@ async function pollAccount(prisma, account) {
  * from the receiving mailbox, so the correspondent sees a normal reply.
  */
 async function reply(prisma, account, message, comment) {
+  if(account.provider==='google') return require('./googleWorkspace').reply(prisma,account,message,comment);
   if (!message.externalId) {
     const err = new Error('This message has no Graph id, so it cannot be replied to in thread.');
     err.status = 409;
@@ -196,6 +199,7 @@ async function acknowledge(prisma, account, storedMessage, newCase) {
 
 /** A new message from this mailbox, for outbound mail that is not a reply. */
 async function sendFrom(prisma, account, { to, subject, body, isHtml = false }) {
+  if(account.provider==='google')return require('./googleWorkspace').sendFrom(prisma,account,{to,subject,body,isHtml});
   await withToken(prisma, account, accessToken =>
     graph.sendMail({ accessToken, mailboxAddress: account.mailboxAddress, to, subject, body, isHtml })
   );

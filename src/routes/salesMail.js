@@ -14,7 +14,7 @@ const verifierFor = state => crypto.createHmac('sha256', process.env.MICROSOFT_C
 const accountWhere = req => ({ ownerId: req.userId, deletedAt: null });
 const messageWhere = req => ({ deletedAt: null, account: { is: accountWhere(req) } });
 const redirectUri = () => new URL('/app/mailbox', process.env.FRONTEND_URL || 'http://localhost:3000').href;
-const safeAccount = a => ({ id: a.id, name: a.name, mailboxAddress: a.mailboxAddress, status: a.status, connected: !!a.oauthRefreshToken, lastPolledAt: a.lastPolledAt, lastError: a.lastError, active: a.active, calendarEnabled: a.calendarEnabled, calendarLastSyncedAt: a.calendarLastSyncedAt, calendarError: a.calendarError });
+const safeAccount = a => ({ provider:a.provider, id: a.id, name: a.name, mailboxAddress: a.mailboxAddress, status: a.status, connected: !!a.oauthRefreshToken, lastPolledAt: a.lastPolledAt, lastError: a.lastError, active: a.active, calendarEnabled: a.calendarEnabled, calendarLastSyncedAt: a.calendarLastSyncedAt, calendarError: a.calendarError });
 
 async function accountFor(req, res) {
   const account = await req.app.locals.prisma.inboundEmailAccount.findFirst({ where: { ...accountWhere(req), id: req.params.id } });
@@ -23,22 +23,23 @@ async function accountFor(req, res) {
 }
 
 router.get('/accounts', async (req, res, next) => {
-  try { res.json({ data: (await req.app.locals.prisma.inboundEmailAccount.findMany({ where: accountWhere(req), orderBy: { createdAt: 'asc' } })).map(safeAccount), configured: !!(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET), redirectUri: redirectUri() }); } catch (e) { next(e); }
+  try { res.json({ data: (await req.app.locals.prisma.inboundEmailAccount.findMany({ where: accountWhere(req), orderBy: { createdAt: 'asc' } })).map(safeAccount), googleConfigured: require('../services/googleWorkspace').configured(), configured: !!(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET), redirectUri: redirectUri() }); } catch (e) { next(e); }
 });
 router.post('/accounts', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
-    const account = await req.app.locals.prisma.inboundEmailAccount.create({ data: { name: String(req.body.name || 'My Outlook mailbox').slice(0, 120), username: req.user.email, provider: 'microsoft', ownerId: req.userId, autoCreateCase: false, autoCreateLead: false, autoReply: false, status: 'Disabled', active: false } });
+    const account = await req.app.locals.prisma.inboundEmailAccount.create({ data: { name: String(req.body.name || 'My Outlook mailbox').slice(0, 120), username: req.user.email, provider: req.body.provider === 'google' ? 'google' : 'microsoft', ownerId: req.userId, autoCreateCase: false, autoCreateLead: false, autoReply: false, status: 'Disabled', active: false } });
     res.status(201).json(safeAccount(account));
   } catch (e) { next(e); }
 });
 router.post('/accounts/:id/authorize', requirePermission('emails', 'edit'), async (req, res, next) => {
   try {
     const account = await accountFor(req, res); if (!account) return;
-    if (!process.env.MICROSOFT_CLIENT_ID || !process.env.MICROSOFT_CLIENT_SECRET) return res.status(503).json({ error: 'An administrator must configure MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET first.' });
+    if (account.provider !== 'google' && (!process.env.MICROSOFT_CLIENT_ID || !process.env.MICROSOFT_CLIENT_SECRET)) return res.status(503).json({ error: 'An administrator must configure MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET first.' });
     const state = crypto.randomBytes(32).toString('hex');
     const calendar = req.body.calendar === true || account.calendarEnabled;
     if (calendar && !permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Calendar sync requires activity edit permission.' });
     await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: account.id }, data: { oauthStateHash: hash(state), oauthStateExpiresAt: new Date(Date.now() + 10 * 60000), oauthStateCalendar: calendar } });
+    if(account.provider==='google') return res.json({url:require('../services/googleWorkspace').authorize(state,redirectUri(),calendar)});
     const tenant = process.env.MICROSOFT_TENANT_ID || 'common';
     const params = new URLSearchParams({ client_id: process.env.MICROSOFT_CLIENT_ID, response_type: 'code', redirect_uri: redirectUri(), response_mode: 'query', scope: MAIL_SCOPES + (calendar ? ' https://graph.microsoft.com/Calendars.ReadWrite' : ''), state, prompt: 'select_account', code_challenge_method: 'S256', code_challenge: crypto.createHash('sha256').update(verifierFor(state)).digest('base64url') });
     res.json({ url: `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize?${params}` });
@@ -54,9 +55,9 @@ router.post('/connect', requirePermission('emails', 'edit'), async (req, res, ne
     const claimed = await db.inboundEmailAccount.updateMany({ where: { id: account.id, oauthStateHash: hash(state) }, data: { oauthStateHash: null, oauthStateExpiresAt: null } });
     if (!claimed.count) return res.status(409).json({ error: 'This consent response has already been used.' });
     if (account.oauthStateCalendar && !permits(req, 'activities', 'edit')) return res.status(403).json({ error: 'Calendar access is no longer allowed.' });
-    await graphMailbox.connect(db, account, { code, redirectUri: redirectUri(), codeVerifier: verifierFor(state), calendar: account.oauthStateCalendar });
+    await graphMailbox.connect(db, account, { code, redirectUri: redirectUri(), codeVerifier: account.provider==='google'?require('../services/googleWorkspace').verifier(state):verifierFor(state), calendar: account.oauthStateCalendar });
     const updated = await db.inboundEmailAccount.update({ where: { id: account.id }, data: { active: true } });
-    await req.audit({ action: 'update', module: 'emails', recordId: account.id, details: 'Connected personal Outlook mailbox' });
+    await req.audit({ action: 'update', module: 'emails', recordId: account.id, details: 'Connected personal mailbox' });
     res.json(safeAccount(updated));
   } catch (e) { next(e); }
 });
@@ -128,7 +129,7 @@ router.post('/messages/:id/reply', requirePermission('emails', 'edit'), async (r
       db.inboundEmailMessage.updateMany({ where: { accountId: message.accountId, direction: 'inbound', receivedAt: { lte: message.receivedAt }, ...(message.threadKey ? { threadKey: message.threadKey } : { id: message.id }) }, data: { repliedAt: new Date(), status: 'Replied', replyBody: body } }),
       db.inboundEmailMessage.create({ data: { accountId: message.accountId, direction: 'outbound', threadKey: message.threadKey, fromEmail: message.account.mailboxAddress || req.user.email, toEmails: message.fromEmail, subject: `Re: ${(message.subject || '').replace(/^Re:\s*/i, '')}`, textBody: body, status: 'Sent', contactId: message.contactId, dealId: message.dealId } }),
     ]);
-    await req.audit({ action: 'create', module: 'emails', recordId: message.id, details: 'Replied from personal Outlook mailbox' });
+    await req.audit({ action: 'create', module: 'emails', recordId: message.id, details: 'Replied from personal mailbox' });
     res.json({ replied: true });
   } catch (e) { next(e); }
   finally { if (lease) await releaseLease(req.app.locals.prisma, `sales-reply:${req.params.id}`, lease); }

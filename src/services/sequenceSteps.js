@@ -45,8 +45,9 @@ async function addressOf(prisma, enrollment) {
 }
 
 /** Move an enrollment past the step just done: to the next, or to Completed. */
-async function advance(prisma, enrollment, steps, tally) {
-  const next = enrollment.currentStep + 1;
+async function advance(prisma, enrollment, steps, tally, outcome) {
+  const branch = steps[enrollment.currentStep]?.branches?.[outcome];
+  const next = branch === 'end' ? steps.length : Number.isInteger(branch) ? branch : enrollment.currentStep + 1;
   if (next >= steps.length) {
     const done = await prisma.emailSequenceEnrollment.updateMany({
       where: { id: enrollment.id, status: 'Active', currentStep: enrollment.currentStep },
@@ -67,7 +68,7 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
     await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active', nextSendAt: enrollment.nextSendAt }, data: { nextSendAt: allowed } });
     return;
   }
-  const steps = stepsOf(enrollment.sequence);
+  const steps = Array.isArray(enrollment.stepSnapshot) ? enrollment.stepSnapshot : stepsOf(enrollment.sequence);
   const step = steps[enrollment.currentStep];
   if (!step) { // it ran past its last step
     const done = await prisma.emailSequenceEnrollment.updateMany({
@@ -77,6 +78,16 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
     if (done.count) tally.completed++;
     return;
   }
+
+  if (step.type && step.type !== 'email') {
+    const outcome = await require('./cadences').manualStep(prisma, enrollment, step);
+    if (outcome) {
+      await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active', currentStep: enrollment.currentStep }, data: { lastOutcome: outcome, ...(outcome === 'converted' && { convertedAt: new Date() }) } });
+      await advance(prisma, enrollment, steps, tally, outcome);
+    }
+    return;
+  }
+  if (!mailConfigured()) return;
 
   // Claim the step: only whoever moves its due time gets to send it.
   const claim = await prisma.emailSequenceEnrollment.updateMany({
@@ -97,8 +108,10 @@ async function processEnrollment(prisma, enrollment, isSuppressed, tally) {
     await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: to ? 'Opted Out' : 'Bounced', nextSendAt: null, lastError: to ? 'Address is suppressed.' : 'Recipient has no email address.' } });
     return;
   }
-  if (enrollment.sequence.stopOnReply && enrollment.lastSentAt && await prisma.inboundEmailMessage.findFirst({ where: { deletedAt: null, direction: 'inbound', fromEmail: { equals: to, mode: 'insensitive' }, receivedAt: { gte: enrollment.enrolledAt }, account: { is: { deletedAt: null, OR: [{ ownerId: enrollment.enrolledById }, { ownerId: null }] } } }, select: { id: true } })) {
-    await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Replied', nextSendAt: null, lastError: null } });
+  if (enrollment.sequence.stopOnReply && enrollment.lastSentAt && await prisma.inboundEmailMessage.findFirst({ where: { deletedAt: null, direction: 'inbound', fromEmail: { equals: to, mode: 'insensitive' }, receivedAt: { gte: enrollment.lastSentAt }, account: { is: { deletedAt: null, OR: [{ ownerId: enrollment.enrolledById }, { ownerId: null }] } } }, select: { id: true } })) {
+    if (step.branches?.replied != null) {
+      await advance(prisma, enrollment, steps, tally, 'replied');
+    } else await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Replied', nextSendAt: null, lastError: null } });
     return;
   }
   if (to) {
@@ -152,7 +165,7 @@ async function processAll(prisma, isSuppressed) {
   const tally = { processed: due.length, sent: 0, completed: 0, retrying: 0, bounced: 0, errors: 0 };
   for (const enrollment of due) {
     try {
-      await processEnrollment(prisma, enrollment, isSuppressed, tally);
+      await require('./cadences').actor(prisma, enrollment, db => processEnrollment(db, enrollment, isSuppressed, tally));
     } catch (err) {
       // One enrollment's trouble does not stop the batch; it is claimed, so it comes round again in an hour.
       tally.errors++;
@@ -160,6 +173,7 @@ async function processAll(prisma, isSuppressed) {
       logger.warn({ err: err.message, enrollmentId: enrollment.id }, 'Sequence step failed');
     }
   }
+  if (!mailConfigured()) tally.skipped = 'No SMTP server is configured; email steps remain pending';
   return tally;
 }
 
@@ -169,7 +183,7 @@ async function processAll(prisma, isSuppressed) {
  * `{ skipped }` and why when it did nothing.
  */
 async function processDueSteps(prisma, { isSuppressed }) {
-  if (!mailConfigured()) {
+  if (!mailConfigured() && !await prisma.emailSequence.findFirst({ where: { status: 'Active' }, select: { id: true } })) {
     return {
       processed: 0, sent: 0, completed: 0,
       skipped: 'No SMTP server is configured (SMTP_HOST), so sequence email is not sent and no enrollment moves on',

@@ -228,6 +228,8 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   // Numbering retries a clash, which Postgres does not allow inside a
   // transaction (utils/numbering): make a numbered record outside one.
   if (hooks.numbering && Array.isArray(ctx.after)) throw new Error(`A ${moduleName} record is numbered, so it cannot be made inside a transaction`);
+  const managed=['cadenceKey','remindersOwnerId','nextReminderAt','lastReminderError','remindersEnabled'];
+  if(!ctx.managedFields && managed.some(k=>Object.hasOwn(input,k)))throw new RecordWriteError(400,{error:'Use the dedicated workflow controls to change managed fields'});
   let data = { ...input };
   if (moduleName === 'quotes') data = await runHook(require('./quotePricing').prepareQuote, db, data, null, ctx);
   if (moduleName === 'orders' && data.quoteId) {
@@ -356,6 +358,7 @@ async function updateRecord(db, moduleName, target, input, ctx = {}) {
     throw new RecordWriteError(404, { error: 'Not found' });
   }
 
+  if(!ctx.managedFields && ['cadenceKey','remindersOwnerId','nextReminderAt','lastReminderError','remindersEnabled'].some(k=>Object.hasOwn(input,k)))throw new RecordWriteError(400,{error:'Use the dedicated workflow controls to change managed fields'});
   let data = { ...input };
   if (moduleName === 'quotes') data = await runHook(require('./quotePricing').prepareQuote, db, data, oldRecord, ctx);
   if (hooks.beforeUpdate) data = await runHook(hooks.beforeUpdate, data, hookContext(db, ctx, oldRecord));

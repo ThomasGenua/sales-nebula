@@ -21,6 +21,7 @@ async function enqueueDue(prisma, now = new Date()) {
     const model = customId ? 'customRecord' : resolveModel(flow.module);
     const source = await db[model].findMany({ where: customId ? { customObjectId: customId, deletedAt: null } : await reachableWhere(req, flow.module, model, {}, 'Edit'), take: 10001 });
     const rows = customId ? source.map(r => ({ ...r.data, id: r.id })) : source;
+    if(!customId && (flow.triggerConditions||[]).some(c=>c.field?.startsWith('custom.'))) await require('./computedFields').forActor(db,req,flow.module,rows);
     if (rows.length > 10000 || rows.filter(r => evaluateConditions(flow.triggerConditions, r)).length > 200) {
       await db.flowRun.create({ data: { flowId: flow.id, status: 'Failed', error: 'Scheduled flow exceeds 10,000 source records or 200 matches; narrow its conditions', log: [], completedAt: now } });
       return;

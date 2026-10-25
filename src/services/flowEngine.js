@@ -87,6 +87,7 @@ async function resumeFlow(prisma, runId, retry = false, now = new Date()) {
         if (!node) throw new Error('Stored flow step is missing');
         const log = [...(run.log || [])];
         let branch;
+        if (!customId && node.type==='decision') await require('./computedFields').forActor(db,req,run.triggerModule,[record]);
         if (node.type === 'decision') branch = String(evaluateConditions(node.config.conditions, record, context.oldRecord));
         if (node.type === 'action') {
           if (node.config.action.type === 'updateRelated') await require('./relatedFlowActions').execute(db, run.triggerModule, record, node.config.action.config, req, after, prisma);
@@ -129,7 +130,14 @@ async function resumeFlow(prisma, runId, retry = false, now = new Date()) {
 async function triggerFlows(db, { module, trigger, record, oldRecord, userId }) {
   const flows = await db.flowDefinition.findMany({ where: { module, type: 'RecordTriggered', status: 'Active', triggerType: trigger } });
   for (const flow of flows) {
-    if (!evaluateConditions(flow.triggerConditions, record, oldRecord)) continue;
+    let facts={...record};
+    if (!module.startsWith('custom:') && (flow.triggerConditions||[]).some(c=>c.field?.startsWith('custom.'))) {
+      const actor=await db.user.findFirst({where:{id:flow.createdById,active:true,isPortalUser:false},include:{role:{include:{permissions:true}}}});
+      if(!actor)continue;
+      const req={user:actor,userId:actor.id,app:{locals:{prisma:db}}};
+      await require('./computedFields').forActor(db,req,module,[facts]);
+    }
+    if (!evaluateConditions(flow.triggerConditions, facts, oldRecord)) continue;
     try { await startFlow(db, flow, record, flow.createdById, oldRecord); }
     catch (err) {
       await db.flowRun.create({ data: { flowId: flow.id, triggerRecordId: record.id, triggerModule: module, status: 'Failed', error: String(err.message).slice(0, 400), log: [], completedAt: new Date() } });

@@ -41,6 +41,7 @@ async function execute(db, report, req, configs, config) {
     rows = (await db.customRecord.findMany({ where: { customObjectId: report.module.slice(7), deletedAt: null }, take: 10001 })).map(r => ({ ...r.data, id: r.id }));
   } else {
     rows = await db[config.model].findMany({ where: await reachableWhere(req, report.module, config.model), take: 10001 });
+    await require('./customFields').hydrate(db,report.module,rows);
     for (const [relation, fk] of Object.entries(config.relations)) {
       const relatedModule = ({ account: 'accounts', contact: 'contacts', deal: 'deals' })[relation];
       if (!relatedModule || !configs[relatedModule] || !permits(req, relatedModule, 'read')) continue;
