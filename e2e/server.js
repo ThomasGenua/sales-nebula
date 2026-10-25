@@ -29,7 +29,16 @@ const smtp = new SMTPServer({
 async function start() {
   assertTestDatabase();
   const tables = await prisma.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '\_prisma%'`;
+  if (process.env.TEST_DELETE_CLEANUP === 'true') {
+    // Same disposable-database safeguard as the integration harness; avoids
+    // rebuilding hundreds of table/index files on slow Windows test disks.
+    await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL session_replication_role = 'replica'");
+      for (const table of tables) await tx.$executeRawUnsafe('DELETE FROM "' + table.tablename.replace(/"/g, '""') + '"');
+    }, { timeout: 180000 });
+  } else {
   if (tables.length) await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${tables.map(t => '"' + t.tablename.replace(/"/g, '""') + '"').join(', ')} RESTART IDENTITY CASCADE`);
+  }
   await bootstrapAdmin(prisma, { email: 'pilot-admin@example.com', password: 'Pilot-admin-123!' });
   const role = await prisma.role.findUnique({ where: { name: 'Read Only' } });
   await prisma.user.upsert({ where: { email: 'pilot-reader@example.com' }, update: {}, create: {

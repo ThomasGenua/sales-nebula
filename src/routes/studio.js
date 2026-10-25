@@ -92,7 +92,8 @@ router.get('/fields/:module', authenticate, async (req, res, next) => {
       : [];
     const byId = new Map(picklists.map(p => [p.id, p]));
 
-    res.json(fields.map(f => ({ ...f, picklist: f.picklistId ? byId.get(f.picklistId) || null : null, storage: FIELD_TYPES[f.fieldType]?.storage })));
+    const computed = await require('../services/computedFields').definitions(prisma, req.params.module);
+    res.json([...fields.map(f => ({ ...f, picklist: f.picklistId ? byId.get(f.picklistId) || null : null, storage: FIELD_TYPES[f.fieldType]?.storage })), ...computed]);
   } catch (err) { next(err); }
 });
 
@@ -210,7 +211,8 @@ router.get('/field-types', authenticate, async (req, res) => {
 router.get('/values/:module/:recordId', authenticate, async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    await custom.accessibleRecord(req, req.params.module, req.params.recordId);
+    const record=await custom.accessibleRecord(req, req.params.module, req.params.recordId);
+    await custom.hydrate(prisma,req.params.module,[record]);
     const fields = await custom.definitions(prisma, req.params.module);
     const values = await prisma.studioFieldValue.findMany({ where: { module: req.params.module, recordId: req.params.recordId } });
     const byField = new Map(values.map(v => [v.fieldId, v]));
@@ -221,7 +223,7 @@ router.get('/values/:module/:recordId', authenticate, async (req, res, next) => 
         ...f,
         fieldId: f.id, name: f.name, label: f.label, fieldType: f.fieldType,
         required: f.required, readOnly: f.readOnly, helpText: f.helpText,
-        value: v ? v.value : f.defaultValue != null && f.supported ? custom.normalize(f, f.defaultValue) : null,
+        value: f.computed ? record['custom.'+f.name] : v ? v.value : f.defaultValue != null && f.supported ? custom.normalize(f, f.defaultValue) : null,
         version: v?.updatedAt?.toISOString() || null,
         hasValue: !!v,
       };

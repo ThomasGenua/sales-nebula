@@ -8,13 +8,14 @@ function snapshot(quote, currency) {
     items: quote.items.map(i => ({ name: i.product?.name || i.description || 'Item', description: i.description || '', quantity: i.quantity, unitPrice: i.unitPrice, discount: i.discount, total: i.total })) };
 }
 async function loadQuote(db, id) {
-  return db.quote.findFirst({ where: { id, deletedAt: null }, include: { items: { include: { product: { select: { name: true } } } }, account: { select: { name: true } }, contact: { select: { firstName: true, lastName: true } } } });
+  return db.quote.findFirst({ where: { id, deletedAt: null }, include: { items: { include: { product: { select: { id:true, name: true } } } }, account: { select: { id:true, name: true } }, contact: { select: { id:true, firstName: true, lastName: true } } } });
 }
 function pdf(data, receipt) {
+  const documentType=data.documentType || 'Quote';
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margins: { top: 48, right: 48, bottom: 80, left: 48 }, info: { Title: 'Quote ' + data.number, Author: 'Sales Nebula' }, bufferPages: true });
+    const doc = new PDFDocument({ size: 'A4', margins: { top: 48, right: 48, bottom: 80, left: 48 }, info: { Title: documentType + ' ' + data.number, Author: 'Sales Nebula' }, bufferPages: true });
     const chunks = []; doc.on('data', b => chunks.push(b)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
-    doc.font('Helvetica-Bold').fontSize(28).fillColor('#14233e').text('QUOTE');
+    doc.font('Helvetica-Bold').fontSize(28).fillColor('#14233e').text(documentType.toUpperCase());
     doc.fontSize(13).text(data.number).moveDown();
     doc.font('Helvetica').fontSize(10).fillColor('#334155').text('Issued: ' + data.date.slice(0, 10));
     if (data.validUntil) doc.text('Valid until: ' + data.validUntil.slice(0, 10));
@@ -48,7 +49,7 @@ function pdf(data, receipt) {
       // The footer sits below the content margin; prevent PDFKit from flowing it to a new page.
       const bottom = doc.page.margins.bottom;
       doc.page.margins.bottom = 0;
-      doc.fontSize(8).fillColor('#64748b').text('Quote ' + data.number + '   •   ' + (i + 1) + ' / ' + range.count, 48, 780, { width: 497, align: 'center', lineBreak: false });
+      doc.fontSize(8).fillColor('#64748b').text(documentType + ' ' + data.number + '   •   ' + (i + 1) + ' / ' + range.count, 48, 780, { width: 497, align: 'center', lineBreak: false });
       doc.page.margins.bottom = bottom;
     }
     doc.end();

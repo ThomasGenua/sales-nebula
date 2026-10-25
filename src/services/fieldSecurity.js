@@ -69,7 +69,7 @@ function checkRelations(model, args, rules) {
 
 // These tables contain denormalized copies, prose or JSON of CRM fields.
 // Until their projection is field-aware, restricted users cannot read them.
-const copies = new Set(['AuditLog', 'EventLog', 'DealHistory', 'DealStageHistory', 'Forecast', 'ForecastItem', 'ForecastSnapshot', 'SearchIndex', 'SearchIndexEntry', 'RecycleBin', 'RecycleBinEntry', 'RecycleBinItem', 'Notification', 'WorkflowLog', 'FlowRun', 'QuoteVersion']);
+const copies = new Set(['AuditLog', 'EventLog', 'DealHistory', 'DealStageHistory', 'Forecast', 'ForecastItem', 'ForecastSnapshot', 'SearchIndex', 'SearchIndexEntry', 'RecycleBin', 'RecycleBinEntry', 'RecycleBinItem', 'Notification', 'WorkflowLog', 'FlowRun', 'QuoteVersion','InvoicePayment','PaymentCheckout','SignatureRequest','CampaignDelivery','AccountPlaybook','DealRoomItem']);
 function secureClient(db) {
   return db.$extends({ name: 'fieldSecurity', query: {
     async $allOperations({ model, operation, args, query }) {

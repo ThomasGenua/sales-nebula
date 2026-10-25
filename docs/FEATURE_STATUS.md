@@ -20,6 +20,8 @@ Something can be missing in three ways:
 
 ## Works
 
+The revenue-workflow release adds multichannel cadences, computed fields and rollups, Stripe invoice payments, Gmail and Google Calendar, customer deal rooms with DocuSign, SMTP campaign queues, and account success playbooks. See [setup, permissions and limits](REVENUE_WORKFLOWS.md).
+
 The **Sales Operations** workspace adds daily meetings/unanswered mail, an
 account-wide timeline, deal coaching, renewal/expansion opportunities, pipeline
 field history, data-quality review, integration diagnostics and configuration
@@ -39,7 +41,7 @@ hosted sandboxes remain unavailable.
 | Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. The sequence editor supports steps, delays, templates, enrollment and delivery status; sequences send every 10 minutes with SMTP, supported merge fields, time-zone sending windows, stop-on-synced-reply, and unsubscribe links. Shared support mailboxes route incoming mail to cases or leads. Personal Outlook mailboxes sync Inbox and Sent Items, associate visible contacts/deals, and support private threaded replies. |
 | Sales workspace | My Day queues, atomic completion and follow-ups, a pipeline board with stage age and next actions, saved list views, and creation from related lists. See [setup and behavior](SALES_WORKSPACE.md). |
 | Webhooks | Outbound, signed with HMAC-SHA256, retried, with delivery logs. |
-| Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. Quotes have generated PDFs, expiring/revocable customer links, and version-checked online acceptance receipts. Invoice previews remain HTML. |
+| Quotes and invoices | Line items and totals, discounts, accept, invoice from a quote, convert to an order, versions. Quotes have generated PDFs, expiring/revocable customer links, and version-checked online acceptance receipts. Invoices now have PDF downloads, a partial-payment ledger and Stripe Checkout links. |
 | Forecasts | Built from the owner's open deals in the period and refreshed every 4 hours, which also adds the owner's deals that have come into the period since; quotas are entered by hand. |
 | Reports | The report builder supports columns, filters, grouping, measures, charts, shared definitions and drilldown into accessible records. The screen exports displayed rows or groups as CSV; the API exports detail rows as CSV or JSON. Sales performance uses actual deal history. |
 | Calendar, projects, SLA | Recurring events with invitees and an iCal feed; personal Outlook calendar delta sync, attendee/reminder updates, explicit publication and conflict handling; projects with a critical path; SLA timers that count business hours only. |
@@ -57,12 +59,12 @@ hosted sandboxes remain unavailable.
 | Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
 | Reports | Tabular, summary and chart reports, a report builder, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. The API export gives raw rows; the builder exports the displayed detail or summary. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
-| Campaigns | Planning, members, recipients, responses, ROI. Attribution models computed from the campaign touches you enter. | Bulk sending (501). Nothing creates touches from campaign members. |
+| Campaigns | Planning, members, recipients, responses, ROI; queued SMTP sends with suppression/unsubscribe, signed hard-bounce ingestion and FirstTouch rows for existing linked deals. | Automatic attribution for future deals; provider-specific bounce adapters; delivery retries. |
 | Import | CSV mapping, editable row preview, duplicate review/skip/update, per-row errors, and atomic custom values with each row. | Excel files; a whole-file rollback. |
 | Export | CSV and JSON. | Excel (asking for it is refused). Scheduled exports are saved and never run. |
 | Custom objects | Define objects and fields, and store records, through the API. | Fields and records can be edited on the screen; writes and imports validate types, required/unique values and custom-object lookups. Per-object permissions and report/automation integration remain unfinished. |
-| Custom fields (Studio) | Definitions, picklists, typed record forms, list equality filters, report fields/measures/exports, and import mapping. Required custom values are checked on their form and imports. | Formula and related-record types; required custom values on the standard create form. |
-| Formula fields | Evaluated on request (`/api/formulas/evaluate`). | Not computed on records; no cross-object references; no screen. |
+| Custom fields (Studio) | Definitions, picklists, typed record forms, list equality filters, report fields/measures/exports, and import mapping. Required custom values are checked on their form and imports. | Arbitrary related-record types; required custom values on the standard create form. |
+| Formula fields | Computed values on record custom-field sections, filters, reports and automation conditions; related rollups; Sales Operations editor. | Parent triggers on child changes; stored rollup history; arbitrary cross-object references. |
 | Sharing | Org-wide defaults, the role hierarchy, owner- and criteria-based rules, record shares. | `externalAccess`, `manual` rules and the `criteria` grant mode are saved and do nothing. |
 | Platform events | Published events are stored and sent to webhooks registered for `platform.<channel>`. | A subscription's own endpoint and secret are unused, and nothing in the app publishes events. |
 | Territories | A territory hierarchy; accounts mapped to territories by hand. | Rules run on account saves and can be previewed/applied from Territories. Territory models can only be listed. |
@@ -127,7 +129,6 @@ Saving these changes nothing:
 | Scheduled reports | `POST /api/reports/:id/schedule`; `POST /api/analytics/scheduled-reports` | `REPORT_DELIVERY_UNAVAILABLE` |
 | Integration sync schedules | `PUT /api/integrations/:id/schedule` | `INTEGRATION_SYNC_UNAVAILABLE` |
 | Quote approval shortcut | `POST /api/quotes/:id/submit-approval` (use an approval process) | `QUOTE_APPROVAL_UNAVAILABLE` |
-| Campaign sending | `POST /api/campaigns/:id/send` | `CAMPAIGN_DELIVERY_UNAVAILABLE` |
 | SSO sign-in | `POST /api/security/sso/login` | none; the error says so |
 | Integration sync and tests | `POST /api/integrations/:id/sync`, `/test` | none; the error says so |
 | Mail from other mailboxes | `POST /api/inbound-email/messages/:id/reply` and `POST /api/emails/send` naming a mailbox that is not Microsoft | none; the error says so |
@@ -136,7 +137,7 @@ Saving these changes nothing:
 
 ## Not built
 
-- Gmail mail sync and Google calendar sync. Personal Outlook email and calendar sync exist; email attachments, remote deletions and moves are not synchronized.
+- Email attachment downloads and provider push subscriptions. Personal Outlook and Gmail/Google Calendar sync exist; see their documented scope.
 - E-signature.
 - Slack or Teams.
 - Generated invoice PDFs. Quotes already have downloadable PDFs and versioned customer acceptance; invoices print from the browser.

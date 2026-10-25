@@ -21,7 +21,7 @@ async function checkAccount(db, account) {
   if (!user?.active || !permits({ user }, 'activities', 'edit') || !permits({ user }, 'emails', 'edit')) throw fail('Calendar owner no longer has the required access.', 403);
 }
 async function request(db, account, path, options = {}) { return withToken(db, account, accessToken => graph.graphFetch(path, { accessToken, headers: HEADERS, ...options })); }
-async function remoteEvent(db, account, id) { return request(db, account, '/me/events/' + encodeURIComponent(id)); }
+async function remoteEvent(db, account, id) { if(account.provider==='google')return require('./googleWorkspace').remoteEvent(db,account,id); return request(db, account, '/me/events/' + encodeURIComponent(id)); }
 async function importEvent(db, account, incoming, { force = false } = {}) {
   const link = await db.outlookEventLink.findUnique({ where: { accountId_remoteId: { accountId: account.id, remoteId: incoming.id } } });
   const event = link && await db.calendarEvent.findUnique({ where: { id: link.eventId }, include });
@@ -65,6 +65,7 @@ async function importEvent(db, account, incoming, { force = false } = {}) {
   }, { isolationLevel: 'Serializable' });
 }
 async function sync(db, account) {
+  if(account.provider==='google')return require('./googleWorkspace').syncCalendar(db,account);
   await checkAccount(db, account);
   const name = 'outlook-calendar:' + account.id, lease = await acquireLease(db, name, 5 * 60000);
   if (!lease) return { busy: true };
@@ -89,6 +90,7 @@ async function sync(db, account) {
   finally { await releaseLease(db, name, lease); }
 }
 async function publish(db, account, event) {
+  if(account.provider==='google')return require('./googleWorkspace').publishCalendar(db,account,event);
   await checkAccount(db, account);
   if (event.ownerId !== account.ownerId) throw fail('Only the meeting owner can publish it.', 403);
   if (event.isRecurring || event.parentEventId) throw fail('Manage recurring meetings in Outlook.');

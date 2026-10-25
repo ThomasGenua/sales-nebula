@@ -73,7 +73,7 @@ function lineItemFields(item, { discount = true } = {}) {
 // set: a plain value, never who owns or links to a record, its identity or
 // its timestamps. Those would let a rule hand records to someone else, and a
 // value that is an object would be a nested write into another table.
-const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById', 'pricingFingerprint', 'pricingUpdatedAt']);
+const PROTECTED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt', 'ownerId', 'assignedId', 'createdById', 'pricingFingerprint', 'pricingUpdatedAt', 'cadenceKey', 'remindersOwnerId', 'nextReminderAt', 'lastReminderError', 'remindersEnabled']);
 const VALUE_TYPES = { String: 'string', Int: 'number', Float: 'number', Decimal: 'number', Boolean: 'boolean' };
 
 /**
@@ -96,7 +96,7 @@ function editableFields(modelName, data) {
 function columnsFrom(modelName, body) {
   const source = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
   const { data } = pickModelFields(modelName, source);
-  for (const key of ['id', 'createdAt', 'updatedAt']) delete data[key];
+  for (const key of ['id', 'createdAt', 'updatedAt', 'cadenceKey', 'remindersOwnerId', 'nextReminderAt', 'lastReminderError', 'remindersEnabled']) delete data[key];
   return data;
 }
 

@@ -267,6 +267,13 @@ async function runWorkflows(prisma, { module: moduleName, trigger, record, oldRe
 
   for (const workflow of due) {
     try {
+      if ((workflow.conditions||[]).some(c=>c.field?.startsWith('custom.'))) {
+        record={...record};if(oldRecord)oldRecord={...oldRecord};
+        const rows=[record,...(oldRecord?[oldRecord]:[])];
+        const active=require('./fieldSecurity').context.getStore();
+        if(active?.req)await require('./customFields').hydrate(prisma,moduleName,rows);
+        else {const actor=userId&&await prisma.user.findFirst({where:{id:userId,active:true,isPortalUser:false},include:{role:{include:{permissions:true}}}});if(!actor)throw new Error('Computed workflow conditions require an active actor');const req={user:actor,userId:actor.id,app:{locals:{prisma}}};await require('./computedFields').forActor(prisma,req,moduleName,rows);}
+      }
       if (!evaluateConditions(workflow.conditions, record, oldRecord)) continue;
 
       const actionsRun = await runActions(prisma, workflow, { moduleName, modelName, record, userId });

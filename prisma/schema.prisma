@@ -269,6 +269,7 @@ model Account {
 }
 
 model Activity {
+  cadenceKey String? @unique
   recordTypeId String?
   leadId     String?
   @@index([leadId])
@@ -615,6 +616,11 @@ model QuoteItem {
 }
 
 model Invoice {
+  currency String @default("USD")
+  remindersEnabled Boolean @default(false)
+  remindersOwnerId String?
+  nextReminderAt DateTime?
+  lastReminderError String?
   recordTypeId String?
   id          String    @id @default(uuid())
   number      String    @unique
@@ -1243,6 +1249,7 @@ model ReportSchedule {
 // ═══════════════════════════════════════
 
 model FormulaField {
+  rollup Json?
   id         String   @id @default(uuid())
   name       String
   fieldKey   String   @unique
@@ -1370,6 +1377,9 @@ model EmailSequence {
 }
 
 model EmailSequenceEnrollment {
+  stepSnapshot Json?
+  lastOutcome String?
+  convertedAt DateTime?
   recipientEmail String?
   lastError   String?
   lastSentAt  DateTime?
@@ -5805,4 +5815,128 @@ model ForecastSnapshot {
   items Json
   createdAt DateTime @default(now())
   @@index([forecastId, createdAt])
+}
+
+model InvoicePayment {
+  id String @id @default(uuid())
+  invoiceId String
+  amountMinor Int
+  currency String
+  provider String
+  reference String @unique
+  createdById String?
+  createdAt DateTime @default(now())
+  @@index([invoiceId])
+}
+
+model PaymentCheckout {
+  id String @id @default(uuid())
+  invoiceId String
+  amountMinor Int
+  currency String
+  invoiceVersion DateTime
+  sessionId String? @unique
+  url String?
+  status String @default("Pending")
+  createdById String
+  createdAt DateTime @default(now())
+  @@index([invoiceId])
+}
+
+model DealRoom {
+  id String @id @default(uuid())
+  dealId String
+  name String
+  tokenHash String @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdById String
+  createdAt DateTime @default(now())
+  @@index([dealId])
+}
+
+model DealRoomItem {
+  id String @id @default(uuid())
+  roomId String
+  kind String
+  title String
+  body String?
+  url String?
+  dueDate DateTime?
+  completedAt DateTime?
+  author String
+  createdAt DateTime @default(now())
+  @@index([roomId, createdAt])
+}
+
+model SignatureRequest {
+  requestKey String @unique
+  id String @id @default(uuid())
+  roomId String
+  quoteId String
+  quoteVersion DateTime
+  envelopeId String? @unique
+  signerName String
+  signerEmail String
+  status String @default("Pending")
+  error String?
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([roomId])
+}
+
+model CampaignDelivery {
+  id String @id @default(uuid())
+  campaignId String
+  recipientKey String
+  contactId String?
+  leadId String?
+  email String
+  subject String
+  body String
+  status String @default("Queued")
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  sentAt DateTime?
+  error String?
+  messageId String? @unique
+  createdById String
+  createdAt DateTime @default(now())
+  @@unique([campaignId, recipientKey])
+  @@index([status, nextAttemptAt])
+}
+
+model SuccessPlaybook {
+  id String @id @default(uuid())
+  name String
+  milestones Json
+  healthRules Json
+  riskThreshold Int @default(50)
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+}
+
+model AccountPlaybook {
+  id String @id @default(uuid())
+  accountId String
+  playbookId String
+  ownerId String
+  definition Json
+  healthScore Int @default(100)
+  riskEpisode Int @default(0)
+  atRisk Boolean @default(false)
+  lastEvaluatedAt DateTime?
+  lastError String?
+  createdAt DateTime @default(now())
+  @@unique([accountId, playbookId])
+}
+
+model PlaybookMilestone {
+  id String @id @default(uuid())
+  enrollmentId String
+  title String
+  dueDate DateTime
+  completedAt DateTime?
+  activityId String? @unique
+  @@index([enrollmentId])
 }
