@@ -94,6 +94,14 @@ beforeEach(async () => {
   sendEmail.mockResolvedValue(delivered);
 });
 
+it('does not send after the enrolling owner is deactivated', async () => {
+  const { row } = await enroll();
+  await prisma.user.update({ where: { id: user.user.id }, data: { active: false } });
+  expect(await run()).toMatchObject({ sent: 0, errors: 1 });
+  expect(sendEmail).not.toHaveBeenCalled();
+  expect((await reload(row.id)).lastError).toMatch(/owner is unavailable/);
+});
+
 describe('with no SMTP server', () => {
   it('does nothing and says so: nothing is recorded as sent and no enrollment moves on', async () => {
     delete process.env.SMTP_HOST;
@@ -127,7 +135,7 @@ describe('a step that goes out', () => {
 
     expect(result).toMatchObject({ processed: 1, sent: 1, completed: 0, retrying: 0, bounced: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    expect(sendEmail).toHaveBeenCalledWith(prisma, expect.objectContaining({ to: 'prospect@example.test', subject: 'Hello', body: expect.stringContaining('one\n\nUnsubscribe: ') }));
+    expect(sendEmail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ to: 'prospect@example.test', subject: 'Hello', body: expect.stringContaining('one\n\nUnsubscribe: ') }));
     expect(sendEmail.mock.calls[0][1].headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
     const email = await prisma.email.findFirst();
     expect(email).toMatchObject({ subject: 'Hello', toEmail: 'prospect@example.test', status: 'sent', contactId: person.id });
@@ -158,7 +166,7 @@ describe('a step that goes out', () => {
 
     expect(await run()).toMatchObject({ sent: 1 });
 
-    expect(sendEmail).toHaveBeenCalledWith(prisma, expect.objectContaining({ to: 'lead@example.test' }));
+    expect(sendEmail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ to: 'lead@example.test' }));
     expect((await prisma.email.findFirst()).contactId).toBeNull();
   });
 
@@ -168,7 +176,7 @@ describe('a step that goes out', () => {
 
     await run();
 
-    expect(sendEmail).toHaveBeenCalledWith(prisma, expect.objectContaining({ to: 'prospect@example.test', subject: 'From the template', body: expect.stringContaining('template body\n\nUnsubscribe: ') }));
+    expect(sendEmail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ to: 'prospect@example.test', subject: 'From the template', body: expect.stringContaining('template body\n\nUnsubscribe: ') }));
   });
 });
 

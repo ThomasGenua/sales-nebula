@@ -165,6 +165,13 @@ async function processAll(prisma, isSuppressed) {
   const tally = { processed: due.length, sent: 0, completed: 0, retrying: 0, bounced: 0, errors: 0 };
   for (const enrollment of due) {
     try {
+      const model = enrollment.contactId ? 'contact' : 'lead';
+      const recipient = await prisma[model].findFirst({ where: { id: enrollment.contactId || enrollment.leadId || '', deletedAt: null }, select: { id: true } });
+      if (!recipient) {
+        await prisma.emailSequenceEnrollment.updateMany({ where: { id: enrollment.id, status: 'Active' }, data: { status: 'Bounced', nextSendAt: null, lastError: 'Recipient is no longer available.' } });
+        tally.bounced++;
+        continue;
+      }
       await require('./cadences').actor(prisma, enrollment, db => processEnrollment(db, enrollment, isSuppressed, tally));
     } catch (err) {
       // One enrollment's trouble does not stop the batch; it is claimed, so it comes round again in an hour.

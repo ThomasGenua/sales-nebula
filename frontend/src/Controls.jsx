@@ -72,7 +72,7 @@ export function TextArea({ label, value, onChange, rows = 3, placeholder, classN
     <label className={`block ${className}`}>
       {label && <span className="block text-xs font-medium text-[#7E8598] mb-1.5">{label}</span>}
       <textarea value={value || ""} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder} disabled={disabled}
-        aria-label={label ? undefined : placeholder}
+        aria-label={label || placeholder}
         className="w-full px-3 py-2.5 bg-[#0E1630] border border-[#182550] rounded-lg text-sm text-[#F0EDE5] placeholder-[#4A5168] focus:outline-none focus:border-[#F5A623] transition-colors resize-none" />
     </label>
   );
