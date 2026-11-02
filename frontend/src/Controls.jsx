@@ -79,7 +79,7 @@ export function TextArea({ label, value, onChange, rows = 3, placeholder, classN
 }
 
 // Modal: bottom sheet on mobile, centered on desktop
-export function Modal({ open, onClose, title, children, wide }) {
+export function Modal({ open, onClose, title, children, wide, footer }) {
   const panelRef = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -142,6 +142,7 @@ export function Modal({ open, onClose, title, children, wide }) {
           </button>
         </div>
         <div className="px-4 sm:px-6 py-4 overflow-y-auto flex-1 overscroll-contain">{children}</div>
+        {footer && <div className="px-4 sm:px-6 py-3 shrink-0 border-t border-[#182550]" style={{ paddingBottom: 'max(.75rem, env(safe-area-inset-bottom))' }}>{footer}</div>}
       </div>
       <style>{`
         @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }

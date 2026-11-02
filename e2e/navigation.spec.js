@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 
 // The sidebar lists only pages the role may open. Webhooks was shown to Sales
 // Reps, whose role has no settings access, and the page answered 403.

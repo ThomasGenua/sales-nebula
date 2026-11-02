@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 const unique = () => Math.random().toString(36).slice(2, 9);
 async function login(page, request, reader = false) {
   const email = reader ? 'pilot-reader@example.com' : 'pilot-admin@example.com';
@@ -50,7 +50,7 @@ test('report builder saves a shared definition and drills into actual records', 
 
 test('sequence editor saves steps, enrolls a contact, and pauses the sequence', async ({ page, request }) => {
   const headers = await login(page, request), suffix = unique(); const contact = await create(request, 'contacts', { firstName: 'Sequence', lastName: suffix, email: `sequence-${suffix}@example.test` }, headers);
-  await page.goto('/app/sequences'); await page.getByRole('button', { name: 'New sequence' }).click(); await page.getByLabel('Sequence name').fill(`Sequence ${suffix}`); await page.getByRole('button', { name: 'Add email step' }).click(); await page.getByLabel('Step 1 subject').fill(`Hello ${suffix}`); await page.getByLabel('Step 1 email body').fill('Following up on our conversation.'); await page.getByRole('button', { name: 'Save sequence', exact: true }).click(); await expect(page.getByText('Sequence saved.', { exact: true })).toBeVisible();
+  await page.goto('/app/sequences'); await page.getByRole('button', { name: 'New sequence' }).click(); await page.getByLabel('Sequence name').fill(`Sequence ${suffix}`); await page.getByRole('button', { name: 'Add cadence step' }).click(); await page.getByLabel('Step 1 subject').fill(`Hello ${suffix}`); await page.getByLabel('Step 1 email body').fill('Following up on our conversation.'); await page.getByRole('button', { name: 'Save sequence', exact: true }).click(); await expect(page.getByText('Sequence saved.', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Activate sequence' }).click(); await expect(page.getByRole('button', { name: 'Pause sequence' })).toBeVisible();
   await page.getByLabel('Search person').fill(suffix); const picker = page.getByRole('combobox', { name: 'Person', exact: true }); await expect(picker.locator(`option[value="${contact.id}"]`)).toBeAttached(); await picker.selectOption(contact.id); await page.getByRole('button', { name: 'Enroll selected people' }).click(); await expect(page.getByRole('button', { name: 'Stop enrollment' })).toBeVisible(); await page.getByRole('button', { name: 'Pause sequence' }).click(); await expect(page.getByRole('button', { name: 'Activate sequence' })).toBeVisible();
 });

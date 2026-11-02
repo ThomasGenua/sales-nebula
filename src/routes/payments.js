@@ -20,6 +20,7 @@ router.get('/:id', requirePermission('invoices', 'read'), async (req, res, next)
           id: req.params.id
         }
       });
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     res.json({
       ...(await service.balance(db, invoice)),
       checkouts: await db.paymentCheckout.findMany({
@@ -50,6 +51,7 @@ router.post('/:id/record', requirePermission('invoices', 'edit'), async (req, re
           id: req.params.id
         }
       });
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     res.json(await service.recordPayment(db, invoice.id, {
       amountMinor: service.minor(req.body.amount),
       currency: invoice.currency,
@@ -67,11 +69,13 @@ router.post('/:id/record', requirePermission('invoices', 'edit'), async (req, re
 router.post('/:id/checkout', requirePermission('invoices', 'edit'), async (req, res, next) => {
   try {
     const db = req.app.locals.prisma;
-    res.json(await service.checkout(db, await db.invoice.findUnique({
+    const invoice = await db.invoice.findUnique({
       where: {
         id: req.params.id
       }
-    }), req.userId, req.body.amount));
+    });
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(await service.checkout(db, invoice, req.userId, req.body.amount));
   } catch (e) {
     next(e);
   }

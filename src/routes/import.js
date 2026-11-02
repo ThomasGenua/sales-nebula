@@ -234,6 +234,7 @@ router.post('/execute', async (req, res, next) => {
                 const values = await custom.prepareValues(tx, module, customInput(mapped), existingId, { useDefaults: true });
                 await updateRecord(tx, module, existingId, data, { ...write, after, prisma });
                 await custom.saveValues(tx, values, existingId);
+                if (module === 'contacts') await require('../services/onboarding').milestone(tx, req.userId, 'firstImportAt');
               });
               await runAfter(after);
               results.updated++;

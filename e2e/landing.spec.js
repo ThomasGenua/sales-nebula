@@ -296,7 +296,7 @@ test('reviewers can inspect campaign conversion and performance cohorts', async 
     return route.fulfill({ json: { data: [], total: 0, invitations: [] } });
   });
   await page.goto('/app/accessRequests');
-  await page.locator('summary').filter({ hasText: 'Website conversion & performance' }).click();
+  await page.locator('summary').filter({ hasText: 'Website conversion, activation & performance' }).click();
   await expect(page.getByRole('table', { name: 'Acquisition sources' })).toContainText('newsletter / email');
   await expect(page.getByRole('table', { name: /Public-page performance/ })).toContainText('2100 ms (90)');
   await page.getByLabel('Measurement period').selectOption('7');

@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 
 // What does not work says so on its own page, and what works is wired up.
 const unique = () => Math.random().toString(36).slice(2, 10);

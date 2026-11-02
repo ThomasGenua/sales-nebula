@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 async function login(page, path = '/app/salesOperations') {
   await page.goto('/login');
   await page.getByLabel(/^Email/).fill('pilot-admin@example.com');

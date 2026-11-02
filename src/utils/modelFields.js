@@ -348,5 +348,5 @@ async function queryWithIncludes(prisma, delegate, method, args = {}) {
 
 module.exports = {
   pickModelFields, lineItemFields, plainFieldProblem, editableFields, columnsFrom, scalarWhere, scalarSelect, scalarOrderBy,
-  modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
+  findModel, modelHasField, resolveInclude, hydrateIncludes, looksLikeId, queryWithIncludes,
 };

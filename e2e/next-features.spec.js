@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 const unique = () => Math.random().toString(36).slice(2, 9);
 async function login(page, request) {
   const response = await request.post('/api/auth/login', { data: { email: 'pilot-admin@example.com', password: 'Pilot-admin-123!' } });
@@ -63,10 +63,10 @@ test('calendar creates a linked local meeting and explains Outlook configuration
   const headers = await login(page, request), suffix = unique();
   await create(request, 'sales-mail/accounts', { name: 'Test calendar ' + suffix }, headers);
   await page.goto('/app/calendar'); await page.getByText('Outlook meetings and calendar sync', { exact: true }).click();
-  const section = page.getByRole('region', { name: 'Outlook calendar', exact: true });
+  const section = page.getByRole('region', { name: 'Connected calendar', exact: true });
   await section.getByRole('button', { name: 'New meeting', exact: true }).click(); await section.getByLabel('Meeting title').fill('Planning ' + suffix); await section.getByLabel('Attendee emails (comma separated)').fill('customer@example.test');
-  await section.getByRole('button', { name: 'Save meeting locally' }).click(); await expect(section.getByText('Meeting saved locally. Publish to send invitations or updates through Outlook.')).toBeVisible();
-  await expect(section.getByRole('button', { name: 'Publish and send Outlook invitations' })).toBeDisabled();
+  await section.getByRole('button', { name: 'Save meeting locally' }).click(); await expect(section.getByRole('status')).toHaveText('Meeting saved locally. Publish to send invitations or updates through your calendar provider.');
+  await expect(section.getByRole('button', { name: 'Publish and send calendar invitations' })).toBeDisabled();
   await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: info.outputPath('outlook-calendar-mobile.png'), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true); expect(errors).toEqual([]);
 });

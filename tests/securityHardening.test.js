@@ -207,9 +207,9 @@ describe('Campaign delivery is unavailable', () => {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token)).send({});
-      expect(res.status).toBe(501);
-      expect(res.body.code).toBe('CAMPAIGN_DELIVERY_UNAVAILABLE');
-      expect(res.body.error).toMatch(/No messages were sent or queued/);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Provide a subject and message/);
+      expect(await prisma.campaignDelivery.count({ where: { campaignId: campaign.id } })).toBe(0);
       expect(res.body.delivery).toBeUndefined();
       // Includes campaign updatedAt, every recipient timestamp/status and the
       // full recipient list, so neither overwrites nor new rows pass unnoticed.
@@ -228,8 +228,9 @@ describe('Campaign delivery is unavailable', () => {
     const campaign = await prisma.campaign.create({ data: { name: 'Empty', status: 'Planned' } });
     const before = await snapshot(campaign.id);
     const res = await request(app).post(`/api/campaigns/${campaign.id}/send`).set(authHeader(user.token));
-    expect(res.status).toBe(501);
-    expect(res.body.code).toBe('CAMPAIGN_DELIVERY_UNAVAILABLE');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Provide a subject and message/);
+    expect(await prisma.campaignDelivery.count({ where: { campaignId: campaign.id } })).toBe(0);
     expect(await snapshot(campaign.id)).toEqual(before);
   });
 

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 
 const ThemeContext = createContext({
@@ -13,8 +13,12 @@ export function ThemeProvider({ children }) {
   const [theme, setThemeState] = useState('dark');
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    try { setThemeState(localStorage.getItem('sn_theme') === 'light' ? 'light' : 'dark'); } catch {}
-    setReady(true);
+    // A synchronous context update can interrupt a still-hydrating Suspense
+    // boundary on a busy device. The palette is already painted by the head script.
+    startTransition(() => {
+      try { setThemeState(localStorage.getItem('sn_theme') === 'light' ? 'light' : 'dark'); } catch {}
+      setReady(true);
+    });
   }, []);
 
   useEffect(() => {
@@ -33,8 +37,9 @@ export function ThemeProvider({ children }) {
     setThemeState((current) => (current === "light" ? "dark" : "light"));
   }, []);
 
+  const value = useMemo(() => ({ theme, toggleTheme, setTheme }), [theme, toggleTheme, setTheme]);
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );

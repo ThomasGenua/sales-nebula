@@ -96,6 +96,8 @@ router.get('/:id', async (req, res, next) => {
     const room = await roomFor(req, res);
     if (!room) return;
     const db = req.app.locals.prisma;
+    const visibleQuotes = permits(req, 'quotes', 'read') ? await db.quote.findMany({ where: await reachableWhere(req, 'quotes', 'quote', { dealId: room.dealId }), select: { id: true, updatedAt: true } }) : [];
+    const signatures = await db.signatureRequest.findMany({ where: { roomId: room.id, quoteId: { in: visibleQuotes.map(q => q.id) } }, orderBy: { createdAt: 'desc' } });
     res.json({
       room: {
         id: room.id,
@@ -112,23 +114,9 @@ router.get('/:id', async (req, res, next) => {
         },
         take: 500
       }),
-      signatures: permits(req, 'quotes', 'read') ? await db.signatureRequest.findMany({
-        where: {
-          roomId: room.id,
-          quoteId: {
-            in: (await db.quote.findMany({
-              where: await reachableWhere(req, 'quotes', 'quote'),
-              select: {
-                id: true
-              }
-            })).map(q => q.id)
-          }
-        },
-        orderBy: {
-          createdAt: 'desc'
-        }
-      }) : [],
-      docusignConfigured: !!require('../services/signatures').configured()
+      signatures: signatures.map(s => ({ ...s, quoteChanged: +visibleQuotes.find(q => q.id === s.quoteId)?.updatedAt !== +s.quoteVersion })),
+      docusignConfigured: !!require('../services/signatures').configured(),
+      signatureUpdatesConfigured: !!process.env.DOCUSIGN_CONNECT_HMAC_KEY
     });
   } catch (e) {
     next(e);
@@ -264,6 +252,16 @@ router.post('/:id/signatures/:signatureId/reconcile', requirePermission('deals',
   } catch (e) {
     next(e);
   }
+});
+router.post('/:id/signatures/:signatureId/recover', requirePermission('deals', 'edit'), requirePermission('quotes', 'edit'), async (req, res, next) => {
+  try {
+    const room = await roomFor(req, res, 'Edit');
+    if (!room) return;
+    const db = req.app.locals.prisma;
+    const row = await db.signatureRequest.findFirst({ where: { id: req.params.signatureId, roomId: room.id } });
+    if (!row || !await db.quote.findFirst({ where: await reachableWhere(req, 'quotes', 'quote', { id: row.quoteId }, 'Edit') })) return res.sendStatus(404);
+    res.json(await require('../services/signatures').recover(db, row, req.body.envelopeId));
+  } catch (e) { next(e); }
 });
 router.post('/:id/proposals', requirePermission('deals', 'edit'), requirePermission('quotes', 'edit'), async (req, res, next) => {
   try {

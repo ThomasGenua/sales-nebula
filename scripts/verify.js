@@ -22,6 +22,8 @@ try {
   // slower desktops enough time for setup, while still failing stalled checks.
   run('scripts/test.js', ['--forceExit', '--detectOpenHandles', '--testTimeout=90000'], { TEST_SCHEMA_READY: 'true', JWT_SECRET: 'local-verification-only-session-key-with-more-than-32-characters', SMTP_HOST: '', SMTP_USER: '', SMTP_PASS: '' });
   run(require('path').resolve('frontend/node_modules/vite/bin/vite.js'), ['build'], {}, require('path').resolve('frontend'));
+  run('scripts/prerender.mjs', [], {}, require('path').resolve('frontend'));
+  run(require.resolve('@playwright/test/cli'), ['test', '--config', 'playwright.landing.config.js']);
   run(require.resolve('@playwright/test/cli'), ['test']);
   console.log('\nAll verification checks passed.');
 } catch (err) { console.error(err.message); process.exitCode = 1; }

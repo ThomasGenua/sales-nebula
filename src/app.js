@@ -121,6 +121,12 @@ function createApp(rawPrisma, options = {}) {
   }));
 
   // ─── BODY PARSING (with size limits) ───
+  app.post('/api/public/docusign/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res, next) => {
+    try {
+      const events = require('./services/signatureEvents');
+      res.set('Cache-Control', 'no-store').json(await events.receive(rawPrisma, events.verify(req.body, req.headers)));
+    } catch (e) { next(e); }
+  });
   // One parser per request, chosen by path: 1MB by default, more where a
   // route needs it. The larger parsers used to sit on their mounts, after
   // this one, which had already answered 413 past 1MB, so they never applied.
@@ -200,6 +206,7 @@ function createApp(rawPrisma, options = {}) {
   app.use('/api/signup', require('./routes/signup'));
   app.use('/api/marketing', require('./routes/marketing'));
   app.use('/api/oauth', require('./routes/oauth'));
+  app.use('/api/onboarding', require('./routes/onboarding'));
 
   // Public web-to-lead form submission (no auth required)
   app.post('/api/public/web-to-lead', async (req, res, next) => {

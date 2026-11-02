@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 
 const unique = () => Math.random().toString(36).slice(2, 8);
 async function adminHeaders(request) {

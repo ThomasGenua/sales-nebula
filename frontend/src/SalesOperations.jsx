@@ -7,6 +7,7 @@ import { Button, Input, Select, TextArea } from './Controls';
 import { RecordPicker } from './SalesWorkflows';
 import { MyDayPage, panel, Problem, Pager, dateLabel, nameOf } from './SalesWorkspace';
 import { money } from './prefs';
+import IntegrationGuide from './IntegrationGuide';
 
 function useLoad(path, revision = 0) {
   const { apiFetch } = useAuth();
@@ -138,12 +139,13 @@ function Quality() {
     </section>}
   </div>;
 }
-function Integrations() {
+function Integrations({ selectTab }) {
   const { apiFetch, user, demoMode } = useAuth();
   const [revision, setRevision] = useState(0), [error, setError] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
   const loaded = useLoad('/sales-operations/integrations', revision);
   const act = async path => { setBusy(true); setError(''); setMessage(''); try { await apiFetch(path, { method: 'POST', body: {} }); setMessage(path.includes('retry') ? 'Delivery queued. Refresh to see its outcome.' : 'Sync completed.'); setRevision(n => n + 1); } catch (e) { setError(e.message); } finally { setBusy(false); } };
   return <div className="space-y-3"><Button variant="secondary" onClick={() => setRevision(n => n + 1)}>Refresh status</Button><LoadState {...loaded} /><Problem message={error} />{message && <p role="status">{message}</p>}<p>{loaded.data?.note}</p>
+    <IntegrationGuide data={loaded.data} refresh={() => setRevision(n => n + 1)} selectTab={selectTab} />
     {loaded.data?.mailboxes.map(m => <section className={panel} key={m.id}><h2 className="font-bold">{m.name} · {m.status}</h2><p>Mail sync: {m.lastPolledAt ? new Date(m.lastPolledAt).toLocaleString() : 'Never'}</p><Problem message={m.lastError || m.calendarError} />
       {can(user, 'emails', 'edit') && <Button disabled={demoMode || busy} onClick={() => act(`/sales-mail/accounts/${m.id}/sync`)}>Retry mail sync</Button>}
       {m.calendarEnabled && <><p>Calendar sync: {m.calendarLastSyncedAt ? new Date(m.calendarLastSyncedAt).toLocaleString() : 'Never'}</p>{can(user, 'activities', 'edit') && can(user, 'emails', 'edit') && <Button variant="secondary" disabled={demoMode || busy} onClick={() => act(`/outlook-calendar/${m.id}/sync`)}>Retry calendar sync</Button>}</>}
@@ -189,5 +191,5 @@ export function SalesOperationsPage() {
     ['configuration', 'Configuration versions', Configuration, can(user, 'admin', 'full')],
   ].filter(t => t[3]);
   const [tab, setTab] = useState('daily'), Component = tabs.find(t => t[0] === tab)?.[2] || Daily;
-  return <div className="space-y-5"><h1 className="text-2xl font-bold">Sales Operations</h1><nav aria-label="Sales operations" className="flex flex-wrap gap-2">{tabs.map(([id, title]) => <Button key={id} variant={id === tab ? 'primary' : 'secondary'} onClick={() => setTab(id)}>{title}</Button>)}</nav><Component /></div>;
+  return <div className="space-y-5"><h1 className="text-2xl font-bold">Sales Operations</h1><nav aria-label="Sales operations" className="flex flex-wrap gap-2">{tabs.map(([id, title]) => <Button key={id} variant={id === tab ? 'primary' : 'secondary'} onClick={() => setTab(id)}>{title}</Button>)}</nav><Component selectTab={setTab} /></div>;
 }

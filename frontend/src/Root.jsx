@@ -38,7 +38,7 @@ export default function Root({ initialPath = '/' }) {
   else if (path === '/access-status') page = <AccessStatusPage go={go} />;
   else if (path === '/reset-password') page = <ResetPasswordPage go={go} />;
   else if (path === '/demo') page = <App go={go} startOnDemo />;
-  else if (path === '/login' || path === '/oauth/authorize' || path === '/app' || path.startsWith('/app/')) page = <App go={go} startOnLogin={path === '/login'} />;
+  else if (path === '/login' || path === '/oauth/callback' || path === '/oauth/authorize' || path === '/app' || path.startsWith('/app/')) page = <App go={go} startOnLogin={path === '/login' || path === '/oauth/callback'} />;
   else page = <main className="sn-site sn-status-page"><div className="sn-site-container"><h1>Page not found.</h1><p>Let’s get you back to your next move.</p><a className="sn-site-button" href="/">Back to Sales Nebula</a></div></main>;
   return <ErrorBoundary resetKey={path}><Suspense fallback={<div aria-busy="true" style={{ minHeight: '100vh' }} />}>{page}</Suspense></ErrorBoundary>;
 }

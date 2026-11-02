@@ -3,7 +3,8 @@ import React from "react";
 const FEATURES = {
   campaigns: {
     title: "Campaign email delivery",
-    description: "Use campaigns to plan work and record results. Bulk email sending and automatic engagement tracking are unavailable. Individual emails can be sent from contacts, deals or Emails when email delivery is configured.",
+    status: "Available with SMTP",
+    description: "Campaign delivery queues personalized messages for accessible recipients, respects suppression and unsubscribe preferences, and records delivery outcomes. Configure SMTP and the scheduled worker first. Automatic open and click tracking is unavailable.",
   },
   integrations: {
     title: "Third-party synchronization",
@@ -16,7 +17,7 @@ const FEATURES = {
   flows: {
     title: "Running flows",
     status: "Available",
-    description: "Record-triggered and manual flows support branches, waits, field updates, activities, notifications, execution history and retries. Screen flows and scheduled starts are not supported.",
+    description: "Record-triggered, manual and scheduled flows support branches, waits, field updates, activities, notifications, execution history and retries. Screen flows are not supported.",
   },
   aiAgents: {
     title: "Running AI agents",

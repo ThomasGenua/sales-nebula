@@ -35,6 +35,7 @@ const DIRECT = [
  * Anything else writes one of these modules' records past their rules.
  */
 const ALLOWED = {
+  'src/services/invoiceReminders.js': { named: 3, why: 'atomic reminder scheduling claim and delivery diagnostics only; never invoice amounts, payment status or business fields' },
   'src/services/workflowEngine.js': { named: 1, why: "a rule's createActivity action; field updates now use the central write path with recursive workflows disabled" },
   'src/routes/configurationPackages.js': { dynamic: 2, why: "allowlisted workflow and validation-rule configuration tables only; never customer record modules" },
   'src/services/dataErasure.js': { dynamic: 1, why: 'erasing a data subject: no rule, workflow or webhook may see or keep what is being erased' },
@@ -470,7 +471,7 @@ describe('Quotes, invoices, projects and prospects, which have routers of their 
   });
 
   test('paying an invoice runs the status rules on invoices', async () => {
-    const invoice = (await post('/api/invoices', { status: 'Sent' })).body;
+    const invoice = (await post('/api/invoices', { status: 'Sent', subtotal: 100, total: 100 })).body;
     const onPaid = await ruleOn('invoices', 'statusChange', [{ field: 'status', operator: 'changedTo', value: 'Paid' }]);
 
     const res = await post(`/api/invoices/${invoice.id}/pay`, {});
