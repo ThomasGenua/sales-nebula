@@ -8,17 +8,22 @@ const ThemeContext = createContext({
 });
 
 export function ThemeProvider({ children }) {
-  const [theme, setThemeState] = useState(() => {
-    if (typeof window === "undefined") return "dark";
-    return window.localStorage.getItem("sn_theme") === "light" ? "light" : "dark";
-  });
+  // Match prerendered markup on the first render. The head script already
+  // applies the saved palette before paint; hydrate the controls afterwards.
+  const [theme, setThemeState] = useState('dark');
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    try { setThemeState(localStorage.getItem('sn_theme') === 'light' ? 'light' : 'dark'); } catch {}
+    setReady(true);
+  }, []);
 
   useEffect(() => {
+    if (!ready) return;
     document.documentElement.setAttribute("data-theme", theme);
-    window.localStorage.setItem("sn_theme", theme);
+    try { window.localStorage.setItem("sn_theme", theme); } catch {}
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", theme === "light" ? "#F4F1E8" : "#060B1A");
-  }, [theme]);
+  }, [theme, ready]);
 
   const setTheme = useCallback((next) => {
     setThemeState(next === "light" ? "light" : "dark");

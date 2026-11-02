@@ -31,6 +31,7 @@
     "test:e2e": "playwright test",
     "test:landing": "npm --prefix frontend run build && playwright test --config playwright.landing.config.js",
     "render:social": "node scripts/render-social.js",
+    "capture:product": "node scripts/capture-product.js",
     "verify": "node scripts/verify.js",
     "backup": "node scripts/backup.js"
   },

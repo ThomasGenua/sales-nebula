@@ -494,6 +494,7 @@ const handlers = {
   async cleanupEventLogs() {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
     const deleted = await prisma.eventLog.deleteMany({ where: { timestamp: { lt: cutoff } } });
+    await require('../services/marketing').cleanup(prisma);
     return { deleted: deleted.count };
   },
 

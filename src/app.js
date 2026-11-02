@@ -198,6 +198,7 @@ function createApp(rawPrisma, options = {}) {
   // ─── PUBLIC ROUTES ───
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/signup', require('./routes/signup'));
+  app.use('/api/marketing', require('./routes/marketing'));
   app.use('/api/oauth', require('./routes/oauth'));
 
   // Public web-to-lead form submission (no auth required)
@@ -417,23 +418,7 @@ function createApp(rawPrisma, options = {}) {
   // /terms, and /reset-password resolve. Without the fallback, a visitor
   // who follows an emailed link lands on a JSON 404 instead of the app.
   if (fs.existsSync(path.join(spaDir, 'index.html'))) {
-    app.use(express.static(spaDir, {
-      index: false,
-      setHeaders: (res, filePath) => {
-        // Fingerprinted assets are immutable; the shell must never be cached
-        if (filePath.includes(`${path.sep}assets${path.sep}`)) {
-          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        } else {
-          res.setHeader('Cache-Control', 'no-cache');
-        }
-      },
-    }));
-
-    app.get(/^\/(?!api\/|uploads\/).*/, (req, res, next) => {
-      if (req.method !== 'GET') return next();
-      res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.join(spaDir, 'index.html'));
-    });
+    app.use(require('./middleware/publicSite')(spaDir));
   } else {
     // The package ships source, not a build. Without this a visitor gets a
     // bare Express 404 at "/" and no clue why, so say what to run instead.

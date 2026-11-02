@@ -6,11 +6,14 @@ const { wantsCookieSession, setSessionCookies } = require('../utils/sessionCooki
 const { auditMiddleware } = require('../middleware/audit');
 const { createLimiter } = require('../middleware/rateLimit');
 const { alertReviewers } = require('../services/accessRequestAlerts');
+const accessStatus = require('../services/accessStatus');
+const marketing = require('../services/marketing');
 const {
   sendVerificationEmail,
   sendInviteEmail,
   sendWelcomeEmail,
   appBaseUrl,
+  sendMail,
 } = require('../utils/mail');
 
 const router = Router();
@@ -137,7 +140,8 @@ router.post('/', signupLimiter, async (req, res, next) => {
           email: clean, firstName, lastName, company, companySize, role, phone, useCase,
           interestedIn: interestedIn || 'cloud',
           verifyTokenHash: hash, verifyExpiresAt: expiresAt,
-          source: source || 'landing', utmSource, utmCampaign,
+          source: source || 'landing', ...await marketing.attribution(prisma,
+            req.headers.dnt === '1' || req.headers['sec-gpc'] === '1' || process.env.MARKETING_ANALYTICS_ENABLED === 'false' ? {} : req.body),
           ipAddress: (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim().slice(0, 45),
           userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
         },
@@ -179,6 +183,7 @@ router.post('/verify', verifyLimiter, async (req, res, next) => {
       // not echoed back; whoever holds the token only learns where it stands.
       return res.json({
         verified: true, alreadyVerified: true,
+        statusToken: accessStatus.issue(request),
         message: request.status === 'Approved'
           ? 'Your request was approved. Check your inbox for your invitation.'
           : 'Your email is already confirmed. We will be in touch once your account is ready.',
@@ -202,6 +207,7 @@ router.post('/verify', verifyLimiter, async (req, res, next) => {
 
     res.json({
       verified: true, email: updated.email,
+      statusToken: accessStatus.issue(updated),
       message: 'Email confirmed. Your request is queued for review and you will receive an invite once it is approved.',
     });
   } catch (err) { next(err); }
@@ -236,6 +242,36 @@ router.post('/resend', signupLimiter, async (req, res, next) => {
     }
     res.status(202).json(payload);
   } catch (err) { next(err); }
+});
+
+// Status is never looked up by an email supplied by an unauthenticated visitor.
+// A short-lived proof is delivered only after verification or to the mailbox.
+router.post('/status', verifyLimiter, async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    const row = await accessStatus.lookup(req.app.locals.prisma, req.body.token);
+    if (!row) return res.status(401).json({ error: 'This status link is invalid or expired. Request a new link by email.' });
+    const invite = row.status === 'Approved' ? await req.app.locals.prisma.userInvite.findFirst({
+      where: { signupRequestId: row.id }, orderBy: { createdAt: 'desc' }, select: { status: true, expiresAt: true },
+    }) : null;
+    res.json({ status: row.status, verified: !!row.verifiedAt, requestedAt: row.createdAt,
+      invite: invite ? { status: invite.status, expired: invite.expiresAt < new Date(), expiresAt: invite.expiresAt } : null });
+  } catch (error) { next(error); }
+});
+
+router.post('/status/link', signupLimiter, async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!isValidEmail(email)) return res.status(400).json({ error: 'Enter a valid email address' });
+    const row = await req.app.locals.prisma.signupRequest.findFirst({ where: { email }, orderBy: { createdAt: 'desc' } });
+    if (row) {
+      const statusUrl = `${publicOrigin()}/access-status#token=${accessStatus.issue(row)}`;
+      await sendMail({ to: email, subject: 'Your Sales Nebula access request',
+        text: `View the status of your Sales Nebula access request:\n${statusUrl}\n\nThis private link expires in 7 days. It does not grant access to a workspace. If you did not ask for this email, you can ignore it.` });
+    }
+    res.status(202).json({ accepted: true, message: 'If an access request exists for this email, a private status link is on its way. Check your inbox and spam folder.' });
+  } catch (error) { next(error); }
 });
 
 // ── ADMIN REVIEW ──────────────────────────────────────────────────────

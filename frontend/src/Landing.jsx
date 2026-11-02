@@ -6,13 +6,16 @@ import {
   Target, Users, X,
 } from "lucide-react";
 import { BrandMark, ThemeToggle } from "./theme";
+import { ResendVerification } from './AccessFollowThrough';
+import { attribution, flushVisit, track } from './marketing';
+import { WalkthroughPreview } from "./PublicPages";
 import "./Landing.css";
 
 const REPO = "https://github.com/ThomasGenua/sales-nebula";
-const links = [["Product", "product"], ["Workflow", "workflow"], ["Integrations", "integrations"], ["FAQ", "faq"]];
+const links = [["Product", "/#product"], ["Walkthrough", "/tour"], ["Hosting", "/hosting"], ["FAQ", "/#faq"]];
 
 // Normal anchors retain browser history, modifier-click and deep-link behavior.
-function PageLink({ go, href, children, ...props }) {
+export function PageLink({ go, href, children, ...props }) {
   return <a href={href} {...props} onClick={(event) => {
     if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -20,7 +23,7 @@ function PageLink({ go, href, children, ...props }) {
   }}>{children}</a>;
 }
 
-function Header({ go }) {
+export function Header({ go }) {
   const [open, setOpen] = useState(false);
   const toggle = useRef(null);
   const header = useRef(null);
@@ -48,12 +51,12 @@ function Header({ go }) {
     <div className="sn-site-container sn-site-nav">
       <a href="/" className="sn-site-brand" aria-label="Sales Nebula home"><BrandMark size={34} alt="" />Sales Nebula<span className="sn-brand-dot">.</span></a>
       <nav aria-label="Main navigation" className="sn-site-desktop-nav">
-        {links.map(([label, id]) => <a key={id} href={`#${id}`}>{label}</a>)}
+        {links.map(([label, id]) => <a key={id} href={id}>{label}</a>)}
       </nav>
       <div className="sn-site-nav-actions">
         <ThemeToggle compact />
         <PageLink go={go} href="/login" className="sn-site-sign-in">Log in <ArrowUpRight size={14} aria-hidden="true" /></PageLink>
-        <a href="#access" className="sn-site-button sn-site-button-small">Request access <ArrowRight size={16} aria-hidden="true" /></a>
+        <a href="/#access" className="sn-site-button sn-site-button-small">Request access <ArrowRight size={16} aria-hidden="true" /></a>
         <button ref={toggle} type="button" className="sn-site-menu-toggle" aria-label={open ? "Close menu" : "Open menu"} aria-expanded={open} aria-controls="sn-mobile-menu" onClick={() => setOpen(!open)}>
           {open ? <X size={22} /> : <Menu size={22} />}
         </button>
@@ -62,9 +65,9 @@ function Header({ go }) {
     <nav id="sn-mobile-menu" className="sn-site-mobile-nav" aria-label="Mobile navigation" hidden={!open} onBlur={(event) => {
       if (event.relatedTarget && !header.current?.contains(event.relatedTarget)) setOpen(false);
     }}>
-      {links.map(([label, id]) => <a key={id} href={`#${id}`} onClick={() => setOpen(false)}>{label}<ArrowUpRight size={16} aria-hidden="true" /></a>)}
+      {links.map(([label, id]) => <a key={id} href={id} onClick={() => setOpen(false)}>{label}<ArrowUpRight size={16} aria-hidden="true" /></a>)}
       <PageLink go={go} href="/login">Log in <ArrowUpRight size={16} aria-hidden="true" /></PageLink>
-      <a href="#access" className="sn-site-button" onClick={() => setOpen(false)}>Request access <ArrowRight size={16} aria-hidden="true" /></a>
+      <a href="/#access" className="sn-site-button" onClick={() => setOpen(false)}>Request access <ArrowRight size={16} aria-hidden="true" /></a>
     </nav>
   </header>;
 }
@@ -173,7 +176,7 @@ function Hero({ go }) {
         <a className="sn-release-link" href="#workflow"><span>MEET YOUR NEXT CRM</span><ArrowUpRight size={14} aria-hidden="true" /></a>
         <h1 id="hero-title">Keep your<br /> next win<br /> <span>in sight.</span><svg className="sn-hero-spark" viewBox="0 0 60 60" aria-hidden="true"><path d="M30 4v52M4 30h52M12 12l36 36M12 48l36-36" /></svg></h1>
         <p className="sn-hero-description">A connected home for your pipeline, your people, and everything that happens after “yes.” Meet the CRM that keeps the whole relationship in view.</p>
-        <div className="sn-hero-actions"><a href="#access" className="sn-site-button">Request access <ArrowRight size={18} aria-hidden="true" /></a><PageLink go={go} href="/login" className="sn-site-button sn-site-button-outline"><Play size={15} aria-hidden="true" />Explore the demo</PageLink></div>
+        <div className="sn-hero-actions"><a href="/#access" className="sn-site-button">Request access <ArrowRight size={18} aria-hidden="true" /></a><PageLink go={go} href="/demo" className="sn-site-button sn-site-button-outline"><Play size={15} aria-hidden="true" />Explore the demo</PageLink></div>
         <p className="sn-hero-assurance"><Check size={14} aria-hidden="true" />Free browser demo <span>·</span> Sample data. No signup.</p>
       </div>
       <ProductPreview />
@@ -229,7 +232,7 @@ function Ownership() {
 }
 
 const questions = [
-  ["Can I try it before requesting access?", "Yes. Choose Explore the demo, then Use demo access on the sign-in page and sign in. The read-only demo runs in your browser with sample records. You do not need to create an account or enter payment details."],
+  ["Can I try it before requesting access?", "Yes. Choose Explore the demo to open a guided tour immediately. The read-only demo runs in your browser with sample records. You do not need to create an account or enter payment details."],
   ["What happens after I request access?", "You’ll receive an email to verify your address. After verification, your request goes to an administrator for review. If approved, you’ll receive an invitation to create your account. Submitting a request does not immediately grant access."],
   ["Can we run Sales Nebula ourselves?", "Yes. Sales Nebula supports self-hosting with Docker or a Node.js and PostgreSQL deployment. Each installation serves one company. Your team manages hosting, backups, upgrades, and any connected provider accounts."],
   ["Can we bring our existing CRM data?", "You can import CSV files with field mapping, a row preview, and duplicate review. Start with a small sample to check your mapping before importing the rest. Spreadsheet files should be exported to CSV first."],
@@ -250,6 +253,7 @@ function AccessForm({ go }) {
   const pending = useRef(false);
   const abort = useRef(null);
   const set = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
+  useEffect(() => { const preference = new URLSearchParams(location.search).get("hosting"); if (["cloud", "self-hosted", "both"].includes(preference)) setForm(value => ({ ...value, interestedIn: preference })); }, []);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => { if (state === "sent" || state === "error") feedback.current?.focus(); }, [state]);
 
@@ -261,7 +265,8 @@ function AccessForm({ go }) {
     const controller = new AbortController(); abort.current = controller;
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await fetch("/api/signup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, email: form.email.trim(), source: "landing" }), signal: controller.signal });
+      await flushVisit();
+      const response = await fetch("/api/signup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, ...attribution(), email: form.email.trim(), source: "landing" }), signal: controller.signal });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || (response.status === 429 ? "Too many requests. Please wait a few minutes before trying again." : "We couldn’t submit your request. Please try again."));
       if (!data.accepted) throw new Error("The server returned an unexpected response. Please try again.");
@@ -279,9 +284,9 @@ function AccessForm({ go }) {
     }
   }
 
-  return <section id="access" className="sn-site-section sn-access-section" aria-labelledby="access-title"><div className="sn-site-container sn-access-layout"><div className="sn-access-copy"><p className="sn-eyebrow">YOUR NEXT CHAPTER STARTS HERE</p><h2 id="access-title">Bring your<br />next win<br /><span>a little closer.</span></h2><p>Tell us a little about your team. We’ll review your request and help you take the next step.</p><ol className="sn-access-steps"><li><span>01</span>Request access</li><li><span>02</span>Verify your email</li><li><span>03</span>Receive an invite after approval</li></ol><p className="sn-access-demo">Just looking around? <PageLink go={go} href="/login">Explore the demo <ArrowUpRight size={14} aria-hidden="true" /></PageLink></p></div>
-      <div className="sn-access-card">{state === "sent" ? <div className="sn-form-success" ref={feedback} tabIndex={-1} role="status"><span className="sn-success-icon"><Mail size={28} aria-hidden="true" /></span><h3>Check your inbox.</h3><p>{message}</p><p>Once your email is verified, an administrator will review your request.</p>{devLink && <a href={devLink}>Development link: verify now</a>}<PageLink go={go} href="/login" className="sn-site-button sn-site-button-outline">Explore the demo <ArrowRight size={17} aria-hidden="true" /></PageLink></div> : <form onSubmit={submit} aria-label="Request access" aria-busy={state === "sending"}>
-        <h3>Let’s meet your team.</h3><p className="sn-form-help">Only your work email is required.</p>
+  return <section id="access" className="sn-site-section sn-access-section" aria-labelledby="access-title"><div className="sn-site-container sn-access-layout"><div className="sn-access-copy"><p className="sn-eyebrow">YOUR NEXT CHAPTER STARTS HERE</p><h2 id="access-title">Bring your<br />next win<br /><span>a little closer.</span></h2><p>Tell us a little about your team. We’ll review your request and help you take the next step.</p><ol className="sn-access-steps"><li><span>01</span>Request access</li><li><span>02</span>Verify your email</li><li><span>03</span>Receive an invite after approval</li></ol><p className="sn-access-demo">Just looking around? <PageLink go={go} href="/demo">Explore the demo <ArrowUpRight size={14} aria-hidden="true" /></PageLink></p></div>
+      <div className="sn-access-card">{state === "sent" ? <div className="sn-form-success" ref={feedback} tabIndex={-1} role="status"><span className="sn-success-icon"><Mail size={28} aria-hidden="true" /></span><h3>Check your inbox.</h3><p>{message}</p><p>Once your email is verified, an administrator will review your request.</p><ResendVerification email={form.email} /><PageLink go={go} href="/access-status" className="sn-text-link">Check your request status →</PageLink>{devLink && <a href={devLink}>Development link: verify now</a>}<PageLink go={go} href="/demo" className="sn-site-button sn-site-button-outline">Explore the demo <ArrowRight size={17} aria-hidden="true" /></PageLink></div> : <form onSubmit={submit} onFocus={() => track("form_start")} aria-label="Request access" aria-busy={state === "sending"}>
+        <noscript><p>Enable JavaScript to submit a request and use the interactive demo.</p></noscript><h3>Let’s meet your team.</h3><p className="sn-form-help">Only your work email is required.</p>
         {state === "error" && <div className="sn-form-error" role="alert" tabIndex={-1} ref={feedback}>{message}</div>}
         <fieldset disabled={state === "sending"}>
           <div className="sn-field-row"><label htmlFor="fn">First name<input id="fn" name="firstName" autoComplete="given-name" maxLength={100} value={form.firstName} onChange={set("firstName")} /></label><label htmlFor="ln">Last name<input id="ln" name="lastName" autoComplete="family-name" maxLength={100} value={form.lastName} onChange={set("lastName")} /></label></div>
@@ -295,8 +300,8 @@ function AccessForm({ go }) {
     </div></section>;
 }
 
-function Footer({ go }) {
-  return <footer className="sn-site-footer"><div className="sn-site-container"><div className="sn-footer-main"><div><a href="/" className="sn-site-brand"><BrandMark size={30} alt="" />Sales Nebula<span className="sn-brand-dot">.</span></a><p>A clearer view. A stronger relationship.</p></div><nav aria-label="Footer navigation"><a href="#product">Product</a><a href="#integrations">Integrations</a><a href={REPO} target="_blank" rel="noopener noreferrer">GitHub <ArrowUpRight size={13} aria-hidden="true" /></a><PageLink go={go} href="/login">Log in</PageLink></nav></div><div className="sn-footer-bottom"><span>© {new Date().getFullYear()} Sales Nebula</span><span>Built for the whole relationship.</span><div><PageLink go={go} href="/privacy">Privacy</PageLink><PageLink go={go} href="/terms">Terms</PageLink></div></div></div></footer>;
+export function Footer({ go }) {
+  return <footer className="sn-site-footer"><div className="sn-site-container"><div className="sn-footer-main"><div><a href="/" className="sn-site-brand"><BrandMark size={30} alt="" />Sales Nebula<span className="sn-brand-dot">.</span></a><p>A clearer view. A stronger relationship.</p></div><nav aria-label="Footer navigation"><a href="/#product">Product</a><a href="/#integrations">Integrations</a><a href={REPO} target="_blank" rel="noopener noreferrer">GitHub <ArrowUpRight size={13} aria-hidden="true" /></a><PageLink go={go} href="/tour">Walkthrough</PageLink><PageLink go={go} href="/hosting">Hosting</PageLink><PageLink go={go} href="/access-status">Request status</PageLink><PageLink go={go} href="/login">Log in</PageLink></nav></div><div className="sn-footer-bottom"><span>© {new Date().getFullYear()} Sales Nebula</span><span>Built for the whole relationship.</span><div><PageLink go={go} href="/privacy">Privacy</PageLink><PageLink go={go} href="/terms">Terms</PageLink></div></div></div></footer>;
 }
 
 export default function Landing({ go }) {
@@ -306,5 +311,5 @@ export default function Landing({ go }) {
     const frame = window.requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: "instant", block: "start" }));
     return () => window.cancelAnimationFrame(frame);
   }, []);
-  return <div className="sn-site"><a className="sn-site-skip" href="#main-content">Skip to content</a><Header go={go} /><main id="main-content" tabIndex={-1}><Hero go={go} /><Workflow /><Integrations /><Ownership /><FAQ /><AccessForm go={go} /></main><Footer go={go} /></div>;
+  return <div className="sn-site"><a className="sn-site-skip" href="#main-content">Skip to content</a><Header go={go} /><main id="main-content" tabIndex={-1}><Hero go={go} /><WalkthroughPreview go={go} /><Workflow /><Integrations /><Ownership /><FAQ /><AccessForm go={go} /></main><Footer go={go} /></div>;
 }

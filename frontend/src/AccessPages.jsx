@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
+import { rememberStatus, ResendVerification } from './AccessFollowThrough';
+import './Landing.css';
 
 const C = {
   void: "var(--sn-void)", panel: "var(--sn-panel)", raised: "var(--sn-raised)",
@@ -34,6 +36,7 @@ export function VerifyPage({ go }) {
           setMessage(data.error || "That verification link is not valid.");
           return;
         }
+        if (data.statusToken) rememberStatus(data.statusToken);
         setState("done");
         setMessage(data.message);
       })
@@ -46,7 +49,7 @@ export function VerifyPage({ go }) {
   const accent = state === "error" ? "var(--sn-red)" : state === "done" ? C.green : C.amber;
 
   return (
-    <CenteredCard
+    <div className="sn-site"><CenteredCard
       badge={state === "working" ? "…" : state === "done" ? "OK" : "!"}
       accent={accent}
       title={state === "done" ? "Email confirmed" : state === "error" ? "Link not valid" : "One moment"}
@@ -54,12 +57,12 @@ export function VerifyPage({ go }) {
       action={
         state !== "working"
           ? {
-              label: state === "done" ? "Back to home" : "Request access again",
-              onClick: () => go("/"),
+              label: state === "done" ? "View request status" : "Check request status",
+              onClick: () => go("/access-status"),
             }
           : null
       }
-    />
+    >{state === 'error' && <ResendVerification />}</CenteredCard></div>
   );
 }
 
@@ -130,6 +133,8 @@ export function AcceptInvitePage({ go }) {
         setError(data.details?.join(". ") || data.error || "Could not create your account.");
         return;
       }
+      localStorage.removeItem('sn_demo_mode');
+      sessionStorage.removeItem('sn_demo_tour');
       window.location.href = "/app";
     } catch {
       setState("ready");
@@ -342,7 +347,7 @@ export function AcceptInvitePage({ go }) {
   );
 }
 
-function CenteredCard({ badge, accent, title, body, action }) {
+function CenteredCard({ badge, accent, title, body, action, children }) {
   return (
     <div
       style={{
@@ -420,6 +425,7 @@ function CenteredCard({ badge, accent, title, body, action }) {
             </button>
           </div>
         )}
+        {children}
       </div>
     </div>
   );
