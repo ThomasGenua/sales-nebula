@@ -2,7 +2,7 @@
 
 Run `npm run prisma:generate`, deploy migrations with `npm run db:migrate:prod`,
 and rebuild the frontend. Migration `20261011000000_sales_workflows` is additive.
-GitHub Actions remain disabled according to the repository's existing policy.
+GitHub Actions and local verification are described in [CI](../.github/CI.md).
 
 ## Email sequences
 

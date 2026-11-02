@@ -123,10 +123,9 @@ Saving these changes nothing:
 | Macros | `POST /api/macros/:id/schedule` | `MACRO_SCHEDULE_UNAVAILABLE` |
 | Customer data platform | `POST /api/cdp/streams/:id/ingest` | `CDP_INGEST_UNAVAILABLE` |
 | IP rules | `POST /api/security/ip-rules` | `IP_RULES_UNAVAILABLE` |
-| Field-level security | `POST /api/configuration/field-permissions`, `/bulk` | `FIELD_SECURITY_UNAVAILABLE` |
 | Encryption | `POST /api/security/encryption/policies`, `PUT /api/security/encryption/policies/:id`, `POST /api/security/encryption/rotate-key` | `ENCRYPTION_UNAVAILABLE` |
 | SMS and email sign-in codes | `POST /api/security/mfa/challenge` | `MFA_CODE_DELIVERY_UNAVAILABLE` |
-| Scheduled reports | `POST /api/reports/:id/schedule`; `POST /api/analytics/scheduled-reports` | `REPORT_DELIVERY_UNAVAILABLE` |
+| Legacy analytics report scheduling | `POST /api/analytics/scheduled-reports` | `REPORT_DELIVERY_UNAVAILABLE` |
 | Integration sync schedules | `PUT /api/integrations/:id/schedule` | `INTEGRATION_SYNC_UNAVAILABLE` |
 | Quote approval shortcut | `POST /api/quotes/:id/submit-approval` (use an approval process) | `QUOTE_APPROVAL_UNAVAILABLE` |
 | SSO sign-in | `POST /api/security/sso/login` | none; the error says so |

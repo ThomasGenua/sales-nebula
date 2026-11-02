@@ -74,7 +74,7 @@ performance, sequence editing, and creating records from related lists. See the
 guide for Outlook consent, SMTP delivery, and deployment requirements.
 
 `npm run verify` runs the local release gate, including browser tests with a real
-API, PostgreSQL and a local SMTP server. GitHub Actions remains disabled. See
+API, PostgreSQL and a local SMTP server. GitHub Actions runs the same release checks. See
 [Sales pilot setup and verification](docs/SALES_PILOT.md).
 
 ## At a Glance
@@ -703,9 +703,9 @@ Indexes cover primary keys, foreign keys, unique constraints, and composite inde
 
 ## Testing
 
-> **CI is intentionally disabled** — no workflows run on push or pull requests.
-> Verify every change locally before pushing. See
-> [`.github/CI_DISABLED.md`](.github/CI_DISABLED.md) for the exact steps.
+> **CI checks pull requests and main pushes** with a disposable PostgreSQL database.
+> It verifies migrations, backend tests, the frontend build and browser journeys.
+> See [`.github/CI.md`](.github/CI.md) for the workflow and local verification.
 
 ```bash
 npm test                # Run every suite
