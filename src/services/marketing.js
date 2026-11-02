@@ -12,6 +12,7 @@ function campaign(value) {
 
 async function cleanup(db, now = new Date()) {
   const cutoff = new Date(now.getTime() - DAYS * 86400000);
+  await db.userUsageDay.deleteMany({ where: { createdAt: { lt: cutoff } } });
   for (;;) {
     const expired = await db.marketingVisit.findMany({ where: { createdAt: { lt: cutoff } }, select: { id: true }, take: 5000 });
     if (!expired.length) return;
@@ -79,7 +80,7 @@ async function summary(db, days = 30) {
   await maintain(db);
   const since = new Date(Date.now() - days * 86400000);
   const visits = await db.marketingVisit.findMany({ where: { createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 10000 });
-  const requests = await db.signupRequest.findMany({ where: { marketingVisitId: { in: visits.map(v => v.id) } }, select: { marketingVisitId: true, verifiedAt: true, convertedAt: true } });
+  const requests = await db.signupRequest.findMany({ where: { marketingVisitId: { in: visits.map(v => v.id) } }, select: { marketingVisitId: true, verifiedAt: true, convertedAt: true, convertedUserId: true } });
   const requested = new Set(requests.map(r => r.marketingVisitId));
   const verified = new Set(requests.filter(r => r.verifiedAt).map(r => r.marketingVisitId));
   const activated = new Set(requests.filter(r => r.convertedAt).map(r => r.marketingVisitId));
@@ -95,6 +96,7 @@ async function summary(db, days = 30) {
   }
   return {
     days, sampled: visits.length === 10000, retentionDays: DAYS,
+    activation: await require('./onboarding').activation(db, requests, since),
     funnel: { visits: visits.length, demos: visits.filter(v => v.demoStartedAt).length, tours: visits.filter(v => v.tourCompletedAt).length, forms: visits.filter(v => v.formStartedAt).length, requested: requested.size, verified: verified.size, activated: activated.size },
     sources: [...groups.values()].sort((a, b) => b.visits - a.visits).slice(0, 30),
     performance: [...performance.values()].map(group => ({ page: group.page, device: group.device, metrics: Object.fromEntries(['lcpMs', 'inpMs', 'cls'].map(name => [name, { p75: percentile(group[name]), samples: group[name].length }])) })),

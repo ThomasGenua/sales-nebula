@@ -18,6 +18,18 @@ const { appUrl } = require('../utils/mail');
 const { completeSignIn, findAccountByEmail } = require('./auth');
 
 const router = Router();
+const browserLogin = require('../services/browserLogin');
+router.post('/start/:provider', limiters.auth, async (req, res, next) => {
+  try { res.set('Cache-Control', 'no-store').json(await browserLogin.start(req.app.locals.prisma, req, res)); } catch (e) { next(e); }
+});
+router.post('/callback', limiters.auth, async (req, res, next) => {
+  try { res.set('Cache-Control', 'no-store'); await browserLogin.callback(req.app.locals.prisma, req, res); } catch (e) { next(e); }
+});
+// Browser sessions must use state + PKCE. Legacy exchanges remain available to API clients.
+router.use((req, res, next) => {
+  if (req.method === 'POST' && require('../utils/sessionCookies').wantsCookieSession(req)) return res.status(400).json({ error: 'Start browser sign-in at /api/oauth/start/:provider' });
+  next();
+});
 
 const enabled = clientId => process.env.OAUTH_LOGIN_ENABLED === 'true' && !!clientId;
 
@@ -154,7 +166,9 @@ router.post('/microsoft', limiters.auth, async (req, res, next) => {
 
 // GET /api/oauth/config - Return OAuth config for frontend
 router.get('/config', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   res.json({
+    browser: browserLogin.config(),
     google: { enabled: enabled(process.env.GOOGLE_CLIENT_ID), clientId: process.env.GOOGLE_CLIENT_ID || null },
     microsoft: { enabled: enabled(process.env.MICROSOFT_CLIENT_ID) && !!microsoftTenant(), clientId: process.env.MICROSOFT_CLIENT_ID || null, tenantId: microsoftTenant() },
   });

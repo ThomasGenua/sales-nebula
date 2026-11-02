@@ -169,10 +169,10 @@ describe('web-to-case', () => {
 });
 
 describe('security settings nothing enforces', () => {
-  test('IP rules, field permissions and encryption policies are not saved, and no key is rotated', async () => {
+  test('IP rules and encryption remain unavailable; malformed field permissions are rejected', async () => {
     refused(await call('post', '/api/security/ip-rules', { ip: '10.0.0.1', type: 'block' }), 'IP_RULES_UNAVAILABLE');
-    refused(await call('post', '/api/configuration/field-permissions', { roleId: admin.user.roleId, module: 'contacts', field: 'email', visible: false }), 'FIELD_SECURITY_UNAVAILABLE');
-    refused(await call('post', '/api/configuration/field-permissions/bulk', { permissions: [{ roleId: admin.user.roleId, module: 'contacts', field: 'email' }] }), 'FIELD_SECURITY_UNAVAILABLE');
+    expect((await call('post', '/api/configuration/field-permissions', { roleId: admin.user.roleId, module: 'contacts', field: 'email', visible: false })).status).toBe(400);
+    expect((await call('post', '/api/configuration/field-permissions/bulk', { permissions: [{ roleId: admin.user.roleId, module: 'contacts', field: 'email' }] })).status).toBe(400);
     refused(await call('post', '/api/security/encryption/policies', { module: 'contacts', field: 'email' }), 'ENCRYPTION_UNAVAILABLE');
     refused(await call('post', '/api/security/encryption/rotate-key'), 'ENCRYPTION_UNAVAILABLE');
 
@@ -197,13 +197,16 @@ describe('integrations', () => {
 });
 
 describe('scheduled reports', () => {
-  test('are not saved, as nothing sends them', async () => {
+  test('the report delivery worker has a persisted schedule; legacy analytics scheduling stays unavailable', async () => {
     const report = await prisma.report.create({ data: { name: 'Pipeline', module: 'deals', columns: [], createdById: admin.user.id } });
 
-    refused(await call('post', `/api/reports/${report.id}/schedule`, { cron: '0 8 * * 1' }), 'REPORT_DELIVERY_UNAVAILABLE');
+    const scheduled = await call('post', `/api/reports/${report.id}/schedule`, { cron: '0 8 * * 1' });
+    expect(scheduled.status).toBe(201);
+    expect(scheduled.body).toMatchObject({ reportId: report.id, cron: '0 8 * * 1', recipients: [admin.user.id] });
+    expect(Number.isFinite(Date.parse(scheduled.body.nextRun))).toBe(true);
     refused(await call('post', '/api/analytics/scheduled-reports', { name: 'Weekly', reportId: report.id }), 'REPORT_DELIVERY_UNAVAILABLE');
 
-    expect([await prisma.reportSchedule.count(), await prisma.scheduledReport.count()]).toEqual([0, 0]);
+    expect([await prisma.reportSchedule.count(), await prisma.scheduledReport.count()]).toEqual([1, 0]);
   });
 });
 

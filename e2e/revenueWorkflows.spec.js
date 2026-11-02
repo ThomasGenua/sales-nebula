@@ -1,7 +1,7 @@
 const {
   test,
   expect
-} = require('@playwright/test');
+} = require('./fixtures');
 async function login(page) {
   await page.goto('/login');
   await page.getByLabel(/^Email/).fill('pilot-admin@example.com');

@@ -6,6 +6,8 @@ import { CustomObjectWorkspace } from './CustomObjectWorkspace';
 import { LeadScoringPage } from './LeadScoring';
 import { MonitoringPage } from './Monitoring';
 import DemoTour from './DemoTour';
+import Onboarding from './Onboarding';
+import RecordHighlights, { fieldValue, calendarDate } from './RecordHighlights';
 import MarketingOverview from './MarketingOverview';
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
 import { T } from "./tokens";
@@ -231,6 +233,11 @@ function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
     });
     applySession(d);
   };
+  const completeOAuth = async body => {
+    const d = await apiFetch('/oauth/callback', { method: 'POST', body, skipRefresh: true, headers: COOKIE_SESSION });
+    if (!d.mfaRequired) applySession(d);
+    return d;
+  };
   const logout = async ({ returnTo = "/" } = {}) => {
     // The server revokes both tokens and clears the cookies; the page cannot.
     if (!demoMode) await apiFetch("/auth/logout", { method: "POST", skipRefresh: true }).catch(() => {});
@@ -244,7 +251,7 @@ function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
     setUser((current) => (current ? { ...current, ...partial } : current));
   };
 
-  return <AuthContext.Provider value={{ user, demoMode, loading, login, logout, completeMfa, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, demoMode, loading, login, logout, completeMfa, completeOAuth, apiFetch, updateUser }}>{children}</AuthContext.Provider>;
 }
 
 function useApi(path, deps = []) {
@@ -561,7 +568,7 @@ function FilterPanel({ open, onClose, filters = [], values = {}, onChange, onApp
 // ========================================================================
 // RECORD DETAIL VIEW -- the record's fields, and the records related to it
 // ========================================================================
-function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onDelete, title, actions = [] }) {
+function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onDelete, title, actions = [], module, highlights, currency }) {
   const [activeTab, setActiveTab] = useState("details");
   const tabs = ["details", ...(related ? ["related"] : [])];
 
@@ -579,7 +586,7 @@ function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onD
             <p className="text-xs text-[#4A5168]">ID: {record.id?.substring(0, 8)}...</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 pl-10 sm:pl-0">
+        <div className="flex flex-wrap items-center gap-2 pl-10 sm:pl-0">
           {actions.map(a => <Button key={a.label} variant="secondary" size="sm" icon={a.icon} onClick={() => a.onClick(record)}>{a.label}</Button>)}
           {onEdit && <Button variant="secondary" size="sm" icon={Edit2} onClick={() => onEdit(record)}>Edit</Button>}
           {onDelete && <Button variant="danger" size="sm" icon={Trash2} onClick={() => onDelete(record)}>Delete</Button>}
@@ -587,6 +594,7 @@ function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onD
       </div>
 
       {/* Tabs */}
+      <RecordHighlights module={module} record={highlights || record} currency={currency} onEdit={onEdit ? () => onEdit(record) : null} />
       <div className="flex items-center gap-1 overflow-x-auto pb-1 mb-4 -mx-3 px-3 sm:mx-0 sm:px-0">
         {tabs.map(tab => (
           <button key={tab} type="button" aria-pressed={activeTab === tab} onClick={() => setActiveTab(tab)}
@@ -605,8 +613,8 @@ function RecordDetail({ record, fields = [], related = null, onBack, onEdit, onD
             {fields.map(f => (
               <div key={f.key} className="py-2 border-b border-[#182550]/40">
                 <div className="text-xs text-[#4A5168] mb-0.5">{f.label}</div>
-                <div className="text-sm text-[#F0EDE5]">
-                  {f.render ? f.render(record[f.key], record) : (record[f.key] ?? "-")}
+                <div className="text-sm text-[#F0EDE5] break-words whitespace-pre-wrap">
+                  {f.render ? f.render(record[f.key], record) : fieldValue(f, record[f.key])}
                 </div>
               </div>
             ))}
@@ -897,7 +905,7 @@ function ProgressBar({ value = 0, max = 100, label, color = "#F5A623", showValue
 }
 // `recordActions` are buttons on a record's detail page beside Edit and Delete:
 // [{ label, icon, run: async (record, apiFetch) => "message shown on success" }].
-function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [], detailExtras, formExtras, validateForm, wideForm = false, permissionModule = null }) {
+function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTitle, createTitle, editTitle, nameField = "name", detailFields, filterDefs, headerActions, reloadKey, canCreate = true, recordActions = [], detailExtras, formExtras, validateForm, wideForm = false, permissionModule = null, currency }) {
   const { apiFetch, user, demoMode } = useAuth();
   const guardedModule = permissionModule || (['accounts', 'activities', 'cases', 'contacts', 'deals', 'leads', 'quotes', 'invoices', 'emails', 'contracts', 'orders'].includes(endpoint.slice(1)) ? endpoint.slice(1) : null);
   const mayEdit = !guardedModule || (!demoMode && can(user, guardedModule, 'edit'));
@@ -1053,9 +1061,11 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
       <>
         <RecordDetail
           record={detailRecord}
+          module={guardedModule} currency={currency}
+          highlights={Object.fromEntries(Object.entries(detailRecord).filter(([key]) => visibleField(key)))}
           related={RELATED[endpoint.slice(1)] ? <RelatedLists module={endpoint.slice(1)} record={detailRecord} /> : null}
           title={detailRecord[nameField] || detailRecord.firstName || detailRecord.subject}
-          fields={detailFields || formFields?.map(f => ({ key: f.key, label: f.label, render: f.render })) || columns}
+          fields={detailFields || formFields?.map(f => ({ key: f.key, label: f.label, type: f.type, render: f.render })) || columns}
           onBack={() => { setDetailRecord(null); closeRecord(); }}
           onEdit={mayEdit ? row => { setEditing(row); setForm({ ...row }); setModalOpen(true); } : undefined}
           onDelete={mayDelete ? remove : undefined}
@@ -1073,7 +1083,7 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
         <RelatedRecords record={detailRecord} />
         {customDefs.length > 0 && <CustomFields module={endpoint.slice(1)} recordId={detailRecord.id} />}
         <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditing(null); }} wide={wideForm}
-          title={`Edit ${title.slice(0, -1)}`}>
+          title={`Edit ${title.slice(0, -1)}`} footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => { setModalOpen(false); setEditing(null); }}>Cancel</Button><Button onClick={save} disabled={saving}>{saving ? 'Updating…' : 'Update'}</Button></div>}>
           {recordMeta.recordTypes.length > 0 && <Select label="Record type" placeholder="Choose a record type" value={selectedType?.id || ''} options={recordMeta.recordTypes.map(t => ({ value: t.id, label: t.name }))} onChange={v => setForm(p => ({ ...p, recordTypeId: v }))} />}
         {assignedLayout && <p className="text-sm my-2">{assignedLayout.name}</p>}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
@@ -1084,10 +1094,6 @@ function ModulePage({ title, icon: Icon, endpoint, columns, formFields, emptyTit
             })}
           </div>
           {formExtras?.(form, setForm)}
-          <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2 border-t border-[#182550]">
-            <Button variant="secondary" onClick={() => { setModalOpen(false); setEditing(null); }} fullWidth className="sm:w-auto">Cancel</Button>
-            <Button onClick={save} disabled={saving} fullWidth className="sm:w-auto">Update</Button>
-          </div>
         </Modal>
         {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
       </>
@@ -1243,13 +1249,13 @@ function DealsPage() {
   const { data: currencies } = useApi("/deals/currencies");
   const base = currencies?.base || "USD";
   const currencyOptions = (currencies?.data || []).map(c => ({ value: c.code, label: `${c.code} (${c.name})` }));
-  return <ModulePage title="Deals" icon={Target} endpoint="/deals" permissionModule="deals" headerActions={<Button variant="secondary" onClick={() => navigate("pipeline")}>Pipeline board</Button>}
+  return <ModulePage title="Deals" icon={Target} endpoint="/deals" permissionModule="deals" currency={currencies?.base} headerActions={<Button variant="secondary" onClick={() => navigate("pipeline")}>Pipeline board</Button>}
     detailExtras={(record, onChanged) => <><EmailActions record={record} module="deals" onChanged={onChanged} /><RecordMailbox module="deals" record={record} /></>}
     columns={[
       { key: "name", label: "Deal" }, { key: "stage", label: "Stage", render: stageBadge },
       { key: "value", label: "Value", render: (v, row) => <span className="font-mono">{money(v, row?.currency || base)}</span> },
       { key: "probability", label: "Prob", render: v => `${v || 0}%` },
-      { key: "closeDate", label: "Close", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "closeDate", label: "Close", render: calendarDate },
     ]}
     filterDefs={[
       { key: "stage", label: "Stage", type: "select", options: ["Qualification","Discovery","Proposal","Negotiation","Closed Won","Closed Lost"] },
@@ -1259,8 +1265,9 @@ function DealsPage() {
       { key: "name", label: "Deal Name" }, { key: "stage", label: "Stage" },
       { key: "value", label: "Value", render: (v, row) => money(v, row?.currency || base) },
       { key: "probability", label: "Probability", render: v => `${v||0}%` },
-      { key: "closeDate", label: "Close Date", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "closeDate", label: "Close Date", render: calendarDate },
       { key: "source", label: "Source" }, { key: "type", label: "Type" },
+      { key: "nextStep", label: "Next action" }, { key: "nextStepDate", label: "Next action due", type: "date" },
       { key: "description", label: "Description" },
     ]}
     formFields={[
@@ -1269,6 +1276,7 @@ function DealsPage() {
       { key: "stage", label: "Stage", type: "select", options: ["Qualification","Discovery","Proposal","Negotiation","Closed Won","Closed Lost"] },
       { key: "probability", label: "Probability %", type: "number" },
       { key: "closeDate", label: "Close Date", type: "date" }, { key: "source", label: "Source" },
+      { key: "nextStep", label: "Next action", type: "textarea" }, { key: "nextStepDate", label: "Next action due", type: "date" },
       { key: "description", label: "Description", type: "textarea" },
     ]}
     // Approvals could be decided on the Approvals page but not started from
@@ -1347,13 +1355,19 @@ function ProductsPage() {
 }
 
 function QuotesPage() {
-  return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes" permissionModule="quotes" wideForm validateForm={validateQuoteForm}
+  const { data: quoteCurrency } = useApi('/quotes/currency');
+  return <ModulePage title="Quotes" icon={FileText} endpoint="/quotes" permissionModule="quotes" currency={quoteCurrency?.currency} wideForm validateForm={validateQuoteForm}
+    detailFields={[
+      { key: 'number', label: 'Quote number' }, { key: 'name', label: 'Quote name' }, { key: 'status', label: 'Status' },
+      ...['subtotal', 'discount', 'tax', 'total'].map(key => ({ key, label: key[0].toUpperCase() + key.slice(1), render: v => v === undefined ? '—' : quoteCurrency?.currency ? money(v, quoteCurrency.currency, { maximumFractionDigits: 2 }) : v })),
+      { key: 'validUntil', label: 'Valid until', type: 'date' }, { key: 'terms', label: 'Terms' },
+    ]}
     formExtras={(form, setForm) => <QuoteFormExtras form={form} setForm={setForm} />}
     detailExtras={(record, onChanged) => <><QuoteActions record={record} onChanged={onChanged} /><LineItems record={record} /></>}
     columns={[
       { key: "name", label: "Quote" }, { key: "number", label: "#" }, { key: "status", label: "Status" },
-      { key: "total", label: "Total", render: v => <span className="font-mono">${(v || 0).toLocaleString(...fmt())}</span> },
-      { key: "validUntil", label: "Expires", render: v => v ? new Date(v).toLocaleDateString(...fmt()) : "-" },
+      { key: "total", label: "Total", render: v => <span className="font-mono">{quoteCurrency?.currency ? money(v, quoteCurrency.currency, { maximumFractionDigits: 2 }) : v}</span> },
+      { key: "validUntil", label: "Expires", render: calendarDate },
     ]}
     formFields={[
       { key: "name", label: "Quote Name", required: true },
@@ -2485,7 +2499,9 @@ function OAuthConsentPage() {
 // LOGIN PAGE -- mobile-first
 // ========================================================================
 function LoginPage({ go }) {
-  const { login, completeMfa } = useAuth();
+  const { login, completeMfa, completeOAuth, apiFetch } = useAuth();
+  const [providers, setProviders] = useState({});
+  const callbackStarted = useRef(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -2501,6 +2517,26 @@ function LoginPage({ go }) {
     if (!authorizing && window.location.pathname !== "/app") {
       window.history.pushState({}, "", "/app");
     }
+  };
+  useEffect(() => {
+    fetch('/api/oauth/config').then(r => r.ok ? r.json() : {}).then(d => setProviders(d.browser || {})).catch(() => {});
+    if (window.location.pathname !== '/oauth/callback' || callbackStarted.current) return;
+    callbackStarted.current = true;
+    const params = new URLSearchParams(window.location.search);
+    // Remove the one-time code from history before exchanging it.
+    window.history.replaceState({}, '', '/login');
+    setLoading(true); setInfo('Completing provider sign-in…');
+    completeOAuth({ state: params.get('state'), code: params.get('code'), error: params.get('error') }).then(result => {
+      if (result.mfaRequired) { setChallenge(result); setMode('mfa'); setInfo('Enter the 6-digit code from your authenticator app.'); }
+      else { setInfo(''); enterApp(); }
+    }).catch(e => { setError(e.message); setInfo(''); }).finally(() => setLoading(false));
+  }, []);
+  const startProvider = async provider => {
+    setLoading(true); setError('');
+    try {
+      const result = await apiFetch(`/oauth/start/${provider}`, { method: 'POST', body: {}, skipRefresh: true });
+      window.location.assign(result.authorizationUrl);
+    } catch (e) { setError(e.message); setLoading(false); }
   };
 
   const handleLogin = async (e) => {
@@ -2617,6 +2653,8 @@ function LoginPage({ go }) {
 
           {mode === "login" ? (
             <>
+              {Object.entries(providers).filter(([, config]) => config.enabled).map(([provider]) => <Button key={provider} variant="secondary" fullWidth disabled={loading} onClick={() => startProvider(provider)}>Continue with {provider === 'google' ? 'Google' : 'Microsoft'}</Button>)}
+              {Object.values(providers).some(config => config.enabled) && <p className="text-xs" style={{ color: 'var(--sn-slate)' }}>Use the email address on your existing team account.</p>}
               <button
                 type="button"
                 onClick={() => { setMode("forgot"); setError(""); setInfo(""); }}
@@ -6511,6 +6549,7 @@ function AppShell({ go, startOnDemo }) {
 
           <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
             {demo && <DemoTour navigate={navigate} start={startOnDemo} />}
+            {!demo && <Onboarding navigate={navigate} page={page} />}
             {/* keyed on the module so one page's record state never leaks into the next */}
             <RouteContext.Provider value={routeValue}>
               <PageComponent key={route.module} />
@@ -6537,7 +6576,7 @@ export default function App({ go, startOnDemo = false, startOnLogin = false } = 
 function AppInner({ go, startOnDemo }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="min-h-[100dvh] flex items-center justify-center" style={{ background: "var(--sn-void)" }}><Spinner /></div>;
-  if (!user) return <LoginPage go={go} />;
+  if (!user || window.location.pathname === '/oauth/callback') return <LoginPage go={go} />;
   if (window.location.pathname === OAUTH_CONSENT_PATH) return <OAuthConsentPage />;
   return <AppShell go={go} startOnDemo={startOnDemo} />;
 }

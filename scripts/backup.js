@@ -8,6 +8,7 @@
  * Usage:
  *   node scripts/backup.js                    # Local backup
  *   node scripts/backup.js --upload-s3        # Backup + S3 upload
+ *   node scripts/backup.js --local-only       # Explicitly prohibit any upload
  *   node scripts/backup.js --retention 14     # Keep 14 days of backups
  * 
  * Cron (daily at 2am):
@@ -25,7 +26,8 @@ const path = require('path');
 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(__dirname, '..', 'backups');
 const RETENTION_DAYS = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--retention') || 7);
-const UPLOAD_S3 = process.argv.includes('--upload-s3');
+const LOCAL_ONLY = process.argv.includes('--local-only');
+const UPLOAD_S3 = !LOCAL_ONLY && process.argv.includes('--upload-s3');
 
 async function backup() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);

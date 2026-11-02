@@ -1,6 +1,5 @@
-# INERT TEMPLATE. GitHub runs only files under .github/workflows/, so this file
-# never runs from here. CI is disabled on purpose; see .github/CI_DISABLED.md,
-# which explains when and how to turn it back on by copying this file.
+# Historical starter template. The maintained workflow is ../workflows/ci.yml;
+# see ../CI.md for the current gate and runner limits.
 name: CI
 
 on:

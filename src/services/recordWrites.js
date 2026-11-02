@@ -325,6 +325,10 @@ async function createRecord(db, moduleName, input, ctx = {}) {
   if (hooks.afterCreate) await hooks.afterCreate(record, hookContext(db, ctx));
   if (ctx.hydrate) await ctx.hydrate(record);
 
+  // Use the same transaction as the write: rolled-back records cannot complete onboarding.
+  if (ctx.userId && ['deals', 'quotes'].includes(moduleName)) await require('./onboarding').milestone(db, ctx.userId, moduleName === 'deals' ? 'firstDealAt' : 'firstQuoteAt');
+  if (ctx.userId && moduleName === 'contacts' && ctx.source === 'import') await require('./onboarding').milestone(db, ctx.userId, 'firstImportAt');
+
   await automation(db, ctx, async prisma => {
     await audit(prisma, { action: 'create', module: moduleName, recordId: record.id, details: `Created ${modelName}${via(ctx.source)}`, userId: ctx.userId || null });
     await assignSecurityGroups(prisma, moduleName, record, { onCreate: true });

@@ -75,6 +75,8 @@ export async function demoApiFetch(path, opts = {}) {
 
   const pathname = path.split("?")[0];
   if (pathname === "/auth/me") return { user: DEMO_USER };
+  if (pathname === '/quotes/currency') return { currency: 'USD' };
+  if (pathname === '/deals/currencies') return { base: 'USD', data: [{ code: 'USD', name: 'US Dollar' }] };
   if (pathname === "/dashboard") {
     return {
       counts: { contacts: 128, accounts: 34, leads: 42, openDeals: 18, wonDeals: 7, lostDeals: 3, openCases: 6 },

@@ -49,6 +49,8 @@ model User {
   // BCP 47 locale (fr-FR). Unset means the browser's own.
   timezone String?
   locale   String?
+  onboarding UserOnboarding?
+  usageDays UserUsageDay[]
   @@index([roleId])
   teamMemberships TeamMember[] @relation("TeamMembers")
   deployments    Deployment[]      @relation
@@ -5900,8 +5902,53 @@ model SignatureRequest {
   status String @default("Pending")
   error String?
   completedAt DateTime?
+  statusChangedAt DateTime?
+  statusReason String?
   createdAt DateTime @default(now())
   @@index([roomId])
+}
+
+// Operational milestones survive reloads. Analytics can be disabled independently.
+model UserOnboarding {
+  userId String @id
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pipelineReadyAt DateTime?
+  firstImportAt DateTime?
+  firstDealAt DateTime?
+  firstQuoteAt DateTime?
+  dismissedAt DateTime?
+  analyticsOptOut Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+
+model UserUsageDay {
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day String
+  createdAt DateTime @default(now())
+  @@id([userId, day])
+  @@index([createdAt])
+}
+
+// Short-lived, single-use browser sign-in. No provider access tokens are stored here.
+model OAuthLoginAttempt {
+  stateHash String @id
+  browserHash String
+  provider String
+  verifier String
+  nonce String
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+
+// Stable signed-event identity; no document or signer payload is retained.
+model SignatureEvent {
+  id String @id
+  envelopeId String
+  event String
+  occurredAt DateTime
+  receivedAt DateTime @default(now())
+  @@index([envelopeId])
 }
 
 model CampaignDelivery {

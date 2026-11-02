@@ -2,19 +2,21 @@
 
 ## Current feature availability
 
-- **Campaigns:** planning, recipient lists and response tracking are available.
-  Bulk campaign delivery is unavailable; the send API returns 501 without
-  changing campaign or recipient delivery state. Use the individual sales-email
-  workflow for messages when SMTP is configured.
+- **Campaigns:** planning, recipient lists and queued SMTP delivery are available,
+  with suppression, unsubscribe and signed bounce handling. Invalid messages
+  return 400 without queuing delivery. Automatic open/click tracking is unavailable.
 - **Generic integrations:** configuration, mappings and schedule settings can be
   stored, but sync and connection tests return 501. Saving a schedule does not
   start a sync worker. This does not disable the separate Microsoft mailbox
   APIs, outbound webhooks or Connected Apps.
-- **Sign-in:** use password sign-in and optional authenticator-app MFA in the
-  browser. Generic SAML/OIDC configuration does not enable sign-in; that login
-  endpoint returns 501. SMS/email MFA is unavailable. The separate Google and
-  Microsoft sign-in APIs require explicit provider configuration and an existing
-  active account; the browser has no provider buttons or OAuth callback flow.
+- **Sign-in:** password and configured Google/Microsoft browser sign-in retain
+  authenticator-app MFA. Provider sign-in requires an existing active team
+  account; it never creates an account. Generic SAML/OIDC configuration does
+  not enable sign-in; that endpoint returns 501. SMS/email MFA is unavailable.
+
+The persistent setup checklist covers pipeline requirements, mailbox connection,
+contact import, teammate invitations and a first deal. See [activation and
+integration operations](TEAM_ACTIVATION.md) for configuration and recovery.
 
 ## First production install
 

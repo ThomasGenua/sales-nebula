@@ -304,7 +304,8 @@ export function DealRoomsWorkspace() {
             });
             await load();
           })}>Email signature request via DocuSign</Button><p className="text-xs">A completed signature is recorded against the sent quote version. Accept the current quote through its normal approval process.</p></div></details>}
-      {data.signatures.map(s => <div key={s.id}><p>{s.signerName} · {s.status} {s.error}</p>{editable && can(user, 'quotes', 'edit') && <Button variant="secondary" onClick={() => a.run(async () => {
+      <p className="text-xs">{data.signatureUpdatesConfigured ? 'DocuSign Connect updates signature status automatically.' : 'Automatic updates need DocuSign Connect HMAC configuration. Refresh status to check manually.'}</p>
+      {data.signatures.map(s => <div className="rounded-lg border p-3 space-y-2" key={s.id}><p>{s.signerName} · {s.status} {s.error}</p><p className="text-xs">Quote version sent: {new Date(s.quoteVersion).toLocaleString()}{s.completedAt && ` · Completed ${new Date(s.completedAt).toLocaleString()}`}</p>{s.statusReason && <p>{s.statusReason}</p>}{s.quoteChanged && <p role="status" className="text-amber-300 text-xs">The quote changed after this envelope was sent. Review the current quote before accepting it.</p>}{!s.envelopeId && editable && can(user, 'quotes', 'edit') && <RecoverSignature roomId={id} row={s} load={load} />}{s.envelopeId && editable && can(user, 'quotes', 'edit') && <Button variant="secondary" disabled={a.busy} onClick={() => a.run(async () => {
           const r = await apiFetch(`/deal-rooms/${id}/signatures/${s.id}/reconcile`, {
             method: 'POST',
             body: {}
@@ -314,6 +315,10 @@ export function DealRoomsWorkspace() {
         })}>Refresh signature status</Button>}</div>)}
     </>}
   </section>;
+}
+function RecoverSignature({ roomId, row, load }) {
+  const { apiFetch } = useAuth(), [envelopeId, setEnvelopeId] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false);
+  return <div className="space-y-2"><p className="text-xs">Find the existing envelope in DocuSign. Sales Nebula will verify its transaction ID before linking it.</p><Input label="Existing DocuSign envelope ID" value={envelopeId} onChange={setEnvelopeId} />{error && <p role="alert">{error}</p>}<Button disabled={busy || !envelopeId} variant="secondary" onClick={async () => { setBusy(true); setError(''); try { await apiFetch(`/deal-rooms/${roomId}/signatures/${row.id}/recover`, { method: 'POST', body: { envelopeId } }); await load(); } catch (e) { setError(e.message); } finally { setBusy(false); } }}>Recover existing envelope</Button></div>;
 }
 export function SuccessWorkspace() {
   const {

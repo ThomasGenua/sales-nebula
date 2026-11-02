@@ -200,7 +200,12 @@ router.get('/integrations', wrap(async (req, res) => {
     unlinkedMessages: await db.inboundEmailMessage.count({ where: { deletedAt: null, contactId: null, dealId: null, account: { is: { ownerId: req.userId, deletedAt: null } } } }),
     failedMessages: await db.inboundEmailMessage.count({ where: { deletedAt: null, status: 'Failed', account: { is: { ownerId: req.userId, deletedAt: null } } } }),
   } : null;
-  res.json({ mailboxes, webhooks, indexing, reconciliation, note: 'Mailbox status reflects the last sync. Generic integration configurations do not implement a sync connector.' });
+  const diagnostics = { mailboxes, webhooks, indexing, reconciliation };
+  const operations = require('../services/integrationOperations');
+  res.json({ ...diagnostics, setup: permits(req, 'admin', 'full') ? operations.setup() : [], failures: await operations.failures(db, req, diagnostics), note: 'Mailbox status reflects the last sync. A configured credential has not necessarily passed a live connection check.' });
+}));
+router.post('/integrations/:provider/check', requirePermission('admin', 'full'), wrap(async (req, res) => {
+  res.json(await require('../services/integrationOperations').check(req.params.provider));
 }));
 router.post('/webhooks/:id/retry/:logId', requirePermission('settings', 'full'), wrap(async (req, res) => {
   const db = dbOf(req), webhook = await db.webhook.findUnique({ where: { id: req.params.id } });

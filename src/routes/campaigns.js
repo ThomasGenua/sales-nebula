@@ -38,8 +38,7 @@ const router = createCrudRouter('campaign', 'campaigns', {
     return { valid: Object.keys(errors).length === 0, errors };
   },
   customRoutes: (router) => {
-    // Delivery has no worker, throttling or unsubscribe handling yet. Keep
-    // the API explicit and leave campaign and recipient history untouched.
+      // Validate and queue messages; the worker records confirmed delivery outcomes.
     router.post('/:id/send', requirePermission('campaigns', 'edit'), async (req, res, next) => {
       try {
         const prisma = req.app.locals.prisma;

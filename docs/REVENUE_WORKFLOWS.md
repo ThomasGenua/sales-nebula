@@ -32,7 +32,7 @@ Create an expiring customer link (maximum 90 days), add HTTPS documents, frozen 
 
 Set `DOCUSIGN_INTEGRATION_KEY`, `DOCUSIGN_USER_ID`, `DOCUSIGN_ACCOUNT_ID`, and `DOCUSIGN_PRIVATE_KEY` (PEM; escaped newlines are accepted). Use `DOCUSIGN_DEMO=true` for the developer environment. Grant the integration JWT signature/impersonation consent in DocuSign. The application derives the API base URI from DocuSign's account profile.
 
-Sending creates a one-signer quote PDF envelope, checks quote approvals, records its quote version and prevents duplicate sends. Check status reconciles sent/delivered/completed states and reports whether the quote has subsequently changed. Completion does not automatically approve an edited quote. An uncertain provider result stays Pending to prevent duplicate envelopes; an administrator must investigate it in DocuSign. Multiple signers, embedded signing, automatic Connect event ingestion and automatic quote acceptance are not included.
+Sending creates a one-signer quote PDF envelope, checks quote approvals, records its quote version and prevents duplicate sends. Check status reconciles sent, delivered, completed, declined and voided states. Configured Connect HMAC notifications update status automatically and notify the deal owner once for terminal outcomes. An uncertain provider result stays Pending; Deal rooms can recover an existing envelope only when its provider transaction ID matches. Completion never accepts or approves an edited quote. Multiple signers and embedded signing remain unavailable. See [Connect configuration and recovery](TEAM_ACTIVATION.md#automatic-signature-status).
 
 ## Campaign execution
 
@@ -48,4 +48,4 @@ Define a playbook with milestone due days and health penalties for overdue miles
 
 ## Validation and release
 
-Run the production migration before starting the new server. Provider tests use fixtures: no live Stripe charge, DocuSign delivery, Google OAuth consent or customer SMTP delivery is implied by a passing local test. Configure deployment secrets and perform controlled provider smoke tests before enabling live use. CI remains unchanged.
+Run the production migration before starting the new server. Provider tests use fixtures: no live Stripe charge, DocuSign delivery, Google OAuth consent or customer SMTP delivery is implied by a passing local test. Configure deployment secrets and perform controlled provider smoke tests before enabling live use. CI now runs migrations, backend checks, the production build and browser journeys; see [CI](../.github/CI.md).

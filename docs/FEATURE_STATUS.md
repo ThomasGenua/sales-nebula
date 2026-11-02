@@ -1,6 +1,6 @@
 # Feature status
 
-What Sales Nebula does today, checked against the code in October 2026.
+What Sales Nebula does today, checked against the code in November 2026.
 When a change makes a line here wrong, fix the line in the same pull request.
 
 Sales Nebula is a working CRM for accounts, contacts, leads, deals, quotes,
@@ -35,7 +35,7 @@ hosted sandboxes remain unavailable.
 | Rules on every save | Every create, update and delete of a module's records goes through one write path, whether it comes from a screen, import, the bulk API, mass actions, mobile sync, a conversion or a job. Validation rules run before every create and update, duplicate rules before every create and before an update that changes a field one matches on, and assignment rules before every create; audit, workflows and webhooks run after the write (`src/services/recordWrites.js`). |
 | Access | Roles with read, edit or full access per module. Row-level security from record owners, the role hierarchy, org-wide defaults, sharing rules, record shares and security groups. Nobody can grant more access than they hold. |
 | Users | The **Users** screen: invite, edit, deactivate, reactivate, send a password reset, resend or revoke an invite. Public sign-up requests are reviewed under **Access requests**. |
-| Sign-in | Password, with account lockout; authenticator-app (TOTP) two-factor; API keys; Sales Nebula as an OAuth 2.0 provider for connected apps (authorization code with PKCE); Google and Microsoft sign-in APIs for existing accounts, which the sign-in page does not offer yet. |
+| Sign-in | Password with account lockout; authenticator-app (TOTP) two-factor; API keys; Sales Nebula OAuth 2.0 for connected apps; Google/Microsoft browser buttons and a one-use, browser-bound state/PKCE callback for existing active team accounts. Provider login retains MFA. |
 | Approvals | Multi-step processes. A step's approvers are a user, a role, the submitter's manager or a queue, and the first to decide settles the step. Entry conditions, and final approve and reject actions. Processes are set up through the API; the **Approvals** screen lists pending requests to approve or reject. |
 | Workflows | Record and scheduled triggers. The visual builder edits conditions and ordered actions for core records: assign owner, create a follow-up, notify, update a field, and send email. Preview makes no changes; logs show outcomes. |
 | Email | One email at a time over SMTP when `SMTP_HOST` is set, or from a connected Microsoft mailbox through Microsoft Graph. The sequence editor supports steps, delays, templates, enrollment and delivery status; sequences send every 10 minutes with SMTP, supported merge fields, time-zone sending windows, stop-on-synced-reply, and unsubscribe links. Shared support mailboxes route incoming mail to cases or leads. Personal Outlook mailboxes sync Inbox and Sent Items, associate visible contacts/deals, and support private threaded replies. |
@@ -57,7 +57,7 @@ hosted sandboxes remain unavailable.
 | AI Copilot without a key | Answers from fixed rules using your open deals, cases and activities; the screen says so under each answer. | `/api/copilot/chat` answers 503. Conversation threads exist in the API only. |
 | Lead scoring | Scores a lead by your rules whenever it is saved, wherever the save comes from. Not AI. Rules are kept on the **Lead Scoring** screen (Automation & AI → More), which also rescores the open leads; a rule with an operator or field the scoring doesn't know is refused. | Changing a rule rescores no lead until it is next saved or the open leads are rescored. |
 | Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
-| Reports | Tabular, summary and chart reports, a report builder, and report folders. | Scheduled delivery (501). "Matrix" runs as a summary, and joins are ignored. The API export gives raw rows; the builder exports the displayed detail or summary. |
+| Reports | Tabular, summary, matrix and chart reports, saved dashboards, report folders and scheduled delivery to the report owner. | Legacy analytics scheduled-report endpoints remain unavailable. Arbitrary joins are not supported. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
 | Campaigns | Planning, members, recipients, responses, ROI; queued SMTP sends with suppression/unsubscribe, signed hard-bounce ingestion and FirstTouch rows for existing linked deals. | Automatic attribution for future deals; provider-specific bounce adapters; delivery retries. |
 | Import | CSV mapping, editable row preview, duplicate review/skip/update, per-row errors, and atomic custom values with each row. | Excel files; a whole-file rollback. |
@@ -75,7 +75,7 @@ hosted sandboxes remain unavailable.
 | Macros | Update a field; add a comment to a case. | Any other action reports that it was not done. Scheduling (501). |
 | Field service | Work orders: dispatch, schedule (dates and assignee), complete, cancel. | No conflict check, appointments or line items. The "route" is the day's work orders in start order. |
 | Customer data platform | A contact's live profile (lifetime value, engagement) and segment evaluation over contacts. | Stored profiles' scores are never computed. Ingesting data (501). |
-| Integrations | Stores configuration and field mappings. Sales Operations shows personal mailbox errors/reconciliation, mail/calendar retries, webhook delivery history/retries and search-queue counts. | Generic connectors' sync, connection tests and sync schedules remain unavailable (501). |
+| Integrations | Sales Operations includes guided provider setup, SMTP/Stripe/DocuSign connection checks, credential warnings, and a scoped recovery queue for mail, calendars, payments, signatures, campaigns and webhooks. | Generic configurable connectors' sync, connection tests and sync schedules remain unavailable (501). Uncertain delivery is reviewed rather than automatically resent. |
 | Inbound email | Microsoft mailboxes through Graph; IMAP and POP3 accounts with encrypted passwords. | IMAP and POP3 need an outside worker to fetch mail. Replies go only from Microsoft mailboxes (501 otherwise). |
 | Email status | "sent" when a mail server took the message. | Without SMTP an email is logged and shown as **not sent**; nothing sends it later. Opens are not tracked. |
 | Sales path, person accounts | Work through the API. | No screens. |

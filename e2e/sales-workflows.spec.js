@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures');
 
 const unique = () => Math.random().toString(36).slice(2, 10);
 async function signIn(page, reader = false) {
@@ -161,12 +161,12 @@ test('quote editor works at phone width in the light theme', async ({ page, requ
   await dialog.getByLabel('Quote Name').press('Escape'); await expect(dialog).toHaveCount(0);
 });
 
-test('campaign planning works while delivery is clearly unavailable', async ({ page, request }) => {
+test('campaign planning explains configured delivery and unavailable engagement tracking', async ({ page, request }) => {
   const headers = await auth(request); const name = `Planned campaign ${unique()}`;
   await signIn(page); await page.goto('/app/campaigns');
   const notice = page.getByRole('region', { name: 'Campaign email delivery', exact: true });
-  await expect(notice).toContainText('Unavailable');
-  await expect(notice).toContainText('Bulk email sending and automatic engagement tracking are unavailable.');
+  await expect(notice).toContainText('Available with SMTP');
+  await expect(notice).toContainText('Automatic open and click tracking is unavailable.');
   await page.getByRole('button', { name: 'New Campaigns', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'New Campaign', exact: true });
   await dialog.getByLabel(/^Name/).fill(name);
@@ -198,7 +198,7 @@ test('settings and administration explain unsupported features without blocking 
   await page.goto('/app/admin');
   for (const title of ['Campaign email delivery', 'Third-party synchronization', 'Custom SSO providers']) {
     const notice = page.getByRole('region', { name: title, exact: true });
-    await expect(notice).toContainText('Unavailable');
+    await expect(notice).toContainText(title === 'Campaign email delivery' ? 'Available with SMTP' : 'Unavailable');
     expect(await notice.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   }
   await page.screenshot({ path: test.info().outputPath('feature-availability-mobile.png'), fullPage: true });

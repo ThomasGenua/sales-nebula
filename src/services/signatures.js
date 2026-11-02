@@ -94,6 +94,12 @@ async function send(db, room, quote, name, email) {
     const pdf = await require('./customerQuotes').pdf(data);
     const result = await request('/envelopes', {
       transactionId: row.id,
+      ...(process.env.DOCUSIGN_CONNECT_HMAC_KEY && { eventNotification: {
+        url: require('../utils/mail').appUrl('/api/public/docusign/webhook'),
+        requireAcknowledgment: 'true', includeHMAC: 'true', loggingEnabled: 'true',
+        eventData: { version: 'restv2.1', format: 'json', includeData: ['envelope'] },
+        envelopeEvents: ['sent', 'delivered', 'completed', 'declined', 'voided'].map(envelopeEventStatusCode => ({ envelopeEventStatusCode })),
+      } }),
       emailSubject: 'Please sign quote ' + quote.number,
       documents: [{
         documentBase64: pdf.toString('base64'),
@@ -144,19 +150,22 @@ async function send(db, room, quote, name, email) {
 async function reconcile(db, row) {
   if (!row.envelopeId) fail('Envelope outcome is uncertain; recover its ID from DocuSign before sending again', 409);
   const result = await request('/envelopes/' + encodeURIComponent(row.envelopeId));
-  return db.signatureRequest.update({
-    where: {
-      id: row.id
-    },
-    data: {
-      status: result.status,
-      completedAt: result.status === 'completed' ? new Date(result.completedDateTime || Date.now()) : null,
-      error: null
-    }
-  });
+  await require('./signatureEvents').apply(db, row, result.status, new Date(result.statusChangedDateTime || result.completedDateTime || Date.now()), result.voidedReason || result.declinedReason);
+  return db.signatureRequest.findUnique({ where: { id: row.id } });
+}
+async function recover(db, row, envelopeId) {
+  if (row.envelopeId) fail('An envelope is already linked; reconcile its status instead', 409);
+  if (typeof envelopeId !== 'string' || !/^[a-f0-9-]{36}$/i.test(envelopeId)) fail('Enter a valid DocuSign envelope ID');
+  const envelope = await request('/envelopes/' + encodeURIComponent(envelopeId));
+  if (envelope.transactionId !== row.id) fail('That envelope does not belong to this signature request', 409);
+  const claimed = await db.signatureRequest.updateMany({ where: { id: row.id, envelopeId: null }, data: { envelopeId } });
+  if (!claimed.count) fail('This signature request changed; reload it', 409);
+  return reconcile(db, { ...row, envelopeId });
 }
 module.exports = {
   configured,
   send,
-  reconcile
+  reconcile,
+  recover,
+  connection
 };

@@ -751,8 +751,7 @@ router.post('/:id/schedule', async (req, res, next) => {
     const report = await prisma.report.findUnique({ where: { id: req.params.id }, select: { id: true, createdById: true } });
     if (!report) return res.status(404).json({ error: 'Report not found' });
     if (report.createdById !== req.userId) return res.status(403).json({ error: 'Only owner can schedule' });
-    // No job runs a schedule or sends a report: one was saved, and nobody got
-    // anything. Removing one still works.
+    // Delivery is handled by the report worker; recipients resolve to the owner's account.
     const cron = String(req.body.cron || '0 8 * * *');
     const nextRun = require('../services/reportDelivery').nextRun(cron);
     res.status(201).json(await prisma.reportSchedule.create({ data: { reportId: report.id, cron, format: 'json', recipients: [req.userId], nextRun } }));

@@ -113,6 +113,9 @@ router.get('/', requirePermission('quotes', 'read'), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/currency', requirePermission('quotes', 'read'), async (req, res, next) => {
+  try { res.json({ currency: (await currencyContext(req.app.locals.prisma)).base }); } catch (e) { next(e); }
+});
 router.get('/:id', requirePermission('quotes', 'read'), async (req, res, next) => {
   try {
     const prisma = req.app.locals.prisma;
