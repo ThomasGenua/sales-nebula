@@ -61,7 +61,7 @@ Salesforce parity**. The remaining items below are still part of the requested w
 Apply migrations `20261015000000_forecast_snapshots` and
 `20261015010000_quote_pricing_version`, and regenerate Prisma clients
 before starting this version. Both Bull and node-cron register flow-resume and
-search-index workers. Existing CI remains disabled; verification is local.
+search-index workers. [CI](../.github/CI.md) and local verification check these workflows.
 
 Live Outlook and external SMTP verification still require deployment credentials
 and a designated test mailbox. These changes do not configure or deploy them.

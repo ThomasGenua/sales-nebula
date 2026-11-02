@@ -5,10 +5,10 @@
 - **Campaigns:** planning, recipient lists and queued SMTP delivery are available,
   with suppression, unsubscribe and signed bounce handling. Invalid messages
   return 400 without queuing delivery. Automatic open/click tracking is unavailable.
-- **Generic integrations:** configuration, mappings and schedule settings can be
-  stored, but sync and connection tests return 501. Saving a schedule does not
-  start a sync worker. This does not disable the separate Microsoft mailbox
-  APIs, outbound webhooks or Connected Apps.
+- **Generic integrations:** configuration and mappings can be stored, but sync,
+  sync schedules and generic connection tests return 501. Provider-specific
+  SMTP, Stripe and DocuSign checks are available in Sales Operations, alongside
+  the separate mailbox APIs, outbound webhooks and Connected Apps.
 - **Sign-in:** password and configured Google/Microsoft browser sign-in retain
   authenticator-app MFA. Provider sign-in requires an existing active team
   account; it never creates an account. Generic SAML/OIDC configuration does
@@ -94,7 +94,7 @@ they never send customer mail. Ports 7545 and 2526 must be available.
 Webhook tests use controlled DNS responses and need no public DNS service.
 
 Tests erase their test database. The existing database-name guard applies to
-both URLs. GitHub Actions remains disabled; this gate runs locally. Browser
+both URLs. GitHub Actions also runs these checks; see [CI](../.github/CI.md). Browser
 failures retain screenshots and traces in `test-results/`.
 
 ## Backup and restore drill
