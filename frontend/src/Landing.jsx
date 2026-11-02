@@ -1,1801 +1,310 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Menu, X } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ArrowRight, ArrowUpRight, BarChart3, Calendar, Check, CheckCircle2,
+  ChevronDown, Circle, Clock, CreditCard, FileText, Github, LayoutDashboard,
+  ListTodo, Lock, Mail, Menu, Phone, Play, Server, Shield,
+  Target, Users, X,
+} from "lucide-react";
 import { BrandMark, ThemeToggle } from "./theme";
+import "./Landing.css";
 
-/* ── Sales Nebula marketing surface ───────────────────────────────────
-   Product-first CRM. Poppins throughout. Hero leads with a short phrase,
-   not the full product name. */
+const REPO = "https://github.com/ThomasGenua/sales-nebula";
+const links = [["Product", "product"], ["Workflow", "workflow"], ["Integrations", "integrations"], ["FAQ", "faq"]];
 
-const C = {
-  void: "var(--sn-void)",
-  panel: "var(--sn-panel)",
-  raised: "var(--sn-raised)",
-  rule: "var(--sn-rule)",
-  amber: "var(--sn-amber)",
-  cream: "var(--sn-cream)",
-  slate: "var(--sn-slate)",
-  dim: "var(--sn-dim)",
-  green: "var(--sn-green)",
-  body: "var(--sn-body)",
-  cta: "var(--sn-cta-text)",
-};
-
-const display = '"Poppins", system-ui, sans-serif';
-const body = '"Poppins", system-ui, sans-serif';
-
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" &&
-  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-
-function useReveal(offset = "-12%") {
-  const ref = useRef(null);
-  const [shown, setShown] = useState(prefersReducedMotion());
-  useEffect(() => {
-    if (shown || !ref.current) return;
-    const io = new IntersectionObserver(
-      ([e]) => {
-        if (e.isIntersecting) {
-          setShown(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin: offset }
-    );
-    io.observe(ref.current);
-    return () => io.disconnect();
-  }, [shown, offset]);
-  return [ref, shown];
+// Normal anchors retain browser history, modifier-click and deep-link behavior.
+function PageLink({ go, href, children, ...props }) {
+  return <a href={href} {...props} onClick={(event) => {
+    if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    go(href);
+  }}>{children}</a>;
 }
-
-function scrollTo(id) {
-  document.getElementById(id)?.scrollIntoView({
-    behavior: prefersReducedMotion() ? "auto" : "smooth",
-    block: "start",
-  });
-}
-
-// ── Header ───────────────────────────────────────────────────────────
 
 function Header({ go }) {
-  const [solid, setSolid] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-
+  const [open, setOpen] = useState(false);
+  const toggle = useRef(null);
+  const header = useRef(null);
   useEffect(() => {
-    const onScroll = () => setSolid(window.scrollY > 16);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    const wide = window.matchMedia("(min-width: 961px)");
+    const closeOnResize = () => { if (wide.matches) setOpen(false); };
+    wide.addEventListener("change", closeOnResize);
+    return () => wide.removeEventListener("change", closeOnResize);
   }, []);
-
-  // Freeze the page behind an open menu. On <html>, not <body>: a body with an
-  // overflow of its own is a scroll container, and the sticky header would come
-  // unstuck the moment the menu opened.
   useEffect(() => {
-    document.documentElement.style.overflow = menuOpen ? "hidden" : "";
+    if (!open) return;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") { setOpen(false); toggle.current?.focus(); }
+    };
+    const closeOutside = (event) => { if (!header.current?.contains(event.target)) setOpen(false); };
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOutside);
     return () => {
-      document.documentElement.style.overflow = "";
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOutside);
     };
-  }, [menuOpen]);
+  }, [open]);
 
-  // The menu button is hidden from 641px up. Turn a phone sideways with the menu
-  // open and the page would stay frozen behind a menu that can no longer be closed.
-  useEffect(() => {
-    const wide = window.matchMedia("(min-width: 641px)");
-    const onChange = (e) => {
-      if (e.matches) setMenuOpen(false);
-    };
-    wide.addEventListener?.("change", onChange);
-    return () => wide.removeEventListener?.("change", onChange);
-  }, []);
-
-  // The menu is part of the header, so it is closed first and the scroll waits
-  // a frame: measured while it is open, a section sits lower than it will once
-  // the menu is gone.
-  const goTo = (id) => {
-    setMenuOpen(false);
-    window.requestAnimationFrame(() => scrollTo(id));
-  };
-
-  const links = [
-    ["Product", "#product"],
-    ["Workflow", "#workflow"],
-    ["Access", "#access"],
-  ];
-
-  return (
-    <header
-      style={{
-        position: "sticky",
-        top: 0,
-        zIndex: 50,
-        background: solid || menuOpen ? "var(--sn-header-bg)" : "transparent",
-        backdropFilter: solid || menuOpen ? "blur(12px)" : "none",
-        borderBottom: `1px solid ${solid || menuOpen ? "var(--sn-rule)" : "transparent"}`,
-        transition: "background 200ms ease, border-color 200ms ease",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 1180,
-          margin: "0 auto",
-          padding: "14px clamp(18px, 4vw, 40px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 16,
-        }}
-      >
-        <a href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-          <BrandMark size={34} />
-          <span
-            style={{
-              fontFamily: display,
-              fontSize: 18,
-              fontWeight: 700,
-              letterSpacing: "-0.02em",
-              color: C.cream,
-            }}
-          >
-            Sales Nebula
-          </span>
-        </a>
-
-        <nav className="sn-desktop-only" style={{ display: "flex", alignItems: "center", gap: 28 }}>
-          {links.map(([label, href]) => (
-            <a
-              key={href}
-              href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                scrollTo(href.slice(1));
-              }}
-              style={{
-                fontFamily: body,
-                fontSize: 14,
-                fontWeight: 500,
-                color: C.slate,
-                textDecoration: "none",
-              }}
-            >
-              {label}
-            </a>
-          ))}
-          <ThemeToggle compact />
-          <button
-            type="button"
-            onClick={() => go("/login")}
-            style={{
-              fontFamily: body,
-              fontSize: 14,
-              fontWeight: 600,
-              color: C.cream,
-              background: "transparent",
-              border: "none",
-              cursor: "pointer",
-              padding: "8px 4px",
-            }}
-          >
-            Log in
-          </button>
-          <button
-            type="button"
-            onClick={() => scrollTo("access")}
-            style={{
-              fontFamily: body,
-              fontSize: 14,
-              fontWeight: 700,
-              color: C.cta,
-              background: C.amber,
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 16px",
-              cursor: "pointer",
-            }}
-          >
-            Request access
-          </button>
-        </nav>
-
-        <div className="sn-mobile-only" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ThemeToggle compact />
-          <button
-            type="button"
-            aria-label={menuOpen ? "Close menu" : "Open menu"}
-            onClick={() => setMenuOpen((o) => !o)}
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 8,
-              border: `1px solid ${C.rule}`,
-              background: C.raised,
-              color: C.cream,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-            }}
-          >
-            {menuOpen ? <X size={18} /> : <Menu size={18} />}
-          </button>
-        </div>
-      </div>
-
-      {menuOpen && (
-        <div
-          className="sn-mobile-only"
-          style={{
-            borderTop: `1px solid ${C.rule}`,
-            padding: "12px 20px 20px",
-            background: "var(--sn-header-bg)",
-            display: "flex",
-            flexDirection: "column",
-            gap: 4,
-          }}
-        >
-          {links.map(([label, href]) => (
-            <a
-              key={href}
-              href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                goTo(href.slice(1));
-              }}
-              style={{
-                fontFamily: body,
-                fontSize: 16,
-                color: C.cream,
-                textDecoration: "none",
-                padding: "12px 4px",
-              }}
-            >
-              {label}
-            </a>
-          ))}
-          <button
-            type="button"
-            onClick={() => goTo("access")}
-            style={{
-              marginTop: 8,
-              fontFamily: body,
-              fontSize: 15,
-              fontWeight: 700,
-              color: C.cta,
-              background: C.amber,
-              border: "none",
-              borderRadius: 8,
-              padding: "12px 16px",
-              cursor: "pointer",
-            }}
-          >
-            Request access
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              go("/login");
-            }}
-            style={{
-              fontFamily: body,
-              fontSize: 15,
-              fontWeight: 600,
-              color: C.cream,
-              background: "transparent",
-              border: `1px solid ${C.rule}`,
-              borderRadius: 8,
-              padding: "12px 16px",
-              cursor: "pointer",
-            }}
-          >
-            Log in
-          </button>
-        </div>
-      )}
-    </header>
-  );
-}
-
-// ── Sales Nebula portal snapshot ─────────────────────────────────────
-
-function PortalSnapshot() {
-  const stages = [
-    {
-      name: "Qualify",
-      cards: [
-        { title: "Acme CRM rollout", meta: "Acme Corp", val: "$48k" },
-        { title: "Helix expansion", meta: "Helix Retail", val: "$22k" },
-      ],
-    },
-    {
-      name: "Discovery",
-      cards: [
-        { title: "Orbit fleet ops", meta: "Orbit Logistics", val: "$120k", hot: true },
-        { title: "Cedar clinics", meta: "Cedar Health", val: "$67k" },
-      ],
-    },
-    {
-      name: "Proposal",
-      cards: [{ title: "Summit banking", meta: "Summit Bank", val: "$210k", hot: true }],
-    },
-    {
-      name: "Negotiate",
-      cards: [{ title: "Atlas renewal", meta: "Atlas Energy", val: "$385k", hot: true }],
-    },
-  ];
-
-  return (
-    <div className="sn-hero-shot" aria-hidden="true">
-      <div className="sn-float sn-float-report">
-        <div className="sn-float-label">Sales Nebula · Win rate</div>
-        <div className="sn-bars">
-          {[42, 58, 51, 74, 63, 86].map((h, i) => (
-            <span key={i} style={{ height: `${h}%` }} />
-          ))}
-        </div>
-      </div>
-
-      <div className="sn-laptop">
-        <div className="sn-laptop-bezel">
-          <div className="sn-portal">
-            <aside className="sn-portal-side">
-              <div className="sn-side-brand">SN</div>
-              {["Home", "CRM", "Deals", "Mail", "AI", "More"].map((label, i) => (
-                <span key={label} className={i === 2 ? "active" : ""} title={label}>
-                  {["⌂", "◎", "◈", "✉", "✦", "⋯"][i]}
-                </span>
-              ))}
-            </aside>
-            <div className="sn-portal-main">
-              <div className="sn-portal-top">
-                <strong>Deals</strong>
-                <span className="sn-pill">Sales Nebula</span>
-              </div>
-              <div className="sn-kanban">
-                {stages.map((s) => (
-                  <div key={s.name} className="sn-col">
-                    <div className="sn-col-h">{s.name}</div>
-                    {s.cards.map((c) => (
-                      <div key={c.title} className={`sn-card${c.hot ? " hot" : ""}`}>
-                        <div className="sn-card-t">{c.title}</div>
-                        <div className="sn-card-m">
-                          <span>{c.meta}</span>
-                          <b>{c.val}</b>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className="sn-laptop-base" />
-      </div>
-
-      <div className="sn-phone">
-        <div className="sn-phone-notch" />
-        <div className="sn-phone-body">
-          <div className="sn-phone-h">Sales Nebula</div>
-          <div className="sn-phone-title">Atlas renewal</div>
-          <div className="sn-phone-val">$385,000</div>
-          <div className="sn-phone-row">Stage · Negotiate</div>
-          <div className="sn-phone-row">Owner · Demo Visitor</div>
-          <div className="sn-phone-btn">Log activity</div>
-        </div>
-      </div>
-
-      <div className="sn-float sn-float-ai">
-        <div className="sn-float-label">AI Copilot</div>
-        <div className="sn-ai-line">Draft follow-up for Atlas</div>
-        <div className="sn-ai-bar"><i /></div>
+  return <header className="sn-site-header" ref={header}>
+    <div className="sn-site-container sn-site-nav">
+      <a href="/" className="sn-site-brand" aria-label="Sales Nebula home"><BrandMark size={34} alt="" />Sales Nebula<span className="sn-brand-dot">.</span></a>
+      <nav aria-label="Main navigation" className="sn-site-desktop-nav">
+        {links.map(([label, id]) => <a key={id} href={`#${id}`}>{label}</a>)}
+      </nav>
+      <div className="sn-site-nav-actions">
+        <ThemeToggle compact />
+        <PageLink go={go} href="/login" className="sn-site-sign-in">Log in <ArrowUpRight size={14} aria-hidden="true" /></PageLink>
+        <a href="#access" className="sn-site-button sn-site-button-small">Request access <ArrowRight size={16} aria-hidden="true" /></a>
+        <button ref={toggle} type="button" className="sn-site-menu-toggle" aria-label={open ? "Close menu" : "Open menu"} aria-expanded={open} aria-controls="sn-mobile-menu" onClick={() => setOpen(!open)}>
+          {open ? <X size={22} /> : <Menu size={22} />}
+        </button>
       </div>
     </div>
-  );
+    <nav id="sn-mobile-menu" className="sn-site-mobile-nav" aria-label="Mobile navigation" hidden={!open} onBlur={(event) => {
+      if (event.relatedTarget && !header.current?.contains(event.relatedTarget)) setOpen(false);
+    }}>
+      {links.map(([label, id]) => <a key={id} href={`#${id}`} onClick={() => setOpen(false)}>{label}<ArrowUpRight size={16} aria-hidden="true" /></a>)}
+      <PageLink go={go} href="/login">Log in <ArrowUpRight size={16} aria-hidden="true" /></PageLink>
+      <a href="#access" className="sn-site-button" onClick={() => setOpen(false)}>Request access <ArrowRight size={16} aria-hidden="true" /></a>
+    </nav>
+  </header>;
 }
 
-// ── Hero ─────────────────────────────────────────────────────────────
+const stages = [
+  { name: "Discovery", total: "$72,000", tone: "blue", deals: [
+    { company: "Northstar", name: "Team expansion", value: "$48,000", initials: "JD", next: "Discovery call", icon: Phone },
+    { company: "Orbit", name: "Workspace rollout", value: "$24,000", initials: "AL", next: "Send follow-up", icon: Mail },
+  ] },
+  { name: "Proposal", total: "$108,000", tone: "amber", deals: [
+    { company: "Acme", name: "Enterprise plan", value: "$72,000", initials: "MK", next: "Review proposal", icon: FileText },
+    { company: "Cedar", name: "Annual agreement", value: "$36,000", initials: "JD", next: "Confirm next steps", icon: Calendar },
+  ] },
+  { name: "Won", total: "$42,000", tone: "green", deals: [
+    { company: "Summit", name: "Platform upgrade", value: "$30,000", initials: "AL", next: "Start onboarding", icon: CheckCircle2 },
+    { company: "Helix", name: "New team setup", value: "$12,000", initials: "MK", next: "Welcome call", icon: CheckCircle2 },
+  ] },
+];
+const previewTabs = [
+  { id: "pipeline", label: "Pipeline", icon: LayoutDashboard, title: "A little clarity. A lot of momentum.", caption: "See the deal, the owner, and the next move in one place." },
+  { id: "day", label: "My day", icon: ListTodo, title: "Your next move, already in view.", caption: "Keep calls, tasks, and cadence follow-ups together." },
+  { id: "revenue", label: "Revenue", icon: CreditCard, title: "Keep the handoff moving.", caption: "Carry the customer from proposal to signature to payment." },
+];
+
+function PipelinePreview() {
+  return <>
+    <div className="sn-preview-metrics">
+      <div><span>Open pipeline</span><strong>$180,000</strong></div>
+      <div><span>In proposal</span><strong>2 <small>deals</small></strong></div>
+      <div><span>Closed won</span><strong className="sn-positive">$42,000</strong></div>
+    </div>
+    <div className="sn-preview-board">
+      {stages.map((stage) => <div className="sn-preview-stage" key={stage.name}>
+        <div className={`sn-preview-stage-title sn-tone-${stage.tone}`}><span><i />{stage.name}<small>2</small></span><b>{stage.total}</b></div>
+        {stage.deals.map(({ company, name, value, initials, next, icon: Icon }) => <article className="sn-preview-deal" key={company}>
+          <span className="sn-preview-company">{company}</span><h4>{name}</h4>
+          <div className="sn-preview-value"><strong>{value}</strong><span className="sn-preview-avatar">{initials}</span></div>
+          <div className="sn-preview-next"><Icon size={12} aria-hidden="true" />{next}</div>
+        </article>)}
+      </div>)}
+    </div>
+  </>;
+}
+
+function DayPreview() {
+  return <div className="sn-day-preview">
+    <div className="sn-day-summary"><div><span className="sn-preview-eyebrow">YOUR FOCUS</span><h4>Make room for the right conversations.</h4></div><span className="sn-preview-count">3<span>next actions</span></span></div>
+    <ul className="sn-preview-tasks">
+      {[
+        { icon: Phone, time: "09:30", title: "Discovery call with Northstar", detail: "Team expansion · Jordan Davis", tag: "Call" },
+        { icon: Mail, time: "11:00", title: "Follow up on Orbit’s rollout", detail: "Outbound cadence · Step 2", tag: "Email" },
+        { icon: FileText, time: "14:00", title: "Review Acme’s proposal", detail: "Enterprise plan · Morgan Kim", tag: "Task" },
+      ].map(({ icon: Icon, time, title, detail, tag }) => <li key={title}><span className="sn-task-time">{time}</span><span className="sn-task-icon"><Icon size={18} aria-hidden="true" /></span><div><h4>{title}</h4><p>{detail}</p></div><span className="sn-task-tag">{tag}</span></li>)}
+    </ul>
+    <p className="sn-preview-note"><CheckCircle2 size={15} aria-hidden="true" />The account context travels with every task.</p>
+  </div>;
+}
+
+function RevenuePreview() {
+  return <div className="sn-revenue-preview">
+    <div className="sn-invoice-top"><div><span className="sn-preview-eyebrow">ORBIT · WORKSPACE ROLLOUT</span><h4>One deal. All the way through.</h4></div><FileText size={28} aria-hidden="true" /></div>
+    <ol className="sn-revenue-steps">{["Proposal shared", "Signature received", "Payment recorded"].map((step) => <li key={step}><CheckCircle2 size={19} aria-hidden="true" /><span>{step}</span></li>)}</ol>
+    <div className="sn-preview-invoice"><div><span>Invoice · INV-1042</span><span className="sn-preview-status">Partially paid</span></div><strong>$24,000 <small>USD</small></strong><div className="sn-payment-track" aria-hidden="true"><span /></div><div><span>Paid <b>$8,000</b></span><span>Remaining <b>$16,000</b></span></div></div>
+    <p className="sn-preview-note"><Lock size={14} aria-hidden="true" />Stripe payment links. A clear record of every receipt.</p>
+  </div>;
+}
+
+function ProductPreview() {
+  const [active, setActive] = useState(0);
+  const tabs = useRef([]);
+  const current = previewTabs[active];
+  function changeTab(event, index) {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % previewTabs.length;
+    if (event.key === "ArrowLeft") next = (index + previewTabs.length - 1) % previewTabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = previewTabs.length - 1;
+    if (next === undefined) return;
+    event.preventDefault(); setActive(next); tabs.current[next]?.focus();
+  }
+  return <div className="sn-product-preview" id="product">
+    <h2 className="sn-visually-hidden">Explore Sales Nebula</h2>
+    <div className="sn-preview-orbit sn-preview-orbit-one" aria-hidden="true" /><div className="sn-preview-orbit sn-preview-orbit-two" aria-hidden="true" />
+    <div className="sn-preview-window">
+      <div className="sn-preview-titlebar"><div className="sn-window-dots" aria-hidden="true"><i /><i /><i /></div><span>YOUR REVENUE WORKSPACE</span><span className="sn-sample-badge">Sample data</span></div>
+      <div className="sn-preview-shell">
+        <aside className="sn-preview-rail" aria-hidden="true"><span className="sn-rail-brand">n.</span>{[LayoutDashboard, Users, Target, Mail, BarChart3].map((Icon, index) => <span className={index === active ? "active" : ""} key={index}><Icon size={17} /></span>)}<span className="sn-rail-avatar">JD</span></aside>
+        <div className="sn-preview-main">
+          <div className="sn-preview-tabs" role="tablist" aria-label="Explore the product preview">{previewTabs.map(({ id, label, icon: Icon }, index) => <button key={id} ref={(el) => { tabs.current[index] = el; }} id={`preview-tab-${id}`} type="button" role="tab" tabIndex={active === index ? 0 : -1} aria-selected={active === index} aria-controls={`preview-panel-${id}`} onClick={() => setActive(index)} onKeyDown={(event) => changeTab(event, index)}><Icon size={15} aria-hidden="true" />{label}</button>)}</div>
+          {previewTabs.map(({ id, label }, index) => <div key={id} id={`preview-panel-${id}`} role="tabpanel" aria-labelledby={`preview-tab-${id}`} tabIndex={0} hidden={active !== index} className="sn-preview-panel">
+            <h3 className="sn-visually-hidden">{label} preview</h3>
+            {id === "pipeline" ? <PipelinePreview /> : id === "day" ? <DayPreview /> : <RevenuePreview />}
+          </div>)}
+        </div>
+      </div>
+      <div className="sn-preview-bottom"><span><i />Connected from first touch to follow-through</span><span>Sales Nebula</span></div>
+    </div>
+    <div className="sn-preview-caption" aria-live="polite"><span className="sn-caption-line" aria-hidden="true" /><div><strong>{current.title}</strong><span>{current.caption}</span></div></div>
+  </div>;
+}
 
 function Hero({ go }) {
-  const points = [
-    "Leads, accounts, and deals in one Sales Nebula workspace",
-    "Quotes, forecasts, and service without leaving the deal",
-    "Self-host on your servers — or start with a managed invite",
-    "Open the live demo anytime — no card required",
-  ];
-
-  return (
-    <section className="sn-hero-plain">
-      <div className="sn-hero-grid">
-        <div className="sn-hero-copy">
-          <h1>Deals that move. Customers that stay.</h1>
-          <p>
-            Sales Nebula is the CRM built for revenue teams — capture the lead,
-            drive the opportunity, and keep the account after you win.
-          </p>
-          <ul>
-            {points.map((t) => (
-              <li key={t}>
-                <span className="sn-check" aria-hidden="true">✓</span>
-                {t}
-              </li>
-            ))}
-          </ul>
-          <div className="sn-hero-ctas">
-            <button type="button" className="sn-btn-primary" onClick={() => scrollTo("access")}>
-              Request access
-            </button>
-            <button type="button" className="sn-btn-secondary" onClick={() => go("/login")}>
-              Try the demo
-            </button>
-          </div>
-          <p className="sn-hero-micro">
-            Full Sales Nebula demo. Your data stays yours when you go live.
-          </p>
-        </div>
-        <div className="sn-hero-visual">
-          <PortalSnapshot />
-        </div>
+  return <section className="sn-site-hero" aria-labelledby="hero-title">
+    <div className="sn-site-container sn-hero-layout">
+      <div className="sn-hero-content">
+        <a className="sn-release-link" href="#workflow"><span>MEET YOUR NEXT CRM</span><ArrowUpRight size={14} aria-hidden="true" /></a>
+        <h1 id="hero-title">Keep your<br /> next win<br /> <span>in sight.</span><svg className="sn-hero-spark" viewBox="0 0 60 60" aria-hidden="true"><path d="M30 4v52M4 30h52M12 12l36 36M12 48l36-36" /></svg></h1>
+        <p className="sn-hero-description">A connected home for your pipeline, your people, and everything that happens after “yes.” Meet the CRM that keeps the whole relationship in view.</p>
+        <div className="sn-hero-actions"><a href="#access" className="sn-site-button">Request access <ArrowRight size={18} aria-hidden="true" /></a><PageLink go={go} href="/login" className="sn-site-button sn-site-button-outline"><Play size={15} aria-hidden="true" />Explore the demo</PageLink></div>
+        <p className="sn-hero-assurance"><Check size={14} aria-hidden="true" />Free browser demo <span>·</span> Sample data. No signup.</p>
       </div>
-    </section>
-  );
+      <ProductPreview />
+    </div>
+    <div className="sn-site-container sn-hero-foundation"><p>One workspace.<br /><strong>The whole relationship.</strong></p><ul>{["Leads & contacts", "Pipeline & forecasts", "Quotes & payments", "Customer success"].map((item) => <li key={item}><Check size={16} aria-hidden="true" />{item}</li>)}</ul></div>
+  </section>;
 }
 
-// ── Product ──────────────────────────────────────────────────────────
+const workflows = [
+  { number: "01", icon: Users, title: "Start with the full picture.", copy: "Bring accounts, contacts, and conversations together. Walk into the next meeting knowing who you’re talking to and where things stand.", tags: ["Account 360", "Lead conversion", "Email & calendar"], visual: "account" },
+  { number: "02", icon: Target, title: "Give every deal a next step.", copy: "Move from a promising conversation to a repeatable process. Keep follow-ups visible, guide your team with cadences, and see the pipeline take shape.", tags: ["Pipeline board", "Multichannel cadences", "Forecasts & reports"], visual: "cadence" },
+  { number: "03", icon: CreditCard, title: "Make “yes” the beginning.", copy: "Turn a proposal into a shared plan. Keep quotes, signatures, invoices, and onboarding connected to the customer you worked so hard to win.", tags: ["Deal rooms", "Stripe & DocuSign", "Success playbooks"], visual: "success" },
+];
 
-function Product() {
-  const [ref, shown] = useReveal();
-  const pillars = [
-    {
-      title: "Know every account",
-      copy: "Contacts, companies, and history stay linked so your team never starts a call cold.",
-    },
-    {
-      title: "Drive the pipeline",
-      copy: "Stages, forecasts, and next actions make it obvious what closes this week — and what is stuck.",
-    },
-    {
-      title: "Quote and deliver",
-      copy: "Move from opportunity to quote to invoice without bouncing between five tools.",
-    },
-  ];
-
-  return (
-    <section
-      id="product"
-      ref={ref}
-      style={{
-        maxWidth: 1120,
-        margin: "0 auto",
-        padding: "clamp(72px, 10vw, 120px) clamp(18px, 4vw, 40px)",
-        opacity: shown ? 1 : 0,
-        transform: shown ? "none" : "translateY(18px)",
-        transition: "opacity 600ms ease, transform 600ms ease",
-      }}
-    >
-      <h2
-        style={{
-          fontFamily: display,
-          fontSize: "clamp(28px, 4vw, 42px)",
-          fontWeight: 700,
-          letterSpacing: "-0.03em",
-          color: C.cream,
-          margin: "0 0 14px",
-          maxWidth: 560,
-        }}
-      >
-        Built for revenue teams, not dashboards nobody opens.
-      </h2>
-      <p
-        style={{
-          fontFamily: body,
-          fontSize: 17,
-          lineHeight: 1.6,
-          color: C.slate,
-          margin: "0 0 48px",
-          maxWidth: 520,
-        }}
-      >
-        Sales Nebula is a full CRM workspace: lead capture through closed-won, then service that protects the renewal.
-      </p>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))",
-          gap: "clamp(28px, 4vw, 48px)",
-          borderTop: `1px solid ${C.rule}`,
-          paddingTop: 36,
-        }}
-      >
-        {pillars.map((p, i) => (
-          <div key={p.title}>
-            <div
-              style={{
-                fontFamily: display,
-                fontSize: 13,
-                fontWeight: 700,
-                color: C.amber,
-                letterSpacing: "0.08em",
-                marginBottom: 10,
-              }}
-            >
-              {String(i + 1).padStart(2, "0")}
-            </div>
-            <h3
-              style={{
-                fontFamily: display,
-                fontSize: 22,
-                fontWeight: 700,
-                letterSpacing: "-0.02em",
-                color: C.cream,
-                margin: "0 0 10px",
-              }}
-            >
-              {p.title}
-            </h3>
-            <p style={{ fontFamily: body, fontSize: 15, lineHeight: 1.6, color: C.slate, margin: 0 }}>
-              {p.copy}
-            </p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
+function WorkflowVisual({ kind }) {
+  if (kind === "account") return <div className="sn-account-visual">
+    <div className="sn-mini-account"><span className="sn-company-monogram">N</span><div><strong>Northstar</strong><span>Account overview</span></div><span className="sn-mini-tag">Customer</span></div>
+    <div className="sn-account-facts"><div><span>Account owner</span><strong>Jordan Davis</strong></div><div><span>Open opportunity</span><strong>Team expansion</strong></div></div>
+    <div className="sn-account-event"><span><Mail size={16} aria-hidden="true" /></span><div><strong>A conversation worth picking up.</strong><p>Re: Plans for the next quarter</p></div><span className="sn-event-time">Today</span></div>
+    <div className="sn-connected-note"><span className="sn-overlap-avatar">JD</span><span className="sn-overlap-avatar">AL</span><span>People, history, and next steps. Together.</span></div>
+  </div>;
+  if (kind === "cadence") return <div className="sn-cadence-visual"><div className="sn-mini-header"><span>New relationship cadence</span><span className="sn-mini-tag">Active</span></div><ol>{[
+    { icon: Mail, title: "A thoughtful introduction", subtitle: "Day 1 · Email", done: true },
+    { icon: Phone, title: "Make the connection", subtitle: "Day 3 · Call", done: false },
+    { icon: ListTodo, title: "Follow through", subtitle: "Day 5 · Task", done: false },
+  ].map(({ icon: Icon, title, subtitle, done }) => <li key={title} className={done ? "complete" : ""}><span className="sn-cadence-node"><Icon size={17} aria-hidden="true" /></span><div><strong>{title}</strong><span>{subtitle}</span></div>{done ? <CheckCircle2 size={16} aria-label="Complete" /> : <Clock size={16} aria-label="Upcoming" />}</li>)}</ol></div>;
+  return <div className="sn-success-visual"><div className="sn-mini-header"><span>Orbit · Customer launch</span><span className="sn-mini-tag">In progress</span></div><div className="sn-success-summary"><strong>A strong start.</strong><span>2 of 3 milestones complete</span></div><div className="sn-success-track" aria-hidden="true"><span /></div><ul>{["Agreement signed", "Kickoff completed", "First team training"].map((text, i) => <li key={text}>{i < 2 ? <CheckCircle2 size={17} aria-hidden="true" /> : <Circle size={17} aria-hidden="true" />}<span>{text}</span>{i === 2 && <small>Up next</small>}</li>)}</ul></div>;
 }
-
-// ── Workflow ─────────────────────────────────────────────────────────
 
 function Workflow() {
-  const [ref, shown] = useReveal();
-  const steps = [
-    { label: "Capture", detail: "Inbound leads land with source, score, and owner." },
-    { label: "Qualify", detail: "Reps work a clear path — not a spreadsheet of hope." },
-    { label: "Close", detail: "Quotes, approvals, and forecasts stay on the same deal." },
-    { label: "Retain", detail: "Cases and entitlements keep customers after the sale." },
-  ];
-
-  return (
-    <section
-      id="workflow"
-      ref={ref}
-      style={{
-        borderTop: `1px solid ${C.rule}`,
-        borderBottom: `1px solid ${C.rule}`,
-        background: `linear-gradient(90deg, color-mix(in srgb, var(--sn-raised) 80%, transparent), transparent 40%, color-mix(in srgb, var(--sn-raised) 80%, transparent))`,
-        opacity: shown ? 1 : 0,
-        transform: shown ? "none" : "translateY(18px)",
-        transition: "opacity 600ms ease, transform 600ms ease",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 1120,
-          margin: "0 auto",
-          padding: "clamp(72px, 10vw, 112px) clamp(18px, 4vw, 40px)",
-        }}
-      >
-        <h2
-          style={{
-            fontFamily: display,
-            fontSize: "clamp(28px, 4vw, 42px)",
-            fontWeight: 700,
-            letterSpacing: "-0.03em",
-            color: C.cream,
-            margin: "0 0 12px",
-          }}
-        >
-          One motion from first touch to renewal.
-        </h2>
-        <p
-          style={{
-            fontFamily: body,
-            fontSize: 17,
-            lineHeight: 1.55,
-            color: C.slate,
-            margin: "0 0 40px",
-            maxWidth: 480,
-          }}
-        >
-          Stop stitching together point tools. Sales Nebula carries the account across the full revenue cycle.
-        </p>
-
-        <ol
-          style={{
-            listStyle: "none",
-            margin: 0,
-            padding: 0,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))",
-            gap: 0,
-          }}
-        >
-          {steps.map((s, i) => (
-            <li
-              key={s.label}
-              style={{
-                padding: "24px 20px 24px 0",
-                borderTop: `1px solid ${C.rule}`,
-                position: "relative",
-              }}
-            >
-              <div
-                style={{
-                  fontFamily: display,
-                  fontSize: 28,
-                  fontWeight: 800,
-                  color: C.amber,
-                  letterSpacing: "-0.03em",
-                  marginBottom: 8,
-                }}
-              >
-                {s.label}
-              </div>
-              <p style={{ fontFamily: body, fontSize: 14.5, lineHeight: 1.55, color: C.slate, margin: 0 }}>
-                {s.detail}
-              </p>
-              {i < steps.length - 1 && (
-                <span
-                  className="sn-desktop-only"
-                  aria-hidden="true"
-                  style={{
-                    position: "absolute",
-                    right: 8,
-                    top: 28,
-                    color: C.dim,
-                    fontFamily: display,
-                    fontSize: 20,
-                  }}
-                >
-                  →
-                </span>
-              )}
-            </li>
-          ))}
-        </ol>
-      </div>
-    </section>
-  );
+  return <section id="workflow" className="sn-site-section sn-workflow-section" aria-labelledby="workflow-title"><div className="sn-site-container">
+    <div className="sn-section-heading"><p className="sn-eyebrow">LESS HANDOFF. MORE FOLLOW-THROUGH.</p><h2 id="workflow-title">Good relationships<br />deserve a better system.</h2><p>From the first conversation to the next renewal, keep the context that makes your team better.</p></div>
+    <div className="sn-workflow-list">{workflows.map(({ number, title, copy, tags, visual }) => <article className="sn-workflow-row" key={number}><div className="sn-workflow-copy"><span className="sn-step-number">{number}<span /></span><h3>{title}</h3><p>{copy}</p><ul>{tags.map((tag) => <li key={tag}><Check size={14} aria-hidden="true" />{tag}</li>)}</ul></div><div className={`sn-workflow-visual sn-workflow-${visual}`}><WorkflowVisual kind={visual} /><span className="sn-visual-label">ILLUSTRATIVE WORKFLOW</span></div></article>)}</div>
+  </div></section>;
 }
 
-// ── Ownership (self-host — no API inventory) ─────────────────────────
+function Integrations() {
+  const integrations = [
+    { name: "Google Workspace", badge: "G", className: "google", detail: "Gmail conversations & Calendar events", icon: Mail },
+    { name: "Microsoft Outlook", badge: "O", className: "outlook", detail: "Your mailbox & calendar, connected", icon: Calendar },
+    { name: "Stripe", badge: "S", className: "stripe", detail: "Payment links & recorded receipts", icon: CreditCard },
+    { name: "DocuSign", badge: "D", className: "docusign", detail: "Quote signatures & envelope status", icon: FileText },
+  ];
+  return <section id="integrations" className="sn-site-section sn-integration-section" aria-labelledby="integrations-title"><div className="sn-site-container"><div className="sn-section-heading sn-heading-split"><div><p className="sn-eyebrow">FAMILIAR TOOLS. SHARED CONTEXT.</p><h2 id="integrations-title">Fits into your day.<br />Brings it all together.</h2></div><p>Connect the tools your team already uses, so conversations and commercial details stay close to the customer.</p></div><div className="sn-integrations">{integrations.map(({ name, badge, className, detail }) => <div className="sn-integration" key={name}><span className={`sn-integration-monogram sn-provider-${className}`} aria-hidden="true">{badge}</span><h3>{name}</h3><p>{detail}</p></div>)}</div><p className="sn-integration-footnote"><Lock size={14} aria-hidden="true" />Provider accounts and administrator setup required. <a href={`${REPO}/blob/main/docs/REVENUE_WORKFLOWS.md`} target="_blank" rel="noopener noreferrer">Explore setup & scope <ArrowUpRight size={13} aria-hidden="true" /></a></p></div></section>;
+}
 
 function Ownership() {
-  const [ref, shown] = useReveal();
-  return (
-    <section
-      ref={ref}
-      style={{
-        maxWidth: 1120,
-        margin: "0 auto",
-        padding: "clamp(72px, 10vw, 120px) clamp(18px, 4vw, 40px)",
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
-        gap: 40,
-        alignItems: "end",
-        opacity: shown ? 1 : 0,
-        transform: shown ? "none" : "translateY(18px)",
-        transition: "opacity 600ms ease, transform 600ms ease",
-      }}
-    >
-      <div>
-        <h2
-          style={{
-            fontFamily: display,
-            fontSize: "clamp(28px, 4vw, 40px)",
-            fontWeight: 700,
-            letterSpacing: "-0.03em",
-            color: C.cream,
-            margin: "0 0 14px",
-          }}
-        >
-          Your CRM. Your servers. Your rules.
-        </h2>
-        <p style={{ fontFamily: body, fontSize: 16.5, lineHeight: 1.6, color: C.slate, margin: 0 }}>
-          Run Sales Nebula where your data already lives. No per-seat tax for growing the team that closes.
-        </p>
-      </div>
-      <p
-        style={{
-          fontFamily: body,
-          fontSize: 15,
-          lineHeight: 1.65,
-          color: C.dim,
-          margin: 0,
-          maxWidth: 360,
-        }}
-      >
-        Demo the product in the browser, then request access when you are ready to bring your own pipeline online.
-      </p>
-    </section>
-  );
+  return <section className="sn-site-section sn-ownership-section" aria-labelledby="ownership-title"><div className="sn-site-container sn-ownership-layout"><div><p className="sn-eyebrow">A WORKSPACE YOU CAN MAKE YOURS</p><h2 id="ownership-title">Your process.<br />Your data.<br /><span>Your Nebula.</span></h2><p>Self-host Sales Nebula on your own infrastructure. Shape the workspace around the way your team sells, supports, and grows.</p><a className="sn-text-link" href={REPO} target="_blank" rel="noopener noreferrer"><Github size={19} aria-hidden="true" />Explore the project <ArrowUpRight size={16} aria-hidden="true" /></a></div><div className="sn-ownership-features">{[
+    { icon: Server, title: "Choose where your data lives", copy: "Run a dedicated installation for your company, with deployment and backups under your control." },
+    { icon: Shield, title: "Give the right people the right access", copy: "Use roles, record sharing, and field permissions to support the way your team works." },
+    { icon: BarChart3, title: "Make the workspace fit the work", copy: "Build reports, add custom fields and formulas, and guide repeatable processes with automation." },
+  ].map(({ icon: Icon, title, copy }) => <article key={title}><span><Icon size={22} aria-hidden="true" /></span><div><h3>{title}</h3><p>{copy}</p></div></article>)}</div></div></section>;
 }
 
-// ── Access form ──────────────────────────────────────────────────────
+const questions = [
+  ["Can I try it before requesting access?", "Yes. Choose Explore the demo, then Use demo access on the sign-in page and sign in. The read-only demo runs in your browser with sample records. You do not need to create an account or enter payment details."],
+  ["What happens after I request access?", "You’ll receive an email to verify your address. After verification, your request goes to an administrator for review. If approved, you’ll receive an invitation to create your account. Submitting a request does not immediately grant access."],
+  ["Can we run Sales Nebula ourselves?", "Yes. Sales Nebula supports self-hosting with Docker or a Node.js and PostgreSQL deployment. Each installation serves one company. Your team manages hosting, backups, upgrades, and any connected provider accounts."],
+  ["Can we bring our existing CRM data?", "You can import CSV files with field mapping, a row preview, and duplicate review. Start with a small sample to check your mapping before importing the rest. Spreadsheet files should be exported to CSV first."],
+  ["Are the integrations ready to use?", "The integrations are built in, but your administrator needs to configure the provider credentials and connections. Google and Microsoft require account consent, Stripe needs payment and webhook configuration, and DocuSign needs a configured account. Provider fees may apply."],
+  ["Is everything shown available in the browser demo?", "The demo gives you a read-only view of the core CRM with sample data. Live email, payment collection, signature requests, and other connected workflows require a configured installation. The previews on this page are illustrative, not live customer data."],
+];
 
-function AccessForm() {
-  const [form, setForm] = useState({
-    email: "",
-    firstName: "",
-    lastName: "",
-    company: "",
-    companySize: "",
-    useCase: "",
-    interestedIn: "cloud",
-  });
+function FAQ() {
+  return <section id="faq" className="sn-site-section" aria-labelledby="faq-title"><div className="sn-site-container sn-faq-layout"><div><p className="sn-eyebrow">A FEW THINGS TO KNOW</p><h2 id="faq-title">Good questions.<br />Clear answers.</h2><p className="sn-faq-intro">A closer look before you make<br className="sn-desktop-break" /> your next move.</p></div><div className="sn-faq-list">{questions.map(([question, answer]) => <details key={question}><summary>{question}<ChevronDown size={19} aria-hidden="true" /></summary><p>{answer}</p></details>)}</div></div></section>;
+}
+
+function AccessForm({ go }) {
+  const [form, setForm] = useState({ firstName: "", lastName: "", email: "", company: "", companySize: "", interestedIn: "cloud", useCase: "" });
   const [state, setState] = useState("idle");
   const [message, setMessage] = useState("");
   const [devLink, setDevLink] = useState(null);
+  const feedback = useRef(null);
+  const pending = useRef(false);
+  const abort = useRef(null);
+  const set = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
+  useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => { if (state === "sent" || state === "error") feedback.current?.focus(); }, [state]);
 
-  const set = (k) => (e) => setForm((p) => ({ ...p, [k]: e.target.value }));
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!form.email.trim()) {
-      setState("error");
-      setMessage("Enter your work email.");
-      return;
-    }
-    setState("sending");
-    setMessage("");
+  async function submit(event) {
+    event.preventDefault();
+    if (pending.current) return;
+    pending.current = true;
+    setState("sending"); setMessage("");
+    const controller = new AbortController(); abort.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-      const res = await fetch("/api/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, source: "landing" }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setState("error");
-        setMessage(data.error || "Something went wrong. Try again.");
-        return;
+      const response = await fetch("/api/signup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, email: form.email.trim(), source: "landing" }), signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || (response.status === 429 ? "Too many requests. Please wait a few minutes before trying again." : "We couldn’t submit your request. Please try again."));
+      if (!data.accepted) throw new Error("The server returned an unexpected response. Please try again.");
+      setMessage(data.message || "We’ve sent a verification link. Please check your inbox and spam folder.");
+      if (import.meta.env.DEV && data.devVerifyUrl) {
+        const url = new URL(data.devVerifyUrl, window.location.origin);
+        if (url.origin === window.location.origin) setDevLink(url.href);
       }
       setState("sent");
-      setMessage(data.message);
-      if (data.devVerifyUrl) setDevLink(data.devVerifyUrl);
-    } catch {
+    } catch (error) {
+      setMessage(error.name === "AbortError" ? "The request took too long. Please try again." : error instanceof TypeError ? "Could not reach the server. Check your connection and try again." : error.message);
       setState("error");
-      setMessage("Could not reach the server. Check your connection and try again.");
+    } finally {
+      window.clearTimeout(timeout); pending.current = false; abort.current = null;
     }
-  };
-
-  const field = {
-    width: "100%",
-    padding: "12px 14px",
-    borderRadius: 8,
-    background: C.raised,
-    border: `1px solid ${C.rule}`,
-    color: C.cream,
-    fontSize: 15,
-    fontFamily: body,
-  };
-  const label = {
-    display: "block",
-    fontFamily: body,
-    fontSize: 12,
-    fontWeight: 600,
-    letterSpacing: "0.04em",
-    textTransform: "uppercase",
-    color: C.dim,
-    marginBottom: 6,
-  };
-
-  if (state === "sent") {
-    return (
-      <section id="access" style={{ maxWidth: 560, margin: "0 auto", padding: "clamp(64px, 9vw, 100px) 20px" }}>
-        <div
-          style={{
-            textAlign: "center",
-            padding: "48px 28px",
-            borderTop: `1px solid color-mix(in srgb, var(--sn-green) 40%, var(--sn-rule))`,
-          }}
-        >
-          <h3
-            style={{
-              fontFamily: display,
-              fontWeight: 700,
-              fontSize: 32,
-              letterSpacing: "-0.03em",
-              color: C.cream,
-              margin: "0 0 12px",
-            }}
-          >
-            Check your inbox
-          </h3>
-          <p style={{ fontFamily: body, fontSize: 16, lineHeight: 1.6, color: C.slate, margin: 0 }}>
-            {message}
-          </p>
-          {devLink && (
-            <a
-              href={devLink}
-              style={{
-                display: "inline-block",
-                marginTop: 20,
-                fontFamily: body,
-                fontSize: 13,
-                color: C.amber,
-                wordBreak: "break-all",
-              }}
-            >
-              Development link: verify now
-            </a>
-          )}
-        </div>
-      </section>
-    );
   }
 
-  return (
-    <section
-      id="access"
-      style={{
-        maxWidth: 1120,
-        margin: "0 auto",
-        padding: "clamp(64px, 9vw, 110px) clamp(18px, 4vw, 40px)",
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
-        gap: 48,
-        alignItems: "start",
-      }}
-    >
-      <div>
-        <h2
-          style={{
-            fontFamily: display,
-            fontWeight: 700,
-            fontSize: "clamp(28px, 4vw, 40px)",
-            letterSpacing: "-0.03em",
-            color: C.cream,
-            margin: "0 0 14px",
-          }}
-        >
-          Request access
-        </h2>
-        <p style={{ fontFamily: body, fontSize: 16, lineHeight: 1.6, color: C.slate, margin: "0 0 20px" }}>
-          Tell us what you sell and what you are replacing. We review every request and send an invite when you are approved.
-        </p>
-        <p style={{ fontFamily: body, fontSize: 14, lineHeight: 1.55, color: C.dim, margin: 0 }}>
-          Prefer to look around first?{" "}
-          <a href="/login" style={{ color: C.amber, fontWeight: 600 }}>
-            Open the demo
-          </a>{" "}
-          with the credentials on the sign-in page.
-        </p>
-      </div>
-
-      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {state === "error" && (
-          <div
-            style={{
-              padding: "12px 14px",
-              borderRadius: 8,
-              background: "rgba(248,113,113,0.1)",
-              border: "1px solid rgba(248,113,113,0.25)",
-              color: "var(--sn-red-ink)",
-              fontFamily: body,
-              fontSize: 14,
-            }}
-          >
-            {message}
-          </div>
-        )}
-        <div className="sn-form-2col">
-          <div>
-            <label style={label} htmlFor="fn">
-              First name
-            </label>
-            <input id="fn" style={field} value={form.firstName} onChange={set("firstName")} />
-          </div>
-          <div>
-            <label style={label} htmlFor="ln">
-              Last name
-            </label>
-            <input id="ln" style={field} value={form.lastName} onChange={set("lastName")} />
-          </div>
-        </div>
-        <div>
-          <label style={label} htmlFor="em">
-            Work email
-          </label>
-          <input id="em" type="email" required style={field} value={form.email} onChange={set("email")} />
-        </div>
-        <div>
-          <label style={label} htmlFor="co">
-            Company
-          </label>
-          <input id="co" style={field} value={form.company} onChange={set("company")} />
-        </div>
-        <div className="sn-form-2col">
-          <div>
-            <label style={label} htmlFor="sz">
-              Company size
-            </label>
-            <select id="sz" style={field} value={form.companySize} onChange={set("companySize")}>
-              <option value="">Select</option>
-              <option value="1-10">1–10</option>
-              <option value="11-50">11–50</option>
-              <option value="51-200">51–200</option>
-              <option value="201-1000">201–1,000</option>
-              <option value="1000+">1,000+</option>
-            </select>
-          </div>
-          <div>
-            <label style={label} htmlFor="dep">
-              Deploy preference
-            </label>
-            <select id="dep" style={field} value={form.interestedIn} onChange={set("interestedIn")}>
-              <option value="cloud">Hosted for us</option>
-              <option value="self-hosted">Self-hosted</option>
-              <option value="both">Either</option>
-            </select>
-          </div>
-        </div>
-        <div>
-          <label style={label} htmlFor="uc">
-            What are you replacing?
-          </label>
-          <textarea
-            id="uc"
-            rows={3}
-            style={{ ...field, resize: "vertical" }}
-            value={form.useCase}
-            onChange={set("useCase")}
-            placeholder="Salesforce, HubSpot, spreadsheets…"
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={state === "sending"}
-          style={{
-            marginTop: 6,
-            fontFamily: body,
-            fontSize: 15,
-            fontWeight: 700,
-            padding: "14px 20px",
-            borderRadius: 8,
-            border: "none",
-            background: C.amber,
-            color: C.cta,
-            cursor: state === "sending" ? "wait" : "pointer",
-            opacity: state === "sending" ? 0.7 : 1,
-          }}
-        >
-          {state === "sending" ? "Sending…" : "Submit request"}
-        </button>
-      </form>
-    </section>
-  );
+  return <section id="access" className="sn-site-section sn-access-section" aria-labelledby="access-title"><div className="sn-site-container sn-access-layout"><div className="sn-access-copy"><p className="sn-eyebrow">YOUR NEXT CHAPTER STARTS HERE</p><h2 id="access-title">Bring your<br />next win<br /><span>a little closer.</span></h2><p>Tell us a little about your team. We’ll review your request and help you take the next step.</p><ol className="sn-access-steps"><li><span>01</span>Request access</li><li><span>02</span>Verify your email</li><li><span>03</span>Receive an invite after approval</li></ol><p className="sn-access-demo">Just looking around? <PageLink go={go} href="/login">Explore the demo <ArrowUpRight size={14} aria-hidden="true" /></PageLink></p></div>
+      <div className="sn-access-card">{state === "sent" ? <div className="sn-form-success" ref={feedback} tabIndex={-1} role="status"><span className="sn-success-icon"><Mail size={28} aria-hidden="true" /></span><h3>Check your inbox.</h3><p>{message}</p><p>Once your email is verified, an administrator will review your request.</p>{devLink && <a href={devLink}>Development link: verify now</a>}<PageLink go={go} href="/login" className="sn-site-button sn-site-button-outline">Explore the demo <ArrowRight size={17} aria-hidden="true" /></PageLink></div> : <form onSubmit={submit} aria-label="Request access" aria-busy={state === "sending"}>
+        <h3>Let’s meet your team.</h3><p className="sn-form-help">Only your work email is required.</p>
+        {state === "error" && <div className="sn-form-error" role="alert" tabIndex={-1} ref={feedback}>{message}</div>}
+        <fieldset disabled={state === "sending"}>
+          <div className="sn-field-row"><label htmlFor="fn">First name<input id="fn" name="firstName" autoComplete="given-name" maxLength={100} value={form.firstName} onChange={set("firstName")} /></label><label htmlFor="ln">Last name<input id="ln" name="lastName" autoComplete="family-name" maxLength={100} value={form.lastName} onChange={set("lastName")} /></label></div>
+          <label htmlFor="em">Work email <span aria-hidden="true">*</span><input id="em" name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@company.com" value={form.email} onChange={set("email")} /></label>
+          <label htmlFor="co">Company<input id="co" name="company" autoComplete="organization" maxLength={200} value={form.company} onChange={set("company")} /></label>
+          <div className="sn-field-row"><label htmlFor="sz">Company size<select id="sz" name="companySize" value={form.companySize} onChange={set("companySize")}><option value="">Select size</option>{["1-10", "11-50", "51-200", "201-1000", "1000+"].map((value) => <option key={value} value={value}>{value.replace("-", "–")}</option>)}</select></label><label htmlFor="dep">Deploy preference<select id="dep" name="interestedIn" value={form.interestedIn} onChange={set("interestedIn")}><option value="cloud">Hosted for us</option><option value="self-hosted">Self-hosted</option><option value="both">Help me decide</option></select></label></div>
+          <details className="sn-form-optional"><summary>Add a little context <span>Optional</span><ChevronDown size={15} aria-hidden="true" /></summary><label htmlFor="uc">What are you replacing?<textarea id="uc" name="useCase" rows={3} maxLength={2000} value={form.useCase} onChange={set("useCase")} placeholder="Your current CRM, spreadsheets, or the workflow you’d like to improve…" /></label></details>
+          <button className="sn-site-button sn-submit-button" type="submit" disabled={state === "sending"}>{state === "sending" ? "Sending…" : "Submit request"}<ArrowRight size={17} aria-hidden="true" /></button>
+        </fieldset><p className="sn-form-privacy"><Lock size={13} aria-hidden="true" /><span>We’ll use these details to review and respond to your request. <PageLink go={go} href="/privacy">Privacy policy</PageLink></span></p>
+      </form>}</div>
+    </div></section>;
 }
-
-// ── Footer ───────────────────────────────────────────────────────────
 
 function Footer({ go }) {
-  return (
-    <footer
-      style={{
-        borderTop: `1px solid ${C.rule}`,
-        padding: "28px clamp(18px, 4vw, 40px)",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 1120,
-          margin: "0 auto",
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 16,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <BrandMark size={28} />
-          <span style={{ fontFamily: display, fontWeight: 700, fontSize: 15, color: C.cream }}>
-            Sales Nebula
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
-          <button
-            type="button"
-            onClick={() => go("/privacy")}
-            style={{
-              fontFamily: body,
-              fontSize: 13,
-              fontWeight: 600,
-              color: C.slate,
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              padding: 0,
-            }}
-          >
-            Privacy
-          </button>
-          <button
-            type="button"
-            onClick={() => go("/terms")}
-            style={{
-              fontFamily: body,
-              fontSize: 13,
-              fontWeight: 600,
-              color: C.slate,
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              padding: 0,
-            }}
-          >
-            Terms
-          </button>
-          <button
-            type="button"
-            onClick={() => go("/login")}
-            style={{
-              fontFamily: body,
-              fontSize: 13,
-              fontWeight: 600,
-              color: C.slate,
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              padding: 0,
-            }}
-          >
-            Sign in
-          </button>
-          <a
-            href="#access"
-            onClick={(e) => {
-              e.preventDefault();
-              scrollTo("access");
-            }}
-            style={{ fontFamily: body, fontSize: 13, fontWeight: 600, color: C.amber, textDecoration: "none" }}
-          >
-            Request access
-          </a>
-        </div>
-      </div>
-    </footer>
-  );
+  return <footer className="sn-site-footer"><div className="sn-site-container"><div className="sn-footer-main"><div><a href="/" className="sn-site-brand"><BrandMark size={30} alt="" />Sales Nebula<span className="sn-brand-dot">.</span></a><p>A clearer view. A stronger relationship.</p></div><nav aria-label="Footer navigation"><a href="#product">Product</a><a href="#integrations">Integrations</a><a href={REPO} target="_blank" rel="noopener noreferrer">GitHub <ArrowUpRight size={13} aria-hidden="true" /></a><PageLink go={go} href="/login">Log in</PageLink></nav></div><div className="sn-footer-bottom"><span>© {new Date().getFullYear()} Sales Nebula</span><span>Built for the whole relationship.</span><div><PageLink go={go} href="/privacy">Privacy</PageLink><PageLink go={go} href="/terms">Terms</PageLink></div></div></div></footer>;
 }
-
-// ── Page ─────────────────────────────────────────────────────────────
 
 export default function Landing({ go }) {
   useEffect(() => {
-    const scrollToAccess = () => {
-      if (window.location.hash !== "#access") return;
-      window.setTimeout(() => scrollTo("access"), 80);
-    };
-    scrollToAccess();
-    window.addEventListener("hashchange", scrollToAccess);
-    return () => window.removeEventListener("hashchange", scrollToAccess);
+    const id = window.location.hash.slice(1);
+    if (!id) return;
+    const frame = window.requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: "instant", block: "start" }));
+    return () => window.cancelAnimationFrame(frame);
   }, []);
-
-  return (
-    <div style={{ background: C.void, minHeight: "100vh", color: C.cream, overflow: "visible" }}>
-      <style>{`
-        .sn-hero-plain {
-          background: var(--sn-void);
-          color: var(--sn-cream);
-          padding: clamp(28px, 5vw, 56px) clamp(18px, 4vw, 40px) clamp(48px, 7vw, 80px);
-          overflow: hidden;
-        }
-        .sn-hero-grid {
-          max-width: 1180px;
-          margin: 0 auto;
-          display: grid;
-          grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.15fr);
-          gap: clamp(28px, 4vw, 48px);
-          align-items: center;
-        }
-        .sn-hero-copy h1 {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: clamp(32px, 4.4vw, 48px);
-          font-weight: 700;
-          letter-spacing: -0.03em;
-          line-height: 1.12;
-          color: var(--sn-cream);
-          margin: 0 0 16px;
-          max-width: 14ch;
-        }
-        .sn-hero-copy > p {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 16px;
-          line-height: 1.6;
-          color: var(--sn-slate);
-          margin: 0 0 22px;
-          max-width: 44ch;
-        }
-        .sn-hero-copy ul {
-          list-style: none;
-          margin: 0 0 26px;
-          padding: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .sn-hero-copy li {
-          display: flex;
-          align-items: flex-start;
-          gap: 10px;
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 14.5px;
-          font-weight: 500;
-          color: var(--sn-body);
-          line-height: 1.4;
-        }
-        .sn-check {
-          flex-shrink: 0;
-          width: 20px;
-          height: 20px;
-          border-radius: 50%;
-          background: var(--sn-amber);
-          color: var(--sn-cta-text);
-          font-size: 11px;
-          font-weight: 700;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          margin-top: 1px;
-        }
-        .sn-hero-ctas {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          margin-bottom: 12px;
-        }
-        .sn-btn-primary {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 15px;
-          font-weight: 700;
-          padding: 14px 22px;
-          border-radius: 10px;
-          border: none;
-          background: var(--sn-amber);
-          color: var(--sn-cta-text);
-          cursor: pointer;
-        }
-        .sn-btn-secondary {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 15px;
-          font-weight: 700;
-          padding: 14px 22px;
-          border-radius: 10px;
-          border: 1px solid var(--sn-rule);
-          background: var(--sn-raised);
-          color: var(--sn-cream);
-          cursor: pointer;
-        }
-        .sn-hero-micro {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 12.5px;
-          color: var(--sn-dim);
-          margin: 0;
-        }
-        .sn-hero-visual { position: relative; min-height: 360px; }
-        .sn-hero-shot { position: relative; width: 100%; min-height: 380px; }
-        .sn-laptop {
-          position: relative;
-          margin-left: 8%;
-          width: 92%;
-          z-index: 1;
-        }
-        .sn-laptop-bezel {
-          background: #0A1224;
-          border: 1px solid var(--sn-rule);
-          border-radius: 12px 12px 6px 6px;
-          padding: 10px 10px 0;
-          box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
-        }
-        .sn-portal {
-          display: flex;
-          background: var(--sn-void);
-          border-radius: 8px 8px 0 0;
-          overflow: hidden;
-          min-height: 268px;
-        }
-        .sn-portal-side {
-          width: 48px;
-          background: var(--sn-panel);
-          border-right: 1px solid var(--sn-rule);
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 12px;
-          padding: 12px 0;
-          color: var(--sn-dim);
-          font-size: 12px;
-        }
-        .sn-side-brand {
-          width: 28px;
-          height: 28px;
-          border-radius: 7px;
-          background: linear-gradient(135deg, #F5A623, #E8961A);
-          color: #060B1A;
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 9px;
-          font-weight: 800;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          margin-bottom: 4px;
-        }
-        .sn-portal-side span.active {
-          color: var(--sn-amber);
-        }
-        .sn-portal-main { flex: 1; min-width: 0; padding: 12px 12px 16px; background: var(--sn-void); }
-        .sn-portal-top {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          margin-bottom: 12px;
-          font-family: "Poppins", system-ui, sans-serif;
-          color: var(--sn-cream);
-        }
-        .sn-portal-top strong { font-size: 14px; font-weight: 700; }
-        .sn-pill {
-          font-size: 10px;
-          font-weight: 600;
-          background: rgba(245, 166, 35, 0.12);
-          color: var(--sn-amber);
-          border: 1px solid rgba(245, 166, 35, 0.28);
-          padding: 3px 8px;
-          border-radius: 999px;
-        }
-        .sn-kanban {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 8px;
-        }
-        .sn-col-h {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 10px;
-          font-weight: 600;
-          color: var(--sn-dim);
-          margin-bottom: 8px;
-          text-transform: uppercase;
-          letter-spacing: 0.04em;
-        }
-        .sn-card {
-          background: var(--sn-panel);
-          border: 1px solid var(--sn-rule);
-          border-radius: 8px;
-          padding: 8px;
-          margin-bottom: 8px;
-        }
-        .sn-card.hot { border-color: rgba(245, 166, 35, 0.45); }
-        .sn-card-t {
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 11px;
-          font-weight: 600;
-          color: var(--sn-cream);
-          margin-bottom: 6px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .sn-card-m {
-          display: flex;
-          justify-content: space-between;
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 10px;
-          color: var(--sn-slate);
-        }
-        .sn-card-m b { color: var(--sn-amber); font-weight: 700; }
-        .sn-laptop-base {
-          height: 10px;
-          width: 104%;
-          margin-left: -2%;
-          background: linear-gradient(180deg, #142038, #0A1224);
-          border-radius: 0 0 10px 10px;
-          border: 1px solid var(--sn-rule);
-          border-top: none;
-        }
-        .sn-phone {
-          position: absolute;
-          left: 0;
-          bottom: 18px;
-          width: 118px;
-          background: #0A1224;
-          border: 1px solid var(--sn-rule);
-          border-radius: 18px;
-          padding: 8px;
-          box-shadow: 0 18px 36px rgba(0, 0, 0, 0.4);
-          z-index: 3;
-        }
-        .sn-phone-notch {
-          width: 42px;
-          height: 5px;
-          border-radius: 999px;
-          background: var(--sn-rule);
-          margin: 2px auto 8px;
-        }
-        .sn-phone-body {
-          background: var(--sn-panel);
-          border: 1px solid var(--sn-rule);
-          border-radius: 12px;
-          padding: 10px;
-          min-height: 170px;
-        }
-        .sn-phone-h { font-family: "Poppins", system-ui, sans-serif; font-size: 10px; color: var(--sn-amber); font-weight: 600; margin-bottom: 4px; }
-        .sn-phone-title { font-family: "Poppins", system-ui, sans-serif; font-size: 13px; font-weight: 700; color: var(--sn-cream); }
-        .sn-phone-val { font-family: "Poppins", system-ui, sans-serif; font-size: 16px; font-weight: 700; color: var(--sn-amber); margin: 6px 0 10px; }
-        .sn-phone-row { font-family: "Poppins", system-ui, sans-serif; font-size: 10px; color: var(--sn-slate); margin-bottom: 4px; }
-        .sn-phone-btn {
-          margin-top: 12px;
-          background: var(--sn-amber);
-          color: var(--sn-cta-text);
-          font-family: "Poppins", system-ui, sans-serif;
-          font-size: 10px;
-          font-weight: 700;
-          text-align: center;
-          padding: 8px;
-          border-radius: 8px;
-        }
-        .sn-float {
-          position: absolute;
-          background: var(--sn-panel);
-          border: 1px solid var(--sn-rule);
-          border-radius: 12px;
-          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
-          padding: 12px 14px;
-          z-index: 4;
-          font-family: "Poppins", system-ui, sans-serif;
-        }
-        .sn-float-report { top: 0; right: 4%; width: 158px; }
-        .sn-float-ai { right: 2%; bottom: 28px; width: 176px; }
-        .sn-float-label { font-size: 11px; font-weight: 700; color: var(--sn-cream); margin-bottom: 8px; }
-        .sn-bars { display: flex; align-items: flex-end; gap: 5px; height: 54px; }
-        .sn-bars span {
-          flex: 1;
-          background: linear-gradient(180deg, var(--sn-amber), color-mix(in srgb, var(--sn-amber) 35%, transparent));
-          border-radius: 3px 3px 1px 1px;
-          display: block;
-        }
-        .sn-ai-line { font-size: 12px; color: var(--sn-slate); margin-bottom: 8px; }
-        .sn-ai-bar { height: 6px; border-radius: 999px; background: var(--sn-raised); overflow: hidden; }
-        .sn-ai-bar i { display: block; width: 68%; height: 100%; background: var(--sn-amber); border-radius: 999px; }
-        @media (max-width: 900px) {
-          .sn-hero-grid { grid-template-columns: 1fr; }
-          .sn-hero-copy h1 { max-width: none; }
-          .sn-hero-visual { min-height: 320px; }
-          .sn-laptop { margin-left: 14%; width: 86%; }
-          .sn-phone { width: 100px; }
-          .sn-kanban { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        }
-        @media (max-width: 560px) {
-          .sn-float-report, .sn-float-ai, .sn-phone { display: none; }
-          .sn-laptop { margin-left: 0; width: 100%; }
-        }
-        select option { background: var(--sn-raised); color: var(--sn-cream); }
-        /* The header is sticky: an anchor lands its section below it, not under it.
-           (The Request access heading sat 5px behind it at phone width.) */
-        #product, #workflow, #access { scroll-margin-top: 24px; }
-      `}</style>
-      <Header go={go} />
-      <Hero go={go} />
-      <Product />
-      <Workflow />
-      <Ownership />
-      <AccessForm />
-      <Footer go={go} />
-    </div>
-  );
-}
-
-// ── Email verification ───────────────────────────────────────────────
-
-export function VerifyPage({ go }) {
-  const [state, setState] = useState("working");
-  const [message, setMessage] = useState("Confirming your email address");
-
-  useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get("token");
-    if (!token) {
-      setState("error");
-      setMessage("That link is missing its verification token.");
-      return;
-    }
-
-    fetch("/api/signup/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    })
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) {
-          setState("error");
-          setMessage(data.error || "That verification link is not valid.");
-          return;
-        }
-        setState("done");
-        setMessage(data.message);
-      })
-      .catch(() => {
-        setState("error");
-        setMessage("Could not reach the server. Try the link again shortly.");
-      });
-  }, []);
-
-  const accent = state === "error" ? "var(--sn-red)" : state === "done" ? C.green : C.amber;
-
-  return (
-    <CenteredCard
-      badge={state === "working" ? "…" : state === "done" ? "OK" : "!"}
-      accent={accent}
-      title={state === "done" ? "Email confirmed" : state === "error" ? "Link not valid" : "One moment"}
-      body={message}
-      action={
-        state !== "working"
-          ? {
-              label: state === "done" ? "Back to home" : "Request access again",
-              onClick: () => go("/"),
-            }
-          : null
-      }
-    />
-  );
-}
-
-// ── Invite acceptance ────────────────────────────────────────────────
-
-export function AcceptInvitePage({ go }) {
-  const [invite, setInvite] = useState(null);
-  const [state, setState] = useState("loading");
-  const [error, setError] = useState("");
-  const [form, setForm] = useState({ firstName: "", lastName: "", password: "", confirm: "" });
-  const token = useRef(new URLSearchParams(window.location.search).get("token"));
-
-  useEffect(() => {
-    if (!token.current) {
-      setState("invalid");
-      setError("That link is missing its invite token.");
-      return;
-    }
-    fetch(`/api/signup/invites/lookup/${encodeURIComponent(token.current)}`)
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) {
-          setState("invalid");
-          setError(data.error || "That invite link is not valid.");
-          return;
-        }
-        setInvite(data);
-        setForm((p) => ({ ...p, firstName: data.firstName || "", lastName: data.lastName || "" }));
-        setState("ready");
-      })
-      .catch(() => {
-        setState("invalid");
-        setError("Could not reach the server.");
-      });
-  }, []);
-
-  const rules = [
-    ["At least 8 characters", form.password.length >= 8],
-    ["An uppercase letter", /[A-Z]/.test(form.password)],
-    ["A lowercase letter", /[a-z]/.test(form.password)],
-    ["A number", /[0-9]/.test(form.password)],
-    ["A symbol", /[^A-Za-z0-9]/.test(form.password)],
-  ];
-  const ready =
-    rules.every((r) => r[1]) && form.password === form.confirm && form.firstName && form.lastName;
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!ready) return;
-    setState("submitting");
-    setError("");
-    try {
-      const res = await fetch("/api/signup/invites/accept", {
-        method: "POST",
-        credentials: "same-origin",
-        // Sign straight in with a cookie session; no token reaches the page.
-        headers: { "Content-Type": "application/json", "X-Session-Mode": "cookie" },
-        body: JSON.stringify({
-          token: token.current,
-          password: form.password,
-          firstName: form.firstName,
-          lastName: form.lastName,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setState("ready");
-        setError(data.details?.join(". ") || data.error || "Could not create your account.");
-        return;
-      }
-      window.location.href = "/app";
-    } catch {
-      setState("ready");
-      setError("Could not reach the server. Try again.");
-    }
-  };
-
-  const field = {
-    width: "100%",
-    padding: "11px 13px",
-    borderRadius: 8,
-    background: C.raised,
-    border: `1px solid ${C.rule}`,
-    color: C.cream,
-    fontSize: 14,
-    fontFamily: body,
-  };
-  const label = {
-    display: "block",
-    fontFamily: body,
-    fontSize: 11,
-    fontWeight: 600,
-    letterSpacing: "0.06em",
-    textTransform: "uppercase",
-    color: C.dim,
-    marginBottom: 6,
-  };
-
-  if (state === "loading") {
-    return <CenteredCard badge="…" accent={C.amber} title="Checking your invite" body="One moment." />;
-  }
-  if (state === "invalid") {
-    return (
-      <CenteredCard
-        badge="!"
-        accent="var(--sn-red)"
-        title="Invite not valid"
-        body={error}
-        action={{ label: "Request access", onClick: () => go("/") }}
-      />
-    );
-  }
-
-  return (
-    <div
-      style={{
-        background: C.void,
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-      }}
-    >
-      <div style={{ width: "100%", maxWidth: 420 }}>
-        <div style={{ textAlign: "center", marginBottom: 26 }}>
-          <h1
-            style={{
-              fontFamily: display,
-              fontWeight: 700,
-              fontSize: 28,
-              letterSpacing: "-0.03em",
-              color: C.cream,
-              margin: "0 0 6px",
-            }}
-          >
-            Set your password
-          </h1>
-          <p style={{ fontFamily: body, fontSize: 13, color: C.dim, margin: 0 }}>{invite.email}</p>
-        </div>
-
-        <form
-          onSubmit={submit}
-          style={{
-            background: C.panel,
-            border: `1px solid ${C.rule}`,
-            borderRadius: 12,
-            padding: "24px 22px",
-          }}
-        >
-          {invite.message && (
-            <div
-              style={{
-                background: C.raised,
-                borderRadius: 8,
-                padding: "11px 13px",
-                marginBottom: 16,
-                fontSize: 14,
-                color: C.slate,
-                fontFamily: body,
-                lineHeight: 1.55,
-              }}
-            >
-              {invite.message}
-            </div>
-          )}
-          {error && (
-            <div
-              style={{
-                background: "rgba(248,113,113,0.10)",
-                border: "1px solid rgba(248,113,113,0.25)",
-                borderRadius: 8,
-                padding: "10px 13px",
-                marginBottom: 16,
-                fontSize: 14,
-                color: "var(--sn-red-ink)",
-                fontFamily: body,
-              }}
-            >
-              {error}
-            </div>
-          )}
-
-          <div className="sn-form-2col" style={{ marginBottom: 14 }}>
-            <div>
-              <label style={label} htmlFor="ifn">
-                First name
-              </label>
-              <input
-                id="ifn"
-                style={field}
-                value={form.firstName}
-                onChange={(e) => setForm((p) => ({ ...p, firstName: e.target.value }))}
-                required
-              />
-            </div>
-            <div>
-              <label style={label} htmlFor="iln">
-                Last name
-              </label>
-              <input
-                id="iln"
-                style={field}
-                value={form.lastName}
-                onChange={(e) => setForm((p) => ({ ...p, lastName: e.target.value }))}
-                required
-              />
-            </div>
-          </div>
-
-          <div style={{ marginBottom: 14 }}>
-            <label style={label} htmlFor="ipw">
-              Password
-            </label>
-            <input
-              id="ipw"
-              type="password"
-              style={field}
-              value={form.password}
-              onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
-              required
-            />
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <label style={label} htmlFor="ipc">
-              Confirm password
-            </label>
-            <input
-              id="ipc"
-              type="password"
-              style={field}
-              value={form.confirm}
-              onChange={(e) => setForm((p) => ({ ...p, confirm: e.target.value }))}
-              required
-            />
-          </div>
-
-          <div style={{ marginBottom: 18 }}>
-            {rules.map(([text, met]) => (
-              <div
-                key={text}
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "center",
-                  fontFamily: body,
-                  fontSize: 12,
-                  color: met ? C.green : C.dim,
-                  marginBottom: 4,
-                }}
-              >
-                <span style={{ width: 10 }}>{met ? "+" : "–"}</span>
-                {text}
-              </div>
-            ))}
-          </div>
-
-          <button
-            type="submit"
-            disabled={!ready || state === "submitting"}
-            style={{
-              width: "100%",
-              padding: "13px",
-              borderRadius: 8,
-              border: "none",
-              background: ready ? C.amber : C.rule,
-              color: ready ? C.cta : C.dim,
-              fontSize: 14,
-              fontWeight: 700,
-              fontFamily: body,
-              cursor: ready ? "pointer" : "not-allowed",
-            }}
-          >
-            {state === "submitting" ? "Creating your account" : "Create account"}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function CenteredCard({ badge, accent, title, body, action }) {
-  return (
-    <div
-      style={{
-        background: C.void,
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-      }}
-    >
-      <div
-        style={{
-          background: C.panel,
-          border: `1px solid ${C.rule}`,
-          borderRadius: 12,
-          padding: "40px 32px",
-          textAlign: "center",
-          maxWidth: 440,
-          width: "100%",
-        }}
-      >
-        <div
-          style={{
-            width: 44,
-            height: 44,
-            borderRadius: 10,
-            margin: "0 auto 20px",
-            background: `color-mix(in srgb, ${accent} 12%, transparent)`,
-            border: `1px solid color-mix(in srgb, ${accent} 35%, transparent)`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontFamily: display,
-            fontSize: 16,
-            fontWeight: 700,
-            color: accent,
-          }}
-        >
-          {badge}
-        </div>
-        <h1
-          style={{
-            fontFamily: display,
-            fontWeight: 700,
-            fontSize: 26,
-            letterSpacing: "-0.03em",
-            color: C.cream,
-            margin: "0 0 12px",
-          }}
-        >
-          {title}
-        </h1>
-        <p style={{ fontSize: 15, lineHeight: 1.6, color: C.slate, fontFamily: body, margin: 0 }}>
-          {body}
-        </p>
-        {action && (
-          <div style={{ marginTop: 24 }}>
-            <button
-              type="button"
-              onClick={action.onClick}
-              style={{
-                fontFamily: body,
-                fontSize: 14,
-                fontWeight: 600,
-                padding: "12px 20px",
-                borderRadius: 8,
-                border: `1px solid ${C.rule}`,
-                background: "transparent",
-                color: C.cream,
-                cursor: "pointer",
-              }}
-            >
-              {action.label}
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+  return <div className="sn-site"><a className="sn-site-skip" href="#main-content">Skip to content</a><Header go={go} /><main id="main-content" tabIndex={-1}><Hero go={go} /><Workflow /><Integrations /><Ownership /><FAQ /><AccessForm go={go} /></main><Footer go={go} /></div>;
 }

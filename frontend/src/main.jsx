@@ -15,11 +15,12 @@ import "./index.css";
 // 418 KB bundle, so a visitor to the landing page downloaded the whole CRM.
 const named = (load, name) => lazy(() => load().then(m => ({ default: m[name] })));
 const loadLanding = () => import("./Landing");
+const loadAccess = () => import("./AccessPages");
 const loadLegal = () => import("./Legal");
 const App = lazy(() => import("./App"));
 const Landing = lazy(loadLanding);
-const VerifyPage = named(loadLanding, "VerifyPage");
-const AcceptInvitePage = named(loadLanding, "AcceptInvitePage");
+const VerifyPage = named(loadAccess, "VerifyPage");
+const AcceptInvitePage = named(loadAccess, "AcceptInvitePage");
 const PrivacyPage = named(loadLegal, "PrivacyPage");
 const TermsPage = named(loadLegal, "TermsPage");
 const ResetPasswordPage = lazy(() => import("./ResetPassword"));
