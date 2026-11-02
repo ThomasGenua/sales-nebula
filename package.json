@@ -29,6 +29,8 @@
     "build": "npm run build:frontend && node scripts/module-manifest.js",
     "db:bootstrap": "node scripts/bootstrap-admin.js",
     "test:e2e": "playwright test",
+    "test:landing": "npm --prefix frontend run build && playwright test --config playwright.landing.config.js",
+    "render:social": "node scripts/render-social.js",
     "verify": "node scripts/verify.js",
     "backup": "node scripts/backup.js"
   },

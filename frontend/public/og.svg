@@ -1,20 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#060B1A"/>
-      <stop offset="100%" stop-color="#0E1630"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="78%" cy="18%" r="48%">
-      <stop offset="0%" stop-color="#F5A623" stop-opacity="0.2"/>
-      <stop offset="100%" stop-color="#F5A623" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <rect width="1200" height="630" fill="url(#bg)"/>
-  <rect width="1200" height="630" fill="url(#glow)"/>
-  <g font-family="Poppins, sans-serif" font-weight="800" font-size="88" letter-spacing="-3">
-    <text x="80" y="300" fill="#F0EDE5">Deals that move.</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">Sales Nebula — Keep your next win in sight.</title>
+  <desc id="description">One connected CRM workspace for your pipeline, people, quotes, payments, and customer success.</desc>
+  <rect width="1200" height="630" fill="#090e19"/>
+  <g fill="none" stroke="#293345"><ellipse cx="955" cy="335" rx="310" ry="260" transform="rotate(-25 955 335)"/><ellipse cx="955" cy="335" rx="230" ry="300" transform="rotate(25 955 335)"/><path d="M60 106h1080M60 564h1080"/></g>
+  <circle cx="1102" cy="97" r="6" fill="#ffba49"/>
+  <rect x="60" y="42" width="37" height="37" rx="8" fill="#ffba49"/>
+  <text x="68" y="70" font-family="Arial,sans-serif" font-size="28" font-weight="700" fill="#101724">n.</text>
+  <text x="110" y="69" font-family="Arial,sans-serif" font-size="24" font-weight="700" fill="#f4f2ed">Sales Nebula<tspan fill="#ffba49">.</tspan></text>
+  <g font-family="Arial,sans-serif">
+    <text x="62" y="164" fill="#a6afbf" font-size="12" letter-spacing="3">YOUR NEXT CRM. YOUR NEXT CHAPTER.</text>
+    <g font-size="78" font-weight="700" letter-spacing="-4"><text x="58" y="266" fill="#f4f2ed">Keep your</text><text x="58" y="348" fill="#f4f2ed">next win</text><text x="58" y="430" fill="#ffba49">in sight.</text></g>
+    <text x="62" y="485" fill="#a6afbf" font-size="18">One workspace. The whole relationship.</text>
+    <text x="62" y="601" fill="#a6afbf" font-size="13">PIPELINE · PEOPLE · PAYMENTS · CUSTOMER SUCCESS</text>
+    <text x="1001" y="601" fill="#ffba49" font-size="13">salesnebula.com</text>
   </g>
-  <g font-family="Poppins, sans-serif" font-weight="500" font-size="26" fill="#7E8598">
-    <text x="80" y="370">Find · Close · Keep</text>
+  <g transform="translate(625 180)">
+    <rect width="515" height="332" rx="12" fill="#101724" stroke="#364052"/>
+    <path d="M0 42h515M0 106h515" stroke="#293345"/>
+    <g fill="#7cdbb5"><circle cx="20" cy="22" r="3"/><circle cx="31" cy="22" r="3"/><circle cx="42" cy="22" r="3"/></g>
+    <g font-family="Arial,sans-serif"><text x="65" y="26" fill="#a6afbf" font-size="10" letter-spacing="1.5">YOUR REVENUE WORKSPACE</text><text x="432" y="26" fill="#a6afbf" font-size="9">Sample data</text>
+      <text x="23" y="70" fill="#a6afbf" font-size="10">Open pipeline</text><text x="23" y="94" fill="#f4f2ed" font-size="23">$180,000</text>
+      <text x="205" y="70" fill="#a6afbf" font-size="10">In proposal</text><text x="205" y="94" fill="#f4f2ed" font-size="23">2 deals</text>
+      <text x="371" y="70" fill="#a6afbf" font-size="10">Closed won</text><text x="371" y="94" fill="#7cdbb5" font-size="23">$42,000</text>
+      <text x="23" y="133" fill="#91b9f9" font-size="11">Discovery</text><text x="191" y="133" fill="#ffba49" font-size="11">Proposal</text><text x="359" y="133" fill="#7cdbb5" font-size="11">Won</text>
+      <g fill="#182232" stroke="#293345"><rect x="16" y="148" width="151" height="77" rx="6"/><rect x="183" y="148" width="151" height="77" rx="6"/><rect x="350" y="148" width="150" height="77" rx="6"/><rect x="16" y="237" width="151" height="77" rx="6"/><rect x="183" y="237" width="151" height="77" rx="6"/><rect x="350" y="237" width="150" height="77" rx="6"/></g>
+      <g fill="#a6afbf" font-size="10"><text x="27" y="168">Northstar</text><text x="194" y="168">Acme</text><text x="361" y="168">Summit</text><text x="27" y="257">Orbit</text><text x="194" y="257">Cedar</text><text x="361" y="257">Helix</text></g>
+      <g fill="#f4f2ed" font-size="11"><text x="27" y="187">Team expansion</text><text x="194" y="187">Enterprise plan</text><text x="361" y="187">Platform upgrade</text><text x="27" y="276">Workspace rollout</text><text x="194" y="276">Annual agreement</text><text x="361" y="276">New team setup</text></g>
+      <g fill="#f4f2ed" font-size="12" font-weight="700"><text x="27" y="210">$48,000</text><text x="194" y="210">$72,000</text><text x="361" y="210">$30,000</text><text x="27" y="299">$24,000</text><text x="194" y="299">$36,000</text><text x="361" y="299">$12,000</text></g>
+    </g>
   </g>
 </svg>
