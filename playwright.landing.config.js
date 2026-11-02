@@ -17,7 +17,7 @@ module.exports = defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm --prefix frontend run preview -- --host 127.0.0.1 --port 7548',
+    command: 'node scripts/preview-public.js',
     url: 'http://127.0.0.1:7548',
     reuseExistingServer: false,
     timeout: 30000,

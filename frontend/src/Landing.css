@@ -1,5 +1,4 @@
-/* The marketing surface has its own palette and layout; product screens keep
-   the shared theme. All artwork is CSS/SVG, with no remote image requests. */
+/* Public pages share a palette. Assets and product screenshots are local. */
 .sn-site {
   --site-bg: #090e19;
   --site-panel: #101724;
@@ -286,3 +285,55 @@ html[data-theme="light"] .sn-preview-window { border-color: var(--site-line); bo
   .sn-site-button:hover { transform: none; }
 }
 @media (forced-colors: active) { .sn-site-button, .sn-preview-deal, .sn-workflow-visual { border: 1px solid ButtonText; }.sn-preview-tabs button[aria-selected="true"] { border-bottom: 3px solid Highlight; }.sn-site :focus-visible { outline-color: Highlight; } }
+/* Hosting, product walkthrough, and private access follow-through. */
+.sn-public-intro { padding-bottom: 55px; }
+.sn-public-intro h1 { font-size: clamp(38px, 5.4vw, 76px); line-height: 1.1; letter-spacing: -.055em; margin: 16px 0 26px; max-width: 900px; font-weight: 600; }
+.sn-public-intro h1 span { color: var(--site-accent); }
+.sn-public-intro p:not(.sn-eyebrow) { max-width: 650px; color: var(--site-muted); }
+.sn-public-intro .sn-site-button { margin: 20px 0 4px; }
+.sn-plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.sn-plan-card { padding: clamp(24px, 3vw, 42px); border: 1px solid var(--site-line); border-radius: 20px; background: var(--site-panel); display: flex; flex-direction: column; align-items: flex-start; gap: 18px; }
+.sn-plan-card > svg { color: var(--site-accent); }
+.sn-plan-card h2 { font-size: clamp(27px, 3vw, 39px); line-height: 1.2; margin: 0; }
+.sn-plan-card p { color: var(--site-muted); margin: 0; }
+.sn-plan-card ul { list-style: none; padding: 0; margin: 8px 0 16px; flex: 1; }
+.sn-plan-card li { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0; }
+.sn-plan-card li svg { flex-shrink: 0; margin-top: 4px; color: var(--site-green); }
+.sn-site .sn-small-note { font-size: 12px; line-height: 1.7; color: var(--site-subtle); }
+.sn-comparison { overflow-x: auto; border: 1px solid var(--site-line); border-radius: 14px; margin-top: 30px; }
+.sn-comparison table { width: 100%; border-collapse: collapse; min-width: 620px; text-align: left; font-size: 14px; }
+.sn-comparison caption { text-align: left; padding: 20px; color: var(--site-subtle); font-size: 12px; }
+.sn-comparison th, .sn-comparison td { padding: 22px; border-top: 1px solid var(--site-line); vertical-align: top; }
+.sn-comparison td { width: 38%; color: var(--site-muted); }
+.sn-comparison thead { background: var(--site-panel); }
+.sn-walkthrough-teaser { display: grid; grid-template-columns: .8fr 1.2fr; gap: 60px; align-items: center; }
+.sn-walkthrough-teaser p, .sn-walkthrough-step p { color: var(--site-muted); max-width: 650px; }
+.sn-walkthrough-teaser img, .sn-walkthrough-step img { width: 100%; height: auto; display: block; border: 1px solid var(--site-line); border-radius: 14px; box-shadow: 0 20px 55px #0003; }
+.sn-real-preview { background: var(--site-panel); }
+.sn-walkthrough-step { padding: 40px 0 70px; }
+.sn-walkthrough-step > div { margin-bottom: 28px; }
+.sn-walkthrough-step figure { margin: 0; }
+.sn-walkthrough-step figcaption { font-size: 12px; color: var(--site-subtle); margin-top: 14px; }
+.sn-tour-end { padding: 45px; border: 1px solid var(--site-line); border-radius: 20px; background: var(--site-panel); }
+.sn-tour-end p { max-width: 700px; color: var(--site-muted); margin: 20px 0; }
+.sn-tour-end .sn-text-link { margin-left: 22px; }
+.sn-status-page { min-height: 100vh; padding: 40px 0 80px; }
+.sn-status-card { max-width: 620px; padding: clamp(24px, 5vw, 46px); margin: 48px auto 0; border: 1px solid var(--site-line); border-radius: 18px; background: var(--site-panel); }
+.sn-status-card h1 { font-size: clamp(27px, 4vw, 38px); line-height: 1.2; margin: 20px 0; }
+.sn-status-card p { color: var(--site-muted); margin: 16px 0; }
+.sn-status-card > .sn-site-button, .sn-status-card > .sn-text-link { margin: 12px 12px 12px 0; }
+.sn-status-steps { list-style: none; padding: 0; margin: 24px 0; }
+.sn-status-steps li { display: flex; align-items: center; gap: 12px; margin: 13px 0; }
+.sn-status-steps svg { color: var(--site-green); }
+.sn-follow-form { border-top: 1px solid var(--site-line); margin-top: 24px; padding-top: 24px; text-align: left; }
+.sn-follow-form label { display: block; color: var(--site-muted); font-size: 13px; }
+.sn-follow-form input { display: block; width: 100%; border: 1px solid var(--site-line); background: var(--site-bg); color: var(--site-text); padding: 12px 14px; border-radius: 8px; margin: 8px 0 14px; }
+.sn-follow-form p { font-size: 13px; min-height: 1em; }
+.sn-verification-resend { max-width: 460px; padding: 0 24px 40px; margin: -100px auto 0; position: relative; }
+.sn-footer-main nav { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .sn-plan-grid, .sn-walkthrough-teaser { grid-template-columns: 1fr; gap: 28px; }
+  .sn-tour-end { padding: 26px; }
+  .sn-tour-end .sn-text-link { display: flex; margin: 22px 0 0; }
+  .sn-walkthrough-step { padding-bottom: 40px; }
+}

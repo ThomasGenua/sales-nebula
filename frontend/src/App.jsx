@@ -5,6 +5,8 @@ import { FlowDesigner } from './FlowDesigner';
 import { CustomObjectWorkspace } from './CustomObjectWorkspace';
 import { LeadScoringPage } from './LeadScoring';
 import { MonitoringPage } from './Monitoring';
+import DemoTour from './DemoTour';
+import MarketingOverview from './MarketingOverview';
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
 import { T } from "./tokens";
 import { Badge, Button, Input, Select, TextArea, Modal, Toast } from "./Controls";
@@ -92,9 +94,9 @@ function csrfToken() {
 }
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-function AuthProvider({ children }) {
-  const [demoMode, setDemoMode] = useState(() => localStorage.getItem("sn_demo_mode") === "true");
-  const [user, setUser] = useState(() => localStorage.getItem("sn_demo_mode") === "true" ? DEMO_USER : null);
+function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
+  const [demoMode, setDemoMode] = useState(() => startOnDemo || !startOnLogin && localStorage.getItem("sn_demo_mode") === "true");
+  const [user, setUser] = useState(() => startOnDemo || !startOnLogin && localStorage.getItem("sn_demo_mode") === "true" ? DEMO_USER : null);
   const [loading, setLoading] = useState(true);
 
   // Set during render, before any child formats a date with it.
@@ -106,6 +108,7 @@ function AuthProvider({ children }) {
   useEffect(() => {
     localStorage.removeItem("sn_token");
     localStorage.removeItem("sn_refresh");
+    if (startOnLogin) localStorage.removeItem('sn_demo_mode');
   }, []);
 
   // One in-flight renewal shared by every 401 that lands at once, so a burst of
@@ -186,7 +189,7 @@ function AuthProvider({ children }) {
   }, [demoMode, renewSession, clearSession]);
 
   useEffect(() => {
-    if (demoMode) { setUser(DEMO_USER); setLoading(false); return; }
+    if (demoMode) { localStorage.setItem("sn_demo_mode", "true"); setUser(DEMO_USER); setLoading(false); return; }
     // Nothing to look up locally: if a session cookie exists it goes with the
     // request, and a 401 just means signed out.
     apiFetch("/auth/me").then(d => setUser(d.user || d)).catch(() => setUser(null)).finally(() => setLoading(false));
@@ -3069,6 +3072,7 @@ function AccessRequestsPage() {
         {!canDecide && " You can see requests; approving or declining takes permission to manage users."}
       </p>
 
+      {!isDemoUser(user) && <MarketingOverview apiFetch={apiFetch} />}
       <div className="flex flex-wrap gap-1 mb-4 bg-[#0B1228] rounded-lg p-1 border border-[#182550] w-fit max-w-full">
         {ACCESS_TABS.map(([status, label, key]) => (
           <button key={label} type="button" aria-pressed={tab === status} onClick={() => setTab(status)}
@@ -6392,7 +6396,7 @@ function DemoBanner() {
       style={{ background: "var(--sn-amber)", color: "var(--sn-cta-text)" }}
     >
       <span className="font-medium leading-snug">
-        This is demo mode. Create an account to access this page with your own data.
+        Read-only demo · Fictional records. Explore the workspace, then request access for your team.
       </span>
       <button
         type="button"
@@ -6410,7 +6414,7 @@ function DemoBanner() {
   );
 }
 
-function AppShell({ go }) {
+function AppShell({ go, startOnDemo }) {
   const { user } = useAuth();
   const demo = isDemoUser(user);
   const [route, setRoute] = useState(() => parseAppPath(window.location.pathname));
@@ -6506,6 +6510,7 @@ function AppShell({ go }) {
             onQuickActionsToggle={() => setQuickActionsOpen(o => !o)} />
 
           <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 md:p-6 pb-20 md:pb-6">
+            {demo && <DemoTour navigate={navigate} start={startOnDemo} />}
             {/* keyed on the module so one page's record state never leaks into the next */}
             <RouteContext.Provider value={routeValue}>
               <PageComponent key={route.module} />
@@ -6521,18 +6526,18 @@ function AppShell({ go }) {
   );
 }
 
-export default function App({ go } = {}) {
+export default function App({ go, startOnDemo = false, startOnLogin = false } = {}) {
   return (
-    <AuthProvider>
-      <AppInner go={go} />
+    <AuthProvider key={startOnDemo ? 'demo' : startOnLogin ? 'login' : 'workspace'} startOnDemo={startOnDemo} startOnLogin={startOnLogin}>
+      <AppInner go={go} startOnDemo={startOnDemo} />
     </AuthProvider>
   );
 }
 
-function AppInner({ go }) {
+function AppInner({ go, startOnDemo }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="min-h-[100dvh] flex items-center justify-center" style={{ background: "var(--sn-void)" }}><Spinner /></div>;
   if (!user) return <LoginPage go={go} />;
   if (window.location.pathname === OAUTH_CONSENT_PATH) return <OAuthConsentPage />;
-  return <AppShell go={go} />;
+  return <AppShell go={go} startOnDemo={startOnDemo} />;
 }

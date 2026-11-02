@@ -1,5 +1,6 @@
 import React from "react";
 import { BrandMark } from "./theme";
+import MeasurementPreference from './MeasurementPreference';
 
 const display = '"Poppins", system-ui, sans-serif';
 const body = '"Poppins", system-ui, sans-serif';
@@ -54,7 +55,7 @@ function LegalShell({ go, title, children }) {
           {title}
         </h1>
         <p style={{ fontFamily: body, fontSize: 13, color: "var(--sn-dim)", margin: "0 0 32px" }}>
-          Last updated: 24 August 2026
+          Last updated: 2 November 2026
         </p>
         <div style={{ fontFamily: body, fontSize: 15, lineHeight: 1.7, color: "var(--sn-body)" }}>
           {children}
@@ -96,6 +97,12 @@ export function PrivacyPage({ go }) {
         <p style={{ margin: "0 0 12px" }}>
           We use information to provide and improve Sales Nebula, authenticate users, send transactional email (verification, invites, password resets, and product notices), prevent abuse, and comply with legal obligations.
         </p>
+      </Section>
+      <Section title="Website measurement">
+        <p>Optional first-party measurement uses a random browser session identifier lasting up to 30 minutes. We record the landing page, mobile or desktop category, campaign codes, demo and form activity, and page-performance measurements. We do not send this measurement to an advertising service or store full referring URLs, IP addresses, or browser user-agent strings in these measurements.</p>
+        <p>If you request access, we link that session to your request to count email verification and your first sign-in after invitation acceptance. Session measurements and their request links are removed after 30 days by regular cleanup. Campaign codes remain with the access request. Separate operational and security logs follow their own retention periods.</p>
+        <p>We honor Do Not Track and Global Privacy Control. You can also disable new measurements below. Administrators can disable collection for an entire installation.</p>
+        <MeasurementPreference />
       </Section>
       <Section title="Self-hosted deployments">
         <p style={{ margin: "0 0 12px" }}>

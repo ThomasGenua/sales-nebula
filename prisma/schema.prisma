@@ -5769,6 +5769,8 @@ model SignupRequest {
   source         String?   // landing, referral, campaign id
   utmSource      String?
   utmCampaign    String?
+  utmMedium      String?
+  marketingVisitId String?
   ipAddress      String?
   userAgent      String?
 
@@ -5777,6 +5779,23 @@ model SignupRequest {
 
   @@index([status])
   @@index([email])
+  @@index([createdAt])
+}
+
+model MarketingVisit {
+  id String @id
+  page String
+  device String
+  utmSource String?
+  utmMedium String?
+  utmCampaign String?
+  demoStartedAt DateTime?
+  tourCompletedAt DateTime?
+  formStartedAt DateTime?
+  lcpMs Float?
+  inpMs Float?
+  cls Float?
+  createdAt DateTime @default(now())
   @@index([createdAt])
 }
 

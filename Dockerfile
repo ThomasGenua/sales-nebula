@@ -14,6 +14,7 @@ COPY . .
 
 # Build the single page app. Without this the image ships React source
 # that nothing compiles, so the public site does not exist in production.
+ARG VITE_PUBLIC_SITE_URL=https://salesnebula.com
 RUN cd frontend \
  && npm ci --no-audit --no-fund \
  && npm run build
