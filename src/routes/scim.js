@@ -76,7 +76,7 @@ module.exports = function scimRouter(db) {
   const attribute = (name, type, required = false, multiValued = false) => ({ name, type, multiValued, required, caseExact: false, mutability: 'readWrite', returned: 'default', uniqueness: name === 'userName' ? 'server' : 'none' });
   const schema = { schemas: ['urn:ietf:params:scim:schemas:core:2.0:Schema'], id: CORE, name: 'User', attributes: [attribute('userName', 'string', true), attribute('active', 'boolean'), attribute('externalId', 'string'), { ...attribute('name', 'complex'), subAttributes: [attribute('givenName', 'string'), attribute('familyName', 'string')] }, { ...attribute('emails', 'complex', false, true), subAttributes: [attribute('value', 'string'), attribute('type', 'string'), attribute('primary', 'boolean')] }] };
   router.get('/Schemas', (req, res) => res.json({ schemas: [LIST], totalResults: 1, startIndex: 1, itemsPerPage: 1, Resources: [schema] }));
-  router.get('/Schemas/:id', (req, res) => req.params.id === CORE ? res.json(schema) : res.status(404).json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: '404', detail: 'Schema not found' }));
+  router.get('/Schemas/:schemaId', (req, res) => req.params.schemaId === CORE ? res.json(schema) : res.status(404).json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: '404', detail: 'Schema not found' }));
   router.get('/Users', wrap(async (req, res) => {
     let where = { deletedAt: null };
     if (req.query.filter) {
