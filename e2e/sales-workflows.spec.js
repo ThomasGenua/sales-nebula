@@ -184,21 +184,22 @@ test('campaign planning explains configured delivery and unavailable engagement 
   await page.screenshot({ path: test.info().outputPath('campaign-availability.png'), fullPage: true });
 });
 
-test('settings and administration explain unsupported features without blocking supported security', async ({ page }) => {
+test('settings and administration explain feature setup without blocking supported security', async ({ page }) => {
   await signIn(page); await page.goto('/app/settings');
   await page.getByRole('button', { name: 'Security', exact: true }).click();
   const sso = page.getByRole('region', { name: 'Custom SSO providers', exact: true });
-  await expect(sso).toContainText('Unavailable');
-  await expect(sso).toContainText('Use password sign-in');
+  await expect(sso).toContainText('Available with identity provider setup');
+  await expect(sso).toContainText('Enterprise configuration');
+  await expect(sso).toContainText('legacy configuration records on this page do not activate sign-in');
   await expect(page.getByRole('button', { name: 'Update Password', exact: true })).toBeEnabled();
   await expect(page.getByRole('heading', { name: 'Authorized apps', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enable 2FA', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => localStorage.setItem('sn_theme', 'light'));
   await page.goto('/app/admin');
-  for (const title of ['Campaign email delivery', 'Third-party synchronization', 'Custom SSO providers']) {
+  for (const [title, status] of [['Campaign email delivery', 'Available with SMTP'], ['Third-party synchronization', 'Unavailable'], ['Custom SSO providers', 'Available with identity provider setup']]) {
     const notice = page.getByRole('region', { name: title, exact: true });
-    await expect(notice).toContainText(title === 'Campaign email delivery' ? 'Available with SMTP' : 'Unavailable');
+    await expect(notice).toContainText(status);
     expect(await notice.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   }
   await page.screenshot({ path: test.info().outputPath('feature-availability-mobile.png'), fullPage: true });
