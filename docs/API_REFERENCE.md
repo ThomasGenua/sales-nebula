@@ -488,11 +488,11 @@ CSAT/NPS/CES surveys with analytics
 
 ### `/api/campaigns` -- **[CRUD]**
 
-Campaign planning with members, recipients and ROI. Bulk campaign delivery is unavailable; individual sales email uses the separate email API.
+Campaign planning with members, recipients, ROI and queued SMTP delivery. Individual sales email uses the separate email API. Automatic open/click tracking is unavailable.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/campaigns/:id/send` | Unavailable: returns 501 with code `CAMPAIGN_DELIVERY_UNAVAILABLE` without sending mail or changing campaign/recipient delivery state |
+| POST | `/api/campaigns/:id/send` | Queue validated subject/body content for SMTP delivery with suppression and unsubscribe handling; invalid content returns 400 without queuing |
 | POST | `/api/campaigns/:id/recipients` | Add recipients to campaign |
 | GET | `/api/campaigns/:id/recipients` | List recipients for campaign |
 | GET | `/api/campaigns/stats/overview` | Get campaign statistics overview |
@@ -655,8 +655,8 @@ Validation rules, record types, page layouts, OWD, FLS, role hierarchy
 | GET | `/api/configuration/owd` | Get org-wide defaults |
 | PUT | `/api/configuration/owd/:module` | Update org-wide default for module |
 | GET | `/api/configuration/field-permissions` | List field-level permissions |
-| POST | `/api/configuration/field-permissions` | **501: unavailable** (`FIELD_SECURITY_UNAVAILABLE`). Set field-level permission |
-| POST | `/api/configuration/field-permissions/bulk` | **501: unavailable** (`FIELD_SECURITY_UNAVAILABLE`). Bulk update field permissions |
+| POST | `/api/configuration/field-permissions` | Set a validated field-level permission, including explicit visible/editable booleans |
+| POST | `/api/configuration/field-permissions/bulk` | Bulk update validated field permissions |
 | GET | `/api/configuration/role-hierarchy` | Get role hierarchy tree |
 | PUT | `/api/configuration/role-hierarchy/:roleId` | Update role hierarchy position |
 
@@ -789,7 +789,7 @@ Report builder with folders, scheduling, export, clone
 | GET | `/api/reports/folders/all` | List all report folders |
 | POST | `/api/reports/folders` | Create report folder |
 | DELETE | `/api/reports/folders/:id` | Delete report |
-| POST | `/api/reports/:id/schedule` | **501: unavailable** (`REPORT_DELIVERY_UNAVAILABLE`). Add schedule to report |
+| POST | `/api/reports/:id/schedule` | Add a persisted cron schedule for the report delivery worker |
 | DELETE | `/api/reports/schedule/:id` | Delete report |
 | POST | `/api/reports/:id/clone` | Clone report |
 
