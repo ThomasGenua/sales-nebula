@@ -116,7 +116,10 @@ async function processDue(db) {
   await db.meetingJob.updateMany({ where: { status: { in: ['Transcribing', 'Analyzing'] }, processingAt: { lt: new Date(Date.now() - 20 * 60000) } }, data: { status: 'Failed', error: 'Processing was interrupted. Retry to continue; transcription may be billed again.', processingAt: null } });
   for (const job of await db.meetingJob.findMany({ where: { status: 'Queued' }, orderBy: { createdAt: 'asc' }, take: 3 })) await processJob(db, job.recordingId);
   for (const job of await db.meetingJob.findMany({ where: { fileKey: { not: null }, createdAt: { lt: new Date(Date.now() - 86400000) }, status: { notIn: ['Transcribing', 'Analyzing', 'Queued'] } }, take: 100 })) {
-    await removeAudio(job.fileKey); await db.meetingJob.update({ where: { recordingId: job.recordingId }, data: { fileKey: null } });
+    // Claim expiry before deleting the file. A concurrently queued retry must
+    // keep its recording; retries also compare fileKey when claiming the job.
+    const expired = await db.meetingJob.updateMany({ where: { recordingId: job.recordingId, status: job.status, fileKey: job.fileKey }, data: { fileKey: null } });
+    if (expired.count) await removeAudio(job.fileKey);
   }
   // Clean abandoned multipart uploads, using server-generated names only.
   for (const name of await fs.promises.readdir(directory()).catch(e => { if (e.code === 'ENOENT') return []; throw e; })) {
