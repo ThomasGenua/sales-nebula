@@ -17,6 +17,8 @@ const prisma = new PrismaClient();
 const messages = [];
 let server;
 let api;
+const claude = require('../src/services/claude');
+const originalComplete = claude.complete, originalConfigured = claude.isConfigured;
 const smtp = new SMTPServer({
   authOptional: true, disabledCommands: ['STARTTLS'], disableReverseLookup: true,
   onData(stream, session, done) {
@@ -28,6 +30,7 @@ const smtp = new SMTPServer({
   },
 });
 async function resetWorkspace() {
+  claude.complete = originalComplete; claude.isConfigured = originalConfigured;
   assertTestDatabase();
   await api?.locals.eventLog?.flush();
   const tables = await prisma.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '\_prisma%'`;
@@ -62,6 +65,12 @@ async function start() {
   const app = express();
   // Test harness only; never mounted by the production app.
   app.get('/__test/mail', (req, res) => res.json(messages));
+  app.post('/__test/meeting-provider', (req, res) => {
+    if (req.get('x-test-reset') !== 'local-browser-tests') return res.sendStatus(403);
+    claude.isConfigured = () => true;
+    claude.complete = async () => ({ truncated: false, text: JSON.stringify({ summary: 'The customer requested a proposal and a follow-up meeting.', tasks: [{ subject: 'Send the customer proposal', dueDate: null }, { subject: 'Arrange a follow-up meeting', dueDate: null }], nextStep: 'Send the customer proposal', nextStepDate: null }) });
+    res.json({ ready: true });
+  });
   app.post('/__test/reset', async (req, res, next) => {
     if (req.get('x-test-reset') !== 'local-browser-tests') return res.sendStatus(403);
     try { await resetWorkspace(); res.json({ ready: true }); } catch (e) { next(e); }

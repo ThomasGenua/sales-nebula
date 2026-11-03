@@ -56,7 +56,7 @@ hosted sandboxes remain unavailable.
 |---|---|---|
 | AI Copilot without a key | Answers from fixed rules using your open deals, cases and activities; the screen says so under each answer. | `/api/copilot/chat` answers 503. Conversation threads exist in the API only. |
 | Lead scoring | Scores a lead by your rules whenever it is saved, wherever the save comes from. Not AI. Rules are kept on the **Lead Scoring** screen (Automation & AI → More), which also rescores the open leads; a rule with an operator or field the scoring doesn't know is refused. | Changing a rule rescores no lead until it is next saved or the open leads are rescored. |
-| Deal prediction, call analysis | Deal prediction uses stage weights. Call analysis matches keywords in a transcript you supply. | No model, no recording upload, no transcription. |
+| Deal prediction, call analysis | Deal prediction uses stage weights. Legacy call analysis matches keywords. Meeting intelligence adds Deepgram transcription and Claude drafts with reviewed task/next-step application. | Requires provider configuration; does not join meetings or record calls automatically. |
 | Reports | Tabular, summary, matrix and chart reports, saved dashboards, report folders and scheduled delivery to the report owner. | Legacy analytics scheduled-report endpoints remain unavailable. Arbitrary joins are not supported. |
 | Analytics | Overview, ad-hoc query, funnel, cohort and activity effectiveness. | A dataset's refresh only counts rows; saved dashboards are layouts nothing displays. |
 | Campaigns | Planning, members, recipients, responses, ROI; queued SMTP sends with suppression/unsubscribe, signed hard-bounce ingestion and FirstTouch rows for existing linked deals. | Automatic attribution for future deals; provider-specific bounce adapters; delivery retries. |
@@ -128,7 +128,7 @@ Saving these changes nothing:
 | Legacy analytics report scheduling | `POST /api/analytics/scheduled-reports` | `REPORT_DELIVERY_UNAVAILABLE` |
 | Integration sync schedules | `PUT /api/integrations/:id/schedule` | `INTEGRATION_SYNC_UNAVAILABLE` |
 | Quote approval shortcut | `POST /api/quotes/:id/submit-approval` (use an approval process) | `QUOTE_APPROVAL_UNAVAILABLE` |
-| SSO sign-in | `POST /api/security/sso/login` | none; the error says so |
+| Legacy direct-token SSO | `POST /api/security/sso/login` remains disabled; verified SAML/OIDC use `/api/enterprise` | See [enterprise setup](SALES_COMPLETION.md) |
 | Integration sync and tests | `POST /api/integrations/:id/sync`, `/test` | none; the error says so |
 | Mail from other mailboxes | `POST /api/inbound-email/messages/:id/reply` and `POST /api/emails/send` naming a mailbox that is not Microsoft | none; the error says so |
 
@@ -136,7 +136,6 @@ Saving these changes nothing:
 
 ## Not built
 
-- Email attachment downloads and provider push subscriptions. Personal Outlook and Gmail/Google Calendar sync exist; see their documented scope.
 - E-signature.
 - Slack or Teams.
 - Generated invoice PDFs. Quotes already have downloadable PDFs and versioned customer acceptance; invoices print from the browser.
@@ -147,3 +146,5 @@ Saving these changes nothing:
 See [sales workflow setup and limitations](SALES_NEXT_WORKFLOWS.md) for these additions.
 
 See [the parity implementation tracker](SALESFORCE_PARITY.md) for current additions and remaining roadmap work.
+
+Mailbox attachments/push, guided CRM migration, reviewed meeting intelligence, enterprise SSO/SCIM and billing adjustments are now implemented. See [Sales completion setup and limits](SALES_COMPLETION.md).

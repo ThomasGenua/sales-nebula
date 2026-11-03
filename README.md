@@ -4,6 +4,8 @@ A self-hosted CRM for sales and service teams: accounts, contacts, leads, deals,
 
 It is not a Salesforce replacement feature for feature. Some modules store configuration that nothing acts on yet, and their actions answer **501** instead of pretending; [Feature status](docs/FEATURE_STATUS.md) lists what works, what is limited, and what is unavailable.
 
+Mailbox push and attachments, Salesforce/HubSpot CSV migration, reviewed meeting intelligence, enterprise SSO/SCIM, and billing adjustments are documented in [Sales completion setup](docs/SALES_COMPLETION.md).
+
 
 ## Running it
 

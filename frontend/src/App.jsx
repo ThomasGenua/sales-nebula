@@ -1,3 +1,4 @@
+import { parseCsv } from './csv';
 import { ApprovalDesigner } from './ApprovalDesigner';
 import { ForecastHistory } from './ForecastHistory';
 import { TerritoryRules } from './TerritoryRules';
@@ -141,7 +142,7 @@ function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
   const apiFetch = useCallback(async (path, opts = {}) => {
     if (demoMode) return demoApiFetch(path, opts);
 
-    const { skipRefresh, rawBody, ...init } = opts;
+    const { skipRefresh, rawBody, responseType, ...init } = opts;
     const method = String(init.method || "GET").toUpperCase();
     // The session cookies ride along on their own; a request that changes
     // anything also echoes the CSRF token, which a forged one cannot.
@@ -187,6 +188,7 @@ function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
       // particular refusal (an edit over someone else's is CONFLICT), not just show it.
       throw Object.assign(new Error((e.error || res.statusText) + reasons), { status: res.status, code: e.code });
     }
+    if (responseType === 'blob') return res.blob();
     return res.json();
   }, [demoMode, renewSession, clearSession]);
 
@@ -234,7 +236,7 @@ function AuthProvider({ children, startOnDemo = false, startOnLogin = false }) {
     applySession(d);
   };
   const completeOAuth = async body => {
-    const d = await apiFetch('/oauth/callback', { method: 'POST', body, skipRefresh: true, headers: COOKIE_SESSION });
+    const d = await apiFetch(body.enterprise ? '/enterprise/callback' : '/oauth/callback', { method: 'POST', body, skipRefresh: true, headers: COOKIE_SESSION });
     if (!d.mfaRequired) applySession(d);
     return d;
   };
@@ -2519,14 +2521,14 @@ function LoginPage({ go }) {
     }
   };
   useEffect(() => {
-    fetch('/api/oauth/config').then(r => r.ok ? r.json() : {}).then(d => setProviders(d.browser || {})).catch(() => {});
+    Promise.all([fetch('/api/oauth/config').then(r => r.ok ? r.json() : {}), fetch('/api/enterprise/config').then(r => r.ok ? r.json() : {})]).then(([d, enterprise]) => setProviders({ ...(d.browser || {}), ...enterprise })).catch(() => {});
     if (window.location.pathname !== '/oauth/callback' || callbackStarted.current) return;
     callbackStarted.current = true;
     const params = new URLSearchParams(window.location.search);
     // Remove the one-time code from history before exchanging it.
     window.history.replaceState({}, '', '/login');
     setLoading(true); setInfo('Completing provider sign-in…');
-    completeOAuth({ state: params.get('state'), code: params.get('code'), error: params.get('error') }).then(result => {
+    completeOAuth({ state: params.get('state'), code: params.get('code'), error: params.get('error'), enterprise: params.get('enterprise'), ticket: params.get('ticket') }).then(result => {
       if (result.mfaRequired) { setChallenge(result); setMode('mfa'); setInfo('Enter the 6-digit code from your authenticator app.'); }
       else { setInfo(''); enterApp(); }
     }).catch(e => { setError(e.message); setInfo(''); }).finally(() => setLoading(false));
@@ -2534,7 +2536,7 @@ function LoginPage({ go }) {
   const startProvider = async provider => {
     setLoading(true); setError('');
     try {
-      const result = await apiFetch(`/oauth/start/${provider}`, { method: 'POST', body: {}, skipRefresh: true });
+      const result = await apiFetch(`/${['saml', 'oidc'].includes(provider) ? 'enterprise' : 'oauth'}/start/${provider}`, { method: 'POST', body: {}, skipRefresh: true });
       window.location.assign(result.authorizationUrl);
     } catch (e) { setError(e.message); setLoading(false); }
   };
@@ -2653,7 +2655,7 @@ function LoginPage({ go }) {
 
           {mode === "login" ? (
             <>
-              {Object.entries(providers).filter(([, config]) => config.enabled).map(([provider]) => <Button key={provider} variant="secondary" fullWidth disabled={loading} onClick={() => startProvider(provider)}>Continue with {provider === 'google' ? 'Google' : 'Microsoft'}</Button>)}
+              {Object.entries(providers).filter(([, config]) => config.enabled).map(([provider]) => <Button key={provider} variant="secondary" fullWidth disabled={loading} onClick={() => startProvider(provider)}>Continue with {{ google: 'Google', microsoft: 'Microsoft', oidc: 'enterprise OIDC', saml: 'enterprise SAML' }[provider]}</Button>)}
               {Object.values(providers).some(config => config.enabled) && <p className="text-xs" style={{ color: 'var(--sn-slate)' }}>Use the email address on your existing team account.</p>}
               <button
                 type="button"
@@ -3693,33 +3695,6 @@ function RecycleBinPage() {
  * Rows of a CSV file as objects keyed by its header row. Quoted fields may
  * hold commas, doubled quotes and line breaks (RFC 4180).
  */
-function parseCsv(text) {
-  const rows = [];
-  let row = [], field = "", quoted = false;
-  const src = String(text).replace(/^﻿/, "");
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (quoted) {
-      if (c === '"' && src[i + 1] === '"') { field += '"'; i++; }
-      else if (c === '"') quoted = false;
-      else field += c;
-    } else if (c === '"') quoted = true;
-    else if (c === ",") { row.push(field); field = ""; }
-    else if (c === "\n" || c === "\r") {
-      if (c === "\r" && src[i + 1] === "\n") i++;
-      row.push(field); field = "";
-      if (row.some(v => v !== "")) rows.push(row);
-      row = [];
-    } else field += c;
-  }
-  row.push(field);
-  if (row.some(v => v !== "")) rows.push(row);
-  const [header = [], ...body] = rows;
-  if (quoted) throw new Error("A quoted CSV field was not closed");
-  if (header.some(h => !h.trim()) || new Set(header.map(h => h.trim())).size !== header.length) throw new Error("Every column needs a unique, non-empty heading");
-  if (body.some(r => r.length !== header.length)) throw new Error("Each row must have the same number of columns as the headings");
-  return { header: header.map(h => h.trim()), rows: body.map(r => Object.fromEntries(header.map((h, i) => [h.trim(), (r[i] ?? "").trim()]))) };
-}
 
 const IMPORT_BATCH = 500;   // rows per request, well inside the API's 1MB body limit
 

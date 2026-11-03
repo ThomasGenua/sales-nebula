@@ -8,6 +8,8 @@ import { RecordPicker } from './SalesWorkflows';
 import { MyDayPage, panel, Problem, Pager, dateLabel, nameOf } from './SalesWorkspace';
 import { money } from './prefs';
 import IntegrationGuide from './IntegrationGuide';
+import { CrmMigration } from './CrmMigration';
+import { MeetingsWorkspace } from './MeetingsWorkspace';
 
 function useLoad(path, revision = 0) {
   const { apiFetch } = useAuth();
@@ -189,6 +191,8 @@ export function SalesOperationsPage() {
     ['dealRooms', 'Deal rooms', DealRoomsWorkspace, can(user,'deals','read')],
     ['success', 'Account success', SuccessWorkspace, can(user,'accounts','read')],
     ['configuration', 'Configuration versions', Configuration, can(user, 'admin', 'full')],
+    ['migration', 'CRM migration', CrmMigration, can(user, 'admin', 'full')],
+    ['meetings', 'Meeting intelligence', MeetingsWorkspace, can(user, 'activities', 'read')],
   ].filter(t => t[3]);
   const [tab, setTab] = useState('daily'), Component = tabs.find(t => t[0] === tab)?.[2] || Daily;
   return <div className="space-y-5"><h1 className="text-2xl font-bold">Sales Operations</h1><nav aria-label="Sales operations" className="flex flex-wrap gap-2">{tabs.map(([id, title]) => <Button key={id} variant={id === tab ? 'primary' : 'secondary'} onClick={() => setTab(id)}>{title}</Button>)}</nav><Component selectTab={setTab} /></div>;

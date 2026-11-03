@@ -92,7 +92,7 @@ async function request(db, account, url, options = {}) {
     signal: AbortSignal.timeout(20000)
   });
   if (!r.ok) throw fail('Google request failed (' + r.status + '); retry or reconnect', r.status);
-  return r.status === 204 ? null : r.json();
+  return r.status === 204 ? null : options.maxResponseBytes ? require('../utils/boundedJson')(r, options.maxResponseBytes) : r.json();
 }
 async function connect(db, account, {
   code,
@@ -644,6 +644,7 @@ async function sendFrom(db, account, {
 }
 const owned = fn => (raw, account, ...args) => require('./revenueActor').asActor(raw, account.ownerId, 'emails', db => fn(db, account, ...args));
 module.exports = {
+  request,
   configured,
   verifier,
   authorize,

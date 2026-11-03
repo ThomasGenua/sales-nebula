@@ -50,7 +50,7 @@ async function processDue(raw) {
         });
         if (!current) throw new Error('Invoice no longer accessible');
         const balance = await require('./payments').balance(db, current);
-        if (!balance.outstandingMinor) return;
+        if (!balance.outstandingMinor || balance.disputedMinor || balance.pendingRefundMinor) return;
         if (!current.contactId || !permits(req, 'contacts', 'read')) throw new Error('An accessible invoice contact is required');
         const person = await db.contact.findFirst({
           where: await reachableWhere(req, 'contacts', 'contact', {

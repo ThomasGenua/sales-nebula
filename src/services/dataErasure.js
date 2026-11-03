@@ -55,6 +55,7 @@ const PERSON_ROWS = new Set([
 const FREE_TEXT = new Set([
   'body', 'htmlBody', 'textBody', 'snippet', 'description', 'notes', 'comment',
   'answer', 'resolution', 'text', 'message', 'transcript',
+  'transcription', 'summary', 'actionItems', 'nextSteps', 'participants', 'analysis', 'competitors',
 ]);
 
 const CORRESPONDENCE = new Set([
@@ -226,6 +227,8 @@ function subjectWhere(entry, subject) {
 async function exportSubject(prisma, subject) {
   const records = {};
   let total = 0;
+  const copies = await require('./completionPrivacy').exportCopies(prisma, subject);
+  for (const [model, rows] of Object.entries(copies)) { records[model] = rows; total += rows.length; }
 
   const roots = [
     ['Contact', 'contact', subject.contactId],
@@ -313,6 +316,8 @@ async function eraseSubject(prisma, subject, { strategy = 'anonymize', actorId =
   const residual = [];
   const skipped = [];
   const purging = strategy === 'purge';
+  const copies = await require('./completionPrivacy').eraseCopies(prisma, subject, purging);
+  for (const [model, n] of Object.entries(copies)) if (n) erased[model] = n;
 
   const count = (model, n) => { if (n > 0) erased[model] = (erased[model] || 0) + n; };
 

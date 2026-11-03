@@ -118,4 +118,19 @@ router.post('/:id/reminders', requirePermission('invoices', 'edit'), async (req,
     next(e);
   }
 });
+const adjustments = require('../services/billingAdjustments');
+const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
+router.post('/:id/credit-notes', requirePermission('invoices', 'edit'), wrap(async (req, res) => res.status(201).json(await adjustments.creditNote(req.app.locals.prisma, req.params.id, req.body, { req, userId: req.userId }))));
+router.post('/:id/refunds', requirePermission('invoices', 'edit'), wrap(async (req, res) => res.status(201).json(await adjustments.refund(req.app.locals.prisma, req.params.id, req.body, { req, userId: req.userId }))));
+router.post('/:id/reconcile-ledger', requirePermission('invoices', 'edit'), wrap(async (req, res) => res.json(await adjustments.reconcileInvoice(req.app.locals.prisma, req.params.id))));
+router.get('/:id/credit-notes/:adjustmentId/pdf', requirePermission('invoices', 'read'), wrap(async (req, res) => {
+  const db = req.app.locals.prisma, note = await db.invoiceAdjustment.findFirst({ where: { id: req.params.adjustmentId, invoiceId: req.params.id, kind: 'CreditNote', status: 'Issued' } });
+  if (!note) return res.status(404).json({ error: 'Credit note not found' });
+  const invoice = await db.invoice.findUnique({ where: { id: req.params.id } });
+  const doc = new (require('pdfkit'))({ size: 'A4', margin: 54 });
+  res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="credit-note-' + note.id + '.pdf"', 'Cache-Control': 'no-store' });
+  doc.on('error', e => res.destroy(e)); doc.pipe(res);
+  doc.fontSize(24).text('Credit note').moveDown(); doc.fontSize(11).text('Reference: ' + note.reference).text('Invoice: ' + invoice.number).text('Issued: ' + note.createdAt.toISOString().slice(0, 10)).moveDown();
+  doc.fontSize(18).text(note.currency + ' ' + (note.amountMinor / 100).toFixed(2)).moveDown(); doc.fontSize(11).text('Reason: ' + note.reason).moveDown().text('This credit reduces the invoice amount owed. A refund, when applicable, is recorded separately in the payment ledger.'); doc.end();
+}));
 module.exports = router;

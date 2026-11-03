@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Button, Input, Select, TextArea } from './Controls';
 import { useAuth } from './contexts';
 import { panel, Problem } from './SalesWorkspace';
+import { EnterpriseAccess } from './EnterpriseAccess';
 
 export function EnterpriseSettings() {
   const { apiFetch } = useAuth();
@@ -15,6 +16,7 @@ export function EnterpriseSettings() {
   const act=async fn=>{setBusy(true);setError('');setMessage('');try{await fn();await load();setMessage('Saved.');}catch(e){setError(e.message);}finally{setBusy(false);}};
   const fields=catalog[module]||[];
   return <div className="space-y-4"><h2 className="font-bold">Enterprise configuration</h2><Problem message={error}/>{message&&<p role="status">{message}</p>}
+    <EnterpriseAccess />
     <Select label="Module" value={module} options={Object.keys(catalog)} onChange={setModule}/>
     <section className={panel}><h3>Field permissions</h3><Select label="Role" placeholder="Choose role" value={roleId} options={roles.map(r=>({value:r.id,label:r.name}))} onChange={setRoleId}/><p className="text-sm my-2">Administrators retain full access. Hidden fields cannot be filtered or exported. Historical and indexed views that cannot safely project fields refuse access.</p>
       {roleId&&<div className="grid sm:grid-cols-3 gap-2">{fields.map(f=>{const p=permissions.find(p=>p.roleId===roleId&&p.field===f.name);return <Select key={f.name} label={f.name} value={!p||p.visible&&p.editable?'edit':p.visible?'read':'hidden'} options={[{value:'edit',label:'Visible and editable'},{value:'read',label:'Read only'},{value:'hidden',label:'Hidden'}]} onChange={mode=>setPermissions(ps=>[...ps.filter(p=>!(p.roleId===roleId&&p.field===f.name)),{roleId,module,field:f.name,visible:mode!=='hidden',editable:mode==='edit'}])}/>;})}</div>}

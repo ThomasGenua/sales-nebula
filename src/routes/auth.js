@@ -55,8 +55,8 @@ const { passwordStamp, issuePasswordReset } = require('../services/passwordReset
  * other caller gets them in the body, as before.
  */
 async function issueSession(prisma, user, req, res, loginType = 'password') {
-  const accessToken = signAccessToken(user.id, user.role.name);
-  const { token: refreshToken } = signRefreshToken(user.id);
+  const accessToken = signAccessToken(user.id, user.role.name, user.sessionVersion);
+  const { token: refreshToken } = signRefreshToken(user.id, user.sessionVersion);
 
   // The profile page shows this; nothing used to write it.
   const lastLoginAt = new Date();
@@ -90,6 +90,7 @@ async function issueSession(prisma, user, req, res, loginType = 'password') {
  * social sign-in (routes/oauth.js) both end here.
  */
 async function completeSignIn(prisma, user, req, res, loginType = 'password') {
+  if (loginType !== 'enterprise' && !require('../services/enterpriseIdentity').passwordAllowed(user)) return res.status(403).json({ error: 'Use enterprise sign-in for this account', code: 'ENTERPRISE_SSO_REQUIRED' });
   // A user with a verified device does not get a session from the password
   // alone. Without this gate, enrolling MFA protects nothing: this route
   // still hands out a token and every MFA endpoint lives elsewhere.
@@ -101,7 +102,7 @@ async function completeSignIn(prisma, user, req, res, loginType = 'password') {
   });
   if (devices.length) {
     const mfaToken = jwt.sign(
-      { sub: user.id, purpose: 'mfa-pending' },
+      { sub: user.id, purpose: 'mfa-pending', sessionVersion: user.sessionVersion || 0 },
       JWT_SECRET,
       { expiresIn: '5m' }
     );
@@ -191,8 +192,9 @@ router.post('/refresh', async (req, res, next) => {
     if (!user || !user.active) {
       return res.status(401).json({ error: 'User not found or disabled' });
     }
+    if ((decoded.sessionVersion || 0) !== user.sessionVersion) return res.status(401).json({ error: 'Session revoked. Sign in again.' });
 
-    const accessToken = signAccessToken(user.id, user.role.name);
+    const accessToken = signAccessToken(user.id, user.role.name, user.sessionVersion);
     if (fromCookie) {
       setSessionCookies(res, { accessToken });
       return res.json({ session: 'cookie', expiresIn: 900 });
@@ -394,10 +396,10 @@ router.post('/register', limiters.auth, validate(schemas.register), async (req, 
       include: { role: { include: { permissions: true } } },
     });
 
-    const token = signAccessToken(user.id, user.role.name);
+    const token = signAccessToken(user.id, user.role.name, user.sessionVersion);
     const { password: _, ...safeUser } = user;
     if (wantsCookieSession(req)) {
-      setSessionCookies(res, { accessToken: token, refreshToken: signRefreshToken(user.id).token });
+      setSessionCookies(res, { accessToken: token, refreshToken: signRefreshToken(user.id, user.sessionVersion).token });
       return res.status(201).json({ session: 'cookie', user: safeUser });
     }
     res.status(201).json({ token, user: safeUser });
@@ -582,6 +584,7 @@ router.post('/mfa/verify', limiters.auth, async (req, res, next) => {
       include: { role: { include: { permissions: true } } },
     });
     if (!user || !user.active) return res.status(403).json({ error: 'Account disabled' });
+    if ((decoded.sessionVersion || 0) !== user.sessionVersion) return res.status(401).json({ error: 'MFA challenge revoked. Sign in again.' });
 
     await prisma.mfaDevice.update({ where: { id: used.id }, data: { lastUsedAt: new Date() } });
     return issueSession(prisma, user, req, res, 'mfa');

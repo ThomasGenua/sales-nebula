@@ -12,7 +12,8 @@ const FEATURES = {
   },
   sso: {
     title: "Custom SSO providers",
-    description: "Sign-in through custom SAML or OpenID Connect (OIDC) providers is unavailable. Use password sign-in, with authenticator-app two-factor authentication if enabled.",
+    status: "Available with identity provider setup",
+    description: "SAML and OIDC sign-in and SCIM user provisioning are available. Configure your deployment and review the connection details in Sales Operations → Enterprise configuration. The legacy configuration records on this page do not activate sign-in.",
   },
   flows: {
     title: "Running flows",

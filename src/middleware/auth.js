@@ -102,16 +102,16 @@ function validatePassword(password) {
 }
 
 // ─── TOKEN GENERATION ───
-function signAccessToken(userId, role) {
-  return jwt.sign({ userId, role, type: 'access', jti: uuid() }, JWT_SECRET, {
+function signAccessToken(userId, role, sessionVersion = 0) {
+  return jwt.sign({ userId, role, sessionVersion, type: 'access', jti: uuid() }, JWT_SECRET, {
     expiresIn: JWT_ACCESS_EXPIRES,
   });
 }
 
-function signRefreshToken(userId) {
+function signRefreshToken(userId, sessionVersion = 0) {
   const jti = uuid();
   return {
-    token: jwt.sign({ userId, type: 'refresh', jti }, JWT_SECRET, { expiresIn: JWT_REFRESH_EXPIRES }),
+    token: jwt.sign({ userId, sessionVersion, type: 'refresh', jti }, JWT_SECRET, { expiresIn: JWT_REFRESH_EXPIRES }),
     jti,
   };
 }
@@ -378,6 +378,7 @@ async function authenticate(req, res, next) {
     const user = await loadUser(req, decoded.userId);
     if (!user) return res.status(401).json({ error: 'Account no longer exists' });
     if (!user.active) return res.status(403).json({ error: 'Account disabled' });
+    if ((decoded.sessionVersion || 0) !== user.sessionVersion) return res.status(401).json({ error: 'Session revoked. Sign in again.' });
     if (refusedToPortalAccount(req, res, user)) return;
     req.user = user;
     req.authenticatedBy = 'session';

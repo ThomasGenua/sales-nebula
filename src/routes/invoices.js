@@ -70,9 +70,9 @@ defineModule('invoices', 'invoice', {
   },
   beforeUpdate: async (data, { oldRecord,prisma,source }) => {
     if(data.currency!==undefined)data.currency=await require('../utils/currency').resolveDealCurrency(prisma,data.currency);
-    const next=invoiceAmounts(data,null,oldRecord),payments=await prisma.invoicePayment.count({where:{invoiceId:oldRecord.id}});
+    const next=invoiceAmounts(data,null,oldRecord),payments=await prisma.invoicePayment.count({where:{invoiceId:oldRecord.id}})+await prisma.invoiceAdjustment.count({where:{invoiceId:oldRecord.id}});
     if(payments&&['currency','total','totalAmount','subtotal','tax'].some(k=>next[k]!==undefined&&!sameValue(next[k],oldRecord[k])))throw Object.assign(new Error('Invoices with payments cannot change their currency or amounts; issue a replacement invoice'),{status:409});
-    if(source!=='payment reconciliation'&&next.status!==undefined&&next.status!==oldRecord.status&&(payments||['Paid','Partially Paid'].includes(next.status)))throw Object.assign(new Error('Payment status is maintained by payment reconciliation'),{status:409});
+    if(!['payment reconciliation','billing adjustment reconciliation'].includes(source)&&next.status!==undefined&&next.status!==oldRecord.status&&(payments||['Paid','Partially Paid','Disputed'].includes(next.status)))throw Object.assign(new Error('Payment status is maintained by payment reconciliation'),{status:409});
     return next;
   },
 });
@@ -177,7 +177,7 @@ router.put('/:id', requirePermission('invoices', 'edit'), async (req, res, next)
     // (services/recordWrites), its workflows and webhooks once both are in.
     const after = [];
     const invoice = await prisma.$transaction(async tx => {
-      if(lines&&await tx.invoicePayment.count({where:{invoiceId:current.id}}))throw Object.assign(new Error('Invoice items cannot change after payment'),{status:409});
+      if(lines&&(await tx.invoicePayment.count({where:{invoiceId:current.id}})+await tx.invoiceAdjustment.count({where:{invoiceId:current.id}})))throw Object.assign(new Error('Invoice items cannot change after payment'),{status:409});
       if (lines) await tx.invoiceItem.deleteMany({ where: { invoiceId: req.params.id } });
       return (await updateRecord(tx, 'invoices', current, invoiceAmounts(data, lines && lines.length ? lines : null, current), {
         userId: req.userId, emit: req.app.locals.emit, include, after, prisma, ...(lines && { nested: { items: { create: lines } } }),
@@ -228,14 +228,15 @@ router.get('/stats/summary', requirePermission('invoices', 'read'), async (req, 
     // out of outstanding. Overdue: owed and past due; a draft or cancelled
     // invoice is neither.
     const outstanding = invoices.filter(i => ['Sent', 'Overdue', 'Partially Paid'].includes(i.status));
-    const receipts=await prisma.invoicePayment.findMany({where:{invoiceId:{in:outstanding.map(i=>i.id)}},select:{invoiceId:true,amountMinor:true}});
-    const paidById=new Map();for(const p of receipts)paidById.set(p.invoiceId,(paidById.get(p.invoiceId)||0)+p.amountMinor/100);
+    const ids = invoices.map(i => i.id);
+    const [receipts, adjustments] = await Promise.all([prisma.invoicePayment.findMany({ where: { invoiceId: { in: ids } } }), prisma.invoiceAdjustment.findMany({ where: { invoiceId: { in: ids } } })]);
+    const balances = new Map(invoices.map(i => [i.id, require('../services/payments').summarize({ ...i, total: calcTotal(i) }, receipts.filter(p => p.invoiceId === i.id), adjustments.filter(a => a.invoiceId === i.id))]));
     const currency=await currencyContext(prisma);
     const paid = invoices.filter(i => i.status === 'Paid');
     const overdue = outstanding.filter(i => i.status === 'Overdue' || (i.dueDate && new Date(i.dueDate) < new Date()));
     res.json({
-      outstanding: { count: outstanding.length, total: outstanding.reduce((s, i) => s + currency.toBase(Math.max(0,calcTotal(i)-(paidById.get(i.id)||0)),i.currency), 0) },
-      paid: { count: paid.length, total: paid.reduce((s, i) => s + currency.toBase(calcTotal(i),i.currency), 0) },
+      outstanding: { count: outstanding.length, total: outstanding.reduce((s, i) => s + currency.toBase(balances.get(i.id).outstandingMinor / 100, i.currency), 0) },
+      paid: { count: paid.length, total: paid.reduce((s, i) => s + currency.toBase(balances.get(i.id).totalMinor / 100, i.currency), 0) },
       overdue: { count: overdue.length }, currency:currency.base,
     });
   } catch (err) { next(err); }
