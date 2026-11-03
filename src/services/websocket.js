@@ -110,6 +110,7 @@ function initWebSocket(server, prisma) {
         include: { role: { include: { permissions: true } } },
       });
       if (!user || !user.active) return next(new Error('Invalid token'));
+      if ((decoded.sessionVersion || 0) !== user.sessionVersion) return next(new Error('Session revoked'));
       // Customer portal accounts have nothing to follow here (see auth.js).
       if (user.isPortalUser) return next(new Error('Not available to portal accounts'));
       socket.user = user;
@@ -264,4 +265,5 @@ function getOnlineUsers() {
   return [...userSockets.keys()];
 }
 
-module.exports = { initWebSocket, emit, getOnlineUsers };
+function disconnectUser(userId) { io?.in(`user:${userId}`).disconnectSockets(true); }
+module.exports = { initWebSocket, emit, getOnlineUsers, disconnectUser };

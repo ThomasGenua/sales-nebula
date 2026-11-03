@@ -1,3 +1,4 @@
+import { BillingAdjustments } from './BillingAdjustments';
 import React, { useEffect, useState } from 'react';
 import { useAuth, can } from './contexts';
 import { Button, Input, Select, TextArea } from './Controls';
@@ -97,6 +98,7 @@ export function PaymentsWorkspace() {
             await load();
           })}>{data.remindersEnabled ? 'Disable' : 'Enable'} overdue reminders</Button></div><p className="text-xs">Enabling reminders authorizes a weekly email to the invoice contact while payment is overdue.</p></>}
     {data.lastReminderError && <Problem message={data.lastReminderError} />}<h3 className="font-semibold">Payment history</h3>{data.payments.length === 0 && <p>No payments recorded.</p>}{data.payments.map(p => <p key={p.id}>{dateLabel(p.createdAt)} · {money(p.amountMinor)} · {p.provider} · {p.reference}</p>)}
+    <BillingAdjustments invoiceId={id} data={data} editable={editable} onChanged={load} />
     <h3 className="font-semibold">Payment links</h3>{data.checkouts.map(c => <div key={c.id} className="flex gap-3 items-center"><span>{money(c.amountMinor)} · {c.status}</span>{c.url && <a className="underline" href={c.url} target="_blank" rel="noreferrer">Open Stripe checkout</a>}{editable && c.sessionId && c.status !== 'Paid' && <Button size="sm" variant="secondary" disabled={a.busy} onClick={() => a.run(async () => {
           await apiFetch('/payments/' + id + '/reconcile', {
             method: 'POST',

@@ -50,15 +50,14 @@ router.put('/sso/:id', authenticate, requirePermission('admin', 'full'), auditMi
  * could sign in as any user — including an administrator — by naming their
  * address, and with autoProvision could create accounts outright.
  *
- * Verifying an assertion properly needs a SAML or OIDC library and per-provider
- * certificate handling, neither of which is present. Until that exists this
- * refuses rather than pretending. The /sso config endpoints above still work,
- * so nothing an administrator has already set up is lost.
+ * Verified SAML/OIDC now use /api/enterprise/start/:provider and their one-use,
+ * browser-bound callbacks. This legacy direct-token contract remains disabled;
+ * the saved /sso configuration records do not activate the new sign-in flow.
  */
 router.post('/sso/login', async (req, res) => {
   res.status(501).json({
-    error: 'SSO sign-in is not implemented',
-    detail: 'This deployment cannot verify SAML assertions or OIDC tokens. Use password sign-in at /api/auth/login.',
+    error: 'Legacy direct-token SSO sign-in is disabled',
+    detail: 'Start verified enterprise sign-in at /api/enterprise/start/oidc or /api/enterprise/start/saml after configuring the identity provider.',
   });
 });
 

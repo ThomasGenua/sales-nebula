@@ -20,12 +20,21 @@ async function balance(db, invoice) {
       createdAt: 'asc'
     }
   });
-  const paidMinor = payments.reduce((n, p) => n + p.amountMinor, 0),
-    totalMinor = minor(invoice.total);
+  const adjustments = await db.invoiceAdjustment.findMany({ where: { invoiceId: invoice.id }, orderBy: { createdAt: 'asc' } });
+  return summarize(invoice, payments, adjustments);
+}
+function summarize(invoice, payments, adjustments) {
+  const sum = (kind, statuses) => adjustments.filter(a => a.kind === kind && statuses.includes(a.status)).reduce((n, a) => n + a.amountMinor, 0);
+  const grossPaidMinor = payments.reduce((n, p) => n + p.amountMinor, 0), originalTotalMinor = minor(invoice.total);
+  const creditNoteMinor = sum('CreditNote', ['Issued']), refundedMinor = sum('Refund', ['succeeded']), pendingRefundMinor = sum('Refund', ['Pending', 'pending', 'requires_action']);
+  const disputedMinor = sum('Dispute', ['needs_response', 'under_review']), lostDisputeMinor = sum('Dispute', ['lost']);
+  const paidMinor = payments.reduce((n, p) => n + Math.max(0, p.amountMinor - adjustments.filter(a => a.paymentId === p.id && ((a.kind === 'Refund' && a.status === 'succeeded') || (a.kind === 'Dispute' && ['needs_response', 'under_review', 'lost'].includes(a.status)))).reduce((v, a) => v + a.amountMinor, 0)), 0);
+  const totalMinor = Math.max(0, originalTotalMinor - creditNoteMinor);
   return {
     currency: invoice.currency,
     totalMinor,
     paidMinor,
+    originalTotalMinor, grossPaidMinor, creditNoteMinor, refundedMinor, pendingRefundMinor, disputedMinor, lostDisputeMinor, adjustments,
     outstandingMinor: Math.max(0, totalMinor - paidMinor),
     creditMinor: Math.max(0, paidMinor - totalMinor),
     payments
@@ -61,9 +70,10 @@ async function recordPayment(db, invoiceId, input, ctx = {}) {
             ...input
           }
         });
+        const settled = current.paidMinor + input.amountMinor >= current.totalMinor && !current.disputedMinor;
         await require('./recordWrites').updateRecord(tx, 'invoices', invoice, {
-          status: current.paidMinor + input.amountMinor >= current.totalMinor ? 'Paid' : 'Partially Paid',
-          paidDate: current.paidMinor + input.amountMinor >= current.totalMinor ? new Date() : null,
+          status: current.disputedMinor ? 'Disputed' : settled ? 'Paid' : 'Partially Paid',
+          paidDate: settled ? new Date() : null,
           payMethod: input.provider === 'stripe' ? 'Credit Card' : 'Manual'
         }, {
           ...ctx,
@@ -101,7 +111,7 @@ async function stripe(path, body, idempotency) {
     signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
-  if (!response.ok) fail(data.error?.message || 'Stripe request failed', 502);
+  if (!response.ok) throw Object.assign(new Error(data.error?.message || 'Stripe request failed'), { status: 502, providerStatus: response.status });
   return data;
 }
 async function checkout(db, invoice, userId, amount) {
@@ -110,6 +120,7 @@ async function checkout(db, invoice, userId, amount) {
   if (!currencies.includes(invoice.currency)) fail('Payment links currently support ' + currencies.join(', '));
   const b = await balance(db, invoice),
     amountMinor = amount == null ? b.outstandingMinor : minor(amount);
+  if (b.disputedMinor || b.pendingRefundMinor) fail('Resolve pending refunds and disputes before creating another payment link', 409);
   if (!amountMinor || amountMinor > b.outstandingMinor) fail('Choose an amount within the outstanding balance');
   const base = (process.env.FRONTEND_URL || '').split(',')[0];
   if (!/^https:\/\//.test(base) && process.env.NODE_ENV === 'production') fail('Configure an HTTPS FRONTEND_URL', 503);
@@ -169,14 +180,16 @@ async function reconcile(db, sessionId) {
     reference: session.id,
     amountMinor: row.amountMinor,
     currency: row.currency,
-    createdById: row.createdById
+    createdById: row.createdById,
+    ...(typeof session.payment_intent === 'string' && { paymentIntentId: session.payment_intent })
   });
   return db.paymentCheckout.update({
     where: {
       id: row.id
     },
     data: {
-      status: 'Paid'
+      status: 'Paid',
+      ...(typeof session.payment_intent === 'string' && { paymentIntentId: session.payment_intent })
     }
   });
 }
@@ -184,8 +197,10 @@ module.exports = {
   minor,
   currencies,
   balance,
+  summarize,
   recordPayment,
   checkout,
   verifyStripe,
-  reconcile
+  reconcile,
+  stripe
 };

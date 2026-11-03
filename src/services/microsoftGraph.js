@@ -78,7 +78,7 @@ function refreshAccessToken({ tenantId, clientId, clientSecret, refreshToken, sc
   });
 }
 
-async function graphFetch(path, { accessToken, method = 'GET', body, preferText = false, headers = {} } = {}) {
+async function graphFetch(path, { accessToken, method = 'GET', body, preferText = false, headers = {}, maxResponseBytes } = {}) {
   const res = await fetch(`${GRAPH}${path}`, {
     method,
     headers: {
@@ -88,6 +88,7 @@ async function graphFetch(path, { accessToken, method = 'GET', body, preferText 
       ...headers,
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (res.status === 204) return null;
@@ -100,7 +101,7 @@ async function graphFetch(path, { accessToken, method = 'GET', body, preferText 
       retryAfterSeconds: Number(res.headers?.get?.('retry-after')) || undefined,
     });
   }
-  return res.json().catch(() => null);
+  return maxResponseBytes ? require('../utils/boundedJson')(res, maxResponseBytes) : res.json().catch(() => null);
 }
 
 /** "/me" for a delegated token, "/users/{upn}" for an application one. */

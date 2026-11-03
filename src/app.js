@@ -133,13 +133,15 @@ function createApp(rawPrisma, options = {}) {
   app.post('/api/public/stripe/webhook', express.raw({type:'application/json',limit:'1mb'}), async(req,res,next)=>{
     try { const payments=require('./services/payments'),event=payments.verifyStripe(req.body,req.headers['stripe-signature']);
       if(['checkout.session.completed','checkout.session.async_payment_succeeded'].includes(event.type))await payments.reconcile(rawPrisma,event.data.object.id);
+      else if (event.type?.startsWith('refund.') || event.type?.startsWith('charge.dispute.')) await require('./services/billingAdjustments').webhook(rawPrisma, event);
       res.json({received:true});
     }catch(e){next(e);}
   });
   app.get('/api/public/payment-result', (req,res)=>res.set('Cache-Control','no-store').type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><title>Invoice payment</title><main><h1>Invoice payment</h1><p>'+ (req.query.status==='success'?'Your payment was submitted. The invoice balance updates after payment confirmation.':'Checkout was closed. You can return to your payment link to try again.') +'</p></main></html>'));
   app.post('/api/public/campaign-bounces',express.raw({type:'application/json',limit:'50kb'}),async(req,res,next)=>{try{if(!process.env.CAMPAIGN_BOUNCE_SECRET)return res.status(503).json({error:'Campaign bounce verification is not configured'});const event=require('./services/payments').verifyStripe(req.body,req.headers['x-campaign-signature'],process.env.CAMPAIGN_BOUNCE_SECRET);if(event.type!=='hard_bounce'||typeof event.deliveryId!=='string')return res.status(400).json({error:'Expected hard_bounce and deliveryId'});await require('./services/campaignDelivery').bounce(rawPrisma,event.deliveryId);res.json({received:true});}catch(e){next(e);}});
-  const jsonDefault = express.json({ limit: '1mb' });
+  const jsonDefault = express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] });
   const jsonLarger = [
+    ['/api/crm-migrations', express.json({ limit: '20mb' })],
     ['/api/documents', express.json({ limit: '10mb' })], // document uploads
     ['/api/ai', express.json({ limit: '2mb' })], // AI context (not /api/ai-agents)
   ];
@@ -207,6 +209,11 @@ function createApp(rawPrisma, options = {}) {
   app.use('/api/marketing', require('./routes/marketing'));
   app.use('/api/oauth', require('./routes/oauth'));
   app.use('/api/onboarding', require('./routes/onboarding'));
+  app.use('/api/crm-migrations', require('./routes/crmMigration'));
+  app.use('/api/meetings', require('./routes/meetings'));
+  app.use('/api/enterprise', require('./routes/enterpriseIdentity'));
+  app.use('/api/scim/v2', require('./routes/scim')(rawPrisma));
+  app.use('/api/public/mail-notifications', require('./routes/mailNotifications')(rawPrisma));
 
   // Public web-to-lead form submission (no auth required)
   app.post('/api/public/web-to-lead', async (req, res, next) => {

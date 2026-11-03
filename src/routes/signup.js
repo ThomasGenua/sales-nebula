@@ -605,7 +605,7 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
       }).catch(() => {});
     }
 
-    const accessToken = signAccessToken(user.id, user.role.name);
+    const accessToken = signAccessToken(user.id, user.role.name, user.sessionVersion);
     const { password: _pw, ...safeUser } = user;
 
     await sendWelcomeEmail({ to: user.email, firstName: user.firstName }).catch((err) => {
@@ -615,7 +615,7 @@ router.post('/invites/accept', verifyLimiter, async (req, res, next) => {
     // The browser signs straight in with a cookie session; other callers get
     // the token in the body, as before.
     if (wantsCookieSession(req)) {
-      setSessionCookies(res, { accessToken, refreshToken: signRefreshToken(user.id).token });
+      setSessionCookies(res, { accessToken, refreshToken: signRefreshToken(user.id, user.sessionVersion).token });
       return res.status(201).json({ session: 'cookie', user: safeUser });
     }
     res.status(201).json({ token: accessToken, user: safeUser });

@@ -5,6 +5,7 @@ const { auditMiddleware } = require('../middleware/audit');
 const { linkRefusal, reachableWhere } = require('../middleware/access');
 const { permits } = require('../middleware/auth');
 const graphMailbox = require('../services/graphMailbox');
+const completion = require('../services/mailboxCompletion');
 const { MAIL_SCOPES } = require('../services/microsoftGraph');
 const { acquireLease, releaseLease } = require('../utils/lease');
 const router = Router();
@@ -63,12 +64,45 @@ router.post('/connect', requirePermission('emails', 'edit'), async (req, res, ne
 });
 router.post('/accounts/:id/disconnect', requirePermission('emails', 'edit'), async (req, res, next) => {
   try { const a = await accountFor(req, res); if (!a) return;
+    await completion.disable(req.app.locals.prisma, a);
     await req.app.locals.prisma.inboundEmailAccount.update({ where: { id: a.id }, data: { oauthAccessToken: null, oauthRefreshToken: null, oauthExpiresAt: null, oauthStateHash: null, oauthStateExpiresAt: null, oauthStateCalendar: false, calendarEnabled: false, calendarCursor: null, calendarError: null, oauthScopes: null, status: 'Disabled', active: false } });
     res.json({ disconnected: true });
   } catch (e) { next(e); }
 });
 router.post('/accounts/:id/sync', requirePermission('emails', 'edit'), async (req, res, next) => {
   try { const a = await accountFor(req, res); if (!a) return; if (!a.active) return res.status(409).json({ error: 'Connect this mailbox before syncing.' }); res.json(await graphMailbox.pollAccount(req.app.locals.prisma, a)); } catch (e) { next(e); }
+});
+router.get('/accounts/:id/push', async (req, res, next) => {
+  try {
+    const account = await accountFor(req, res); if (!account) return;
+    const row = await req.app.locals.prisma.mailboxSubscription.findUnique({ where: { accountId: account.id } });
+    res.json({ configured: completion.configured(account.provider), enabled: !!row?.enabled, expiresAt: row?.expiresAt, lastNotifiedAt: row?.lastNotifiedAt, lastError: row?.lastError });
+  } catch (e) { next(e); }
+});
+router.post('/accounts/:id/push', requirePermission('emails', 'edit'), async (req, res, next) => {
+  try {
+    const account = await accountFor(req, res); if (!account) return;
+    if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ error: 'Choose whether live updates are enabled' });
+    res.json(await completion[req.body.enabled ? 'enable' : 'disable'](req.app.locals.prisma, account));
+  } catch (e) { next(e); }
+});
+router.get('/messages/:id/attachments', async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const message = await db.inboundEmailMessage.findFirst({ where: { ...messageWhere(req), id: req.params.id }, include: { account: true } });
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    res.set('Cache-Control', 'no-store').json({ data: await completion.attachments(db, message.account, message) });
+  } catch (e) { next(e); }
+});
+router.get('/messages/:id/attachments/:attachmentId', async (req, res, next) => {
+  try {
+    const db = req.app.locals.prisma;
+    const message = await db.inboundEmailMessage.findFirst({ where: { ...messageWhere(req), id: req.params.id }, include: { account: true } });
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    const file = await completion.download(db, message.account, message, req.params.attachmentId);
+    const name = String(file.name || 'attachment').replace(/[\r\n\x00-\x1f/\\]/g, '_').slice(0, 200);
+    res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name).replace(/'/g, '%27')}` }).type('application/octet-stream').send(file.bytes);
+  } catch (e) { next(e); }
 });
 
 async function visibleAssociations(req, rows) {
