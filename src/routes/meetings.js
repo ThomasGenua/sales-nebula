@@ -49,8 +49,8 @@ router.post('/:id/retry', requirePermission('activities', 'edit'), wrap(async (r
   if (!['Ready', 'Failed'].includes(job.status) || job.reviewedAt) return res.status(409).json({ error: 'This meeting cannot be reprocessed' });
   if (!job.fileKey && !req.meeting.transcription) return res.status(410).json({ error: 'The recording expired. Upload it again to retry.' });
   await service.checkLinks(req, req.meeting);
-  const updated = await db.meetingJob.updateMany({ where: { recordingId: req.meeting.id, status: job.status, reviewedAt: null }, data: { status: 'Queued', error: null } });
-  if (!updated.count) return res.status(409).json({ error: 'This meeting is already being processed' });
+  const updated = await db.meetingJob.updateMany({ where: { recordingId: req.meeting.id, status: job.status, fileKey: job.fileKey, reviewedAt: null }, data: { status: 'Queued', error: null } });
+  if (!updated.count) return res.status(409).json({ error: 'This meeting changed. Refresh it before retrying.' });
   res.json({ queued: true }); setImmediate(() => service.processJob(db, req.meeting.id).catch(() => {}));
 }));
 router.post('/:id/apply', requirePermission('activities', 'edit'), wrap(async (req, res) => res.json(await service.apply(req.app.locals.prisma, req, req.meeting, req.body))));

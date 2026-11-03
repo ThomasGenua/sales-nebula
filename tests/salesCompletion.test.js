@@ -86,6 +86,31 @@ test('meeting review protects later deal edits and isolates recordings by owner'
   expect((await post('/meetings', { title: 'No consent', transcript: 'Meeting transcript without consent' })).status).toBe(400);
 });
 
+test('recording expiry preserves a concurrently queued retry and removes abandoned audio', async () => {
+  const fs = require('node:fs/promises'), fileKey = crypto.randomUUID() + '.audio';
+  await fs.mkdir(meetings.directory(), { recursive: true });
+  await fs.writeFile(meetings.filePath(fileKey), 'recording fixture');
+  const recording = await prisma.callRecording.create({ data: { userId: user.id, title: 'Retry at expiry' } });
+  await prisma.meetingJob.create({ data: { recordingId: recording.id, userId: user.id, status: 'Failed', fileKey, consentAt: new Date(), createdAt: new Date(Date.now() - 25 * 3600000) } });
+  const findMany = prisma.meetingJob.findMany.bind(prisma.meetingJob);
+  const read = jest.spyOn(prisma.meetingJob, 'findMany').mockImplementation(async args => {
+    const rows = await findMany(args);
+    if (args.where.fileKey) await prisma.meetingJob.update({ where: { recordingId: recording.id }, data: { status: 'Queued' } });
+    return rows;
+  });
+  try {
+    await meetings.processDue(prisma);
+    expect((await prisma.meetingJob.findUnique({ where: { recordingId: recording.id } })).fileKey).toBe(fileKey);
+    expect(await fs.readFile(meetings.filePath(fileKey), 'utf8')).toBe('recording fixture');
+    read.mockRestore();
+    await prisma.meetingJob.update({ where: { recordingId: recording.id }, data: { status: 'Failed' } });
+    await meetings.processDue(prisma);
+    expect((await prisma.meetingJob.findUnique({ where: { recordingId: recording.id } })).fileKey).toBeNull();
+    await expect(fs.access(meetings.filePath(fileKey))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await post('/meetings/' + recording.id + '/retry')).status).toBe(410);
+  } finally { read.mockRestore(); await meetings.removeAudio(fileKey); }
+});
+
 test('credit notes are capped, idempotent, printable and protect invoice amounts', async () => {
   const inv = await invoice(), body = { requestId: crypto.randomUUID(), amount: 25, reason: 'Agreed price correction' };
   const first = await post('/payments/' + inv.id + '/credit-notes', body); expect(first.status).toBe(201);
